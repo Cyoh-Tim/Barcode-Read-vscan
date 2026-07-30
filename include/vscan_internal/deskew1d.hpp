@@ -27,6 +27,23 @@ namespace vscan {
 struct DeskewCandidate {
     Rect bbox;       // 원본 프레임 좌표계의 후보 영역 (패딩 없음)
     float coherence;  // 참고용 — 디버깅/튜닝에만 사용, 판정에는 안 씀
+
+    /*
+     * 후보 영역의 지배적 기울기 추정값(도). "이 각도만큼 되돌리면 막대가
+     * 축에 정렬된다"는 뜻이라, rotateAroundPoint()에 그대로 넘기면 된다.
+     *
+     * 구조텐서(jxx/jyy/jxy)는 후보 판정을 위해 어차피 계산하고 있었는데
+     * coherence만 쓰고 방향은 버리고 있었다 — atan2 한 번이면 나온다.
+     * 이걸 안 쓰던 시절에는 45/22.5/67.5/135도를 순차 시도해서 맞을 때까지
+     * 크롭+회전+디코드를 반복했고, 그 비용이 프레임당 평균 23.4ms
+     * (전체 디코드 시간의 21%)였다(§3.11).
+     *
+     * 값 범위는 (-45, 45]. 90도 배수 차이는 zxing의 TryRotate가 이미
+     * 처리하므로 그 안으로 접어서 준다.
+     * 추정이 불가능하면(코히런스가 낮으면) 0이 아니라 kAngleUnknown.
+     */
+    float angleDeg = 0.0f;
+    static constexpr float kAngleUnknown = 1e9f;
 };
 
 // 가장 강한(면적이 가장 큰) 후보 하나를 찾는다. 없으면 false.

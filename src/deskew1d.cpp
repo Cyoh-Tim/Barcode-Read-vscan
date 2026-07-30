@@ -50,6 +50,9 @@ struct TileStat {
     float coherence = 0.0f;
     float energy = 0.0f;
     bool candidate = false;
+    // 각도 추정용 구조텐서 원소. 후보 판정에 어차피 계산하는 값이라
+    // 따로 드는 비용이 없다 — 예전엔 coherence만 뽑고 버렸다.
+    float jxx = 0.0f, jyy = 0.0f, jxy = 0.0f;
 };
 
 } // namespace
@@ -102,6 +105,9 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
             size_t idx = static_cast<size_t>(ty) * tilesX + tx;
             tiles[idx].coherence = coherence;
             tiles[idx].energy = energy;
+            tiles[idx].jxx = jxx;
+            tiles[idx].jyy = jyy;
+            tiles[idx].jxy = jxy;
             energies.push_back(energy);
         }
     }
@@ -119,6 +125,9 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
     std::vector<int> visited(tiles.size(), 0);
     int bestArea = 0;
     int bestX0 = 0, bestY0 = 0, bestX1 = 0, bestY1 = 0;
+    // 최대 덩어리에 속한 타일들의 구조텐서 합 — 각도 추정에 쓴다.
+    // 텐서는 선형이라 그냥 더하면 영역 전체의 지배 방향이 나온다.
+    double bestJxx = 0, bestJyy = 0, bestJxy = 0;
     std::vector<int> stack;
     for (int ty = 0; ty < tilesY; ++ty) {
         for (int tx = 0; tx < tilesX; ++tx) {
@@ -128,11 +137,13 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
             stack.push_back(static_cast<int>(start));
             visited[start] = 1;
             int area = 0, minX = tx, maxX = tx, minY = ty, maxY = ty;
+            double sJxx = 0, sJyy = 0, sJxy = 0;
             while (!stack.empty()) {
                 int cur = stack.back();
                 stack.pop_back();
                 int cx = cur % tilesX, cy = cur / tilesX;
                 ++area;
+                sJxx += tiles[cur].jxx; sJyy += tiles[cur].jyy; sJxy += tiles[cur].jxy;
                 minX = std::min(minX, cx); maxX = std::max(maxX, cx);
                 minY = std::min(minY, cy); maxY = std::max(maxY, cy);
                 static const int dxs[4] = {1, -1, 0, 0};
@@ -150,6 +161,7 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
             if (area > bestArea) {
                 bestArea = area;
                 bestX0 = minX; bestY0 = minY; bestX1 = maxX + 1; bestY1 = maxY + 1;
+                bestJxx = sJxx; bestJyy = sJyy; bestJxy = sJxy;
             }
         }
     }
@@ -162,6 +174,27 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
     out.bbox.x1 = std::min(image.width, bestX1 * scale);
     out.bbox.y1 = std::min(image.height, bestY1 * scale);
     out.coherence = minCoherence; // 대표값(단일 스칼라 요구되는 인터페이스라 최소치만 기록)
+
+    // [각도 추정] 구조텐서의 지배 방향.
+    //   theta = 0.5 * atan2(2*jxy, jxx - jyy)
+    // 는 그래디언트가 가장 강한 방향인데, 바코드에서 그래디언트는 막대에
+    // **수직**이다. 따라서 theta가 곧 "막대가 기울어진 각"이고, 이미지를
+    // theta만큼 되돌리면 막대가 축에 정렬된다.
+    // 90도 배수 차이(막대가 수직이냐 수평이냐)는 zxing의 TryRotate가 이미
+    // 처리하므로 (-45, 45] 안으로 접는다.
+    const double denom = bestJxx - bestJyy;
+    const double coh = std::sqrt(denom * denom + 4.0 * bestJxy * bestJxy) /
+                       (bestJxx + bestJyy + 1e-6);
+    if (coh < 0.25) {
+        // 방향이 뚜렷하지 않으면(체커보드/텍스트 덩어리 등) 추정을 포기한다.
+        // 호출부가 기존 고정 각도 순회로 폴백한다.
+        out.angleDeg = DeskewCandidate::kAngleUnknown;
+    } else {
+        double theta = 0.5 * std::atan2(2.0 * bestJxy, denom) * 180.0 / 3.14159265358979323846;
+        while (theta > 45.0) theta -= 90.0;
+        while (theta <= -45.0) theta += 90.0;
+        out.angleDeg = static_cast<float>(theta);
+    }
     return true;
 }
 
