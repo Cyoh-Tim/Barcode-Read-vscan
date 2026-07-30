@@ -217,7 +217,23 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
     rescueCfg.enableDPMRescue = false;       // 회전 크롭엔 불필요, 비용만 낭비
     Pipeline rescuePipe(rescueCfg);
 
-    for (float ang : {45.0f, 135.0f}) {
+    // [회전 각도 목록 — 왜 45도만으로는 부족한가]
+    // zxing은 카디널 방향(0/90도) 기준 대략 ±20도까지 1D를 읽는다(§3.2.15).
+    // 그래서 45도로 한 번 돌리면 대략 25~65도 구간이 커버된다. 문제는 그
+    // **경계**다: 1도 간격 스윕(§3.9)에서 20~25도와 65~70도가 통째로 실패했다
+    // — 원본 각도로도 못 읽고(20도 > 허용범위), 45도 돌려도 못 읽는(20-45 =
+    // -25도, 역시 밖) 사각지대다. 두 밴드가 45도 대칭인 게 그 증거다.
+    //
+    // 22.5도와 67.5도를 추가하면 커버리지가 이어진다:
+    //   회전 없음 [0,20] + 22.5도 [2.5,42.5] + 45도 [25,65]
+    //   + 67.5도 [47.5,87.5] + (90도 근방은 zxing이 자체 처리) = 0~90도 전부
+    // 넓은 구간을 먼저 잡도록 45도부터 시도한다(대부분 여기서 끝난다).
+    // 135도는 45도와 90도 차이라 TryRotate가 이미 덮지만, 90도 부근 극단
+    // 케이스의 안전망으로 마지막에 남겨둔다.
+    // 비용은 "모든 단계가 실패한 프레임"에서만 발생하고, 성공하면 즉시
+    // 빠져나가므로 사각지대가 메워지는 만큼 오히려 시간이 회수된다.
+    // [[vscan-lite-1d-deskew-rescue]]
+    for (float ang : {45.0f, 22.5f, 67.5f, 135.0f}) {
         if (budgetExceeded()) break;
         GrayImage rotated;
         rotateAroundPoint(GrayView(crop), ang, pivotX, pivotY, rotated);
