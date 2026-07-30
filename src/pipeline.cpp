@@ -479,22 +479,80 @@ std::pair<double,double> centerOf(const DecodedSymbol& s) {
     for (auto& p : s.position) { cx += p.first; cy += p.second; }
     return {cx / 4.0, cy / 4.0};
 }
+
+// 심볼의 축 정렬 bounding box
+struct BBox { double x0, y0, x1, y1; };
+BBox bboxOf(const DecodedSymbol& s) {
+    BBox b{1e18, 1e18, -1e18, -1e18};
+    for (auto& p : s.position) {
+        b.x0 = std::min(b.x0, (double)p.first);  b.y0 = std::min(b.y0, (double)p.second);
+        b.x1 = std::max(b.x1, (double)p.first);  b.y1 = std::max(b.y1, (double)p.second);
+    }
+    return b;
+}
+double areaOf(const BBox& b) { return std::max(0.0, b.x1 - b.x0) * std::max(0.0, b.y1 - b.y0); }
+
+// 교집합 넓이 / 더 작은 쪽 넓이.
+// IoU가 아니라 "작은 쪽 기준"인 이유는 아래 dedup() 주석 참고.
+double containRatio(const BBox& a, const BBox& b) {
+    double ix = std::min(a.x1, b.x1) - std::max(a.x0, b.x0);
+    double iy = std::min(a.y1, b.y1) - std::max(a.y0, b.y0);
+    if (ix <= 0 || iy <= 0) return 0.0;
+    double small = std::min(areaOf(a), areaOf(b));
+    return small > 0 ? (ix * iy) / small : 0.0;
+}
 }
 
 std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
     // 겹치는 타일 경계에서 같은 코드가 두 번 검출될 수 있다.
-    // 같은 심볼로지 + 같은 텍스트 + 중심점이 가까우면(64px 이내) 하나만 남긴다.
+    // 같은 심볼로지 + 같은 텍스트 + (겹침이 크거나 중심점이 가까우면) 하나만 남긴다.
+    //
+    // [왜 중심점 거리만으로는 안 되는가 — 실측]
+    // 예전에는 "중심점 64px 이내"만 봤는데, **단일 코드 프레임에서도 15.5%가
+    // 중복 반환**됐다(대량 코퍼스, §3.9). 실제 좌표를 찍어보면 원인이 분명하다:
+    //
+    //   [0] "9IKE" (1410,640)-(1883,841)      <- 온전히 보인 타일
+    //   [1] "9IKE" (1410,768)-(1883,841)      <- 다음 타일에서 위가 잘린 같은 코드
+    //
+    // x범위는 완전히 같고 y범위만 타일 경계(768)에서 잘린다. 잘린 쪽은 세로
+    // 중심이 밀려서 중심점 거리가 64px를 넘어버린다(위 예는 정확히 64.0,
+    // 다른 예는 145px). 코드가 클수록 더 많이 밀리므로 고정 상수로는 원리적
+    // 으로 못 잡는다.
+    //
+    // [왜 IoU가 아니라 "작은 쪽 기준 겹침"인가]
+    // 잘린 조각은 원본 대비 면적이 작아서 IoU가 오히려 낮게 나온다
+    // (위 예 중 하나는 IoU 0.06). 반면 "교집합 / 작은 쪽 면적"은 1.0이다 —
+    // 한쪽이 다른 쪽에 포함되는 관계를 정확히 잡아낸다.
+    //
+    // 나란히 붙은 서로 다른 같은 내용 라벨(박스에 같은 라벨 2장)은 bbox가
+    // 겹치지 않으므로 병합되지 않는다.
+    //
+    // 남기는 쪽은 **면적이 큰 것**이다 — 잘린 조각보다 온전한 쪽의 꼭짓점
+    // 좌표가 정확하다.
+    // [[vscan-lite-dedup-clipped-tile]]
+    constexpr double kOverlapDup = 0.5;   // 작은 쪽의 절반 이상이 겹치면 같은 코드
+    constexpr double kCenterDup  = 64.0;  // 기존 규칙도 유지(작은 코드/회전 케이스)
+
     std::vector<PipelineResult> out;
     for (auto& cand : in) {
         auto candCenter = centerOf(cand.symbol);
+        auto candBox = bboxOf(cand.symbol);
         bool isDup = false;
         for (auto& kept : out) {
             if (kept.symbol.symbology != cand.symbol.symbology) continue;
             if (kept.symbol.text != cand.symbol.text) continue;
+
+            auto keptBox = bboxOf(kept.symbol);
             auto keptCenter = centerOf(kept.symbol);
             double dx = candCenter.first - keptCenter.first;
             double dy = candCenter.second - keptCenter.second;
-            if (std::sqrt(dx * dx + dy * dy) < 64.0) { isDup = true; break; }
+            bool near = std::sqrt(dx * dx + dy * dy) < kCenterDup;
+
+            if (near || containRatio(candBox, keptBox) >= kOverlapDup) {
+                isDup = true;
+                if (areaOf(candBox) > areaOf(keptBox)) kept = std::move(cand);
+                break;
+            }
         }
         if (!isDup) out.push_back(std::move(cand));
     }
