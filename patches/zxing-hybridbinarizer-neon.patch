@@ -1,0 +1,96 @@
+--- /tmp/HybridBinarizer.cpp.orig	2026-07-26 08:51:15.117296187 +0000
++++ third_party/zxing-cpp/core/src/HybridBinarizer.cpp	2026-07-29 02:23:32.958237250 +0000
+@@ -57,28 +57,59 @@
+ 		int yoffset = std::min(y * BLOCK_SIZE, height - BLOCK_SIZE);
+ 		for (int x = 0; x < subWidth; x++) {
+ 			int xoffset = std::min(x * BLOCK_SIZE, width - BLOCK_SIZE);
+-			int sum = 0;
+-			uint8_t min = luminances[yoffset * rowStride + xoffset];
+-			uint8_t max = min;
+-			for (int yy = 0, offset = yoffset * rowStride + xoffset; yy < BLOCK_SIZE; yy++, offset += rowStride) {
++			// [vscan-lite patch v2] v1(완전 무분기)은 이진화만 순수 격리 실측
++			// 시 깨끗한 이미지 -22~26%인데 고노이즈 이미지는 오히려 +27~50%
++			// 느려졌다 — 원본의 조기종료가 "국소 분산이 크면(=노이즈) 나머지
++			// 행을 합계만 계산"하는 실질적 스킵이었는데, v1이 이걸 완전히
++			// 없애서 노이즈 이미지에서 매번 min/max 갱신 비용을 다 치렀기
++			// 때문. 다양한 조명/노이즈 환경이 대상이라 이 역전이 걸린다.
++			//
++			// v2: 1행(8px)만 벡터화 친화적으로 먼저 보고 조기 판단한다.
++			//   - 1행의 범위가 이미 임계값을 넘으면(노이즈처럼 국소 분산이
++			//     큰 경우) -> 전체 블록도 반드시 그 이상이다(범위는 스캔할
++			//     수록 넓어지기만 하므로 이 판단은 항상 안전하다). 이 분기
++			//     에서는 min/max가 다운스트림에서 전혀 안 쓰이므로(아래
++			//     "저분산" 분기 안에서만 min 사용) 나머지 7행은 합계만
++			//     계산하면 된다 — 원본의 조기종료와 동일한 효과.
++			//   - 1행이 임계값 안이면(일반적인 저분산~보통 이미지) -> 8행
++			//     전체를 sum/min/max 계산한다(v1과 동일, 벡터화 잘 됨).
++			// 블록당 분기 1회뿐이라(픽셀당 분기였던 원본과 다름) 벡터화가
++			// 여전히 걸리면서, 노이즈 이미지의 조기종료 이득도 되살아난다.
++			// [[vscan-lite-binarizer-neon-v2]]
++			int sum = 0, mn, mx;
++			{
++				const uint8_t* __restrict row0 = luminances + yoffset * rowStride + xoffset;
++				int r0min = 255, r0max = 0;
+ 				for (int xx = 0; xx < BLOCK_SIZE; xx++) {
+-					auto pixel = luminances[offset + xx];
++					int pixel = row0[xx];
+ 					sum += pixel;
+-					if (pixel < min)
+-						min = pixel;
+-					if (pixel > max)
+-						max = pixel;
++					r0min = std::min(r0min, pixel);
++					r0max = std::max(r0max, pixel);
+ 				}
+-				// short-circuit min/max tests once dynamic range is met
+-				if (max - min > MIN_DYNAMIC_RANGE) {
+-					// finish the rest of the rows quickly
+-					for (yy++, offset += rowStride; yy < BLOCK_SIZE; yy++, offset += rowStride) {
++				if (r0max - r0min > MIN_DYNAMIC_RANGE) {
++					// 고분산 확정 - min/max는 이후 안 쓰이므로 판정만
++					// 통과시키는 안전한 값으로 채우고 합계만 마저 더한다.
++					for (int yy = 1; yy < BLOCK_SIZE; yy++) {
++						const uint8_t* __restrict rowPx = luminances + (yoffset + yy) * rowStride + xoffset;
++						for (int xx = 0; xx < BLOCK_SIZE; xx++) sum += rowPx[xx];
++					}
++					mn = 0;
++					mx = MIN_DYNAMIC_RANGE + 1;
++				} else {
++					mn = r0min;
++					mx = r0max;
++					for (int yy = 1; yy < BLOCK_SIZE; yy++) {
++						const uint8_t* __restrict rowPx = luminances + (yoffset + yy) * rowStride + xoffset;
+ 						for (int xx = 0; xx < BLOCK_SIZE; xx++) {
+-							sum += luminances[offset + xx];
++							int pixel = rowPx[xx];
++							sum += pixel;
++							mn = std::min(mn, pixel);
++							mx = std::max(mx, pixel);
+ 						}
+ 					}
+ 				}
+ 			}
++			int min = mn, max = mx;
+ 
+ 			// The default estimate is the average of the values in the block.
+ 			int average = sum / (BLOCK_SIZE * BLOCK_SIZE);
+@@ -119,12 +150,14 @@
+ static void ThresholdBlock(const uint8_t* __restrict luminances, int xoffset, int yoffset, int threshold, int rowStride,
+ 						   BitMatrix& matrix)
+ {
++	// [vscan-lite patch] 원본은 dst 포인터 형태 때문에 data ref 분석이
++	// 실패해 벡터화가 막혔다. __restrict 인덱스 루프로 바꾸면 8바이트
++	// 비교+마스크가 한 번에 벡터화된다(cmhs/and). 산출 값은 동일.
+ 	for (int y = yoffset; y < yoffset + BLOCK_SIZE; ++y) {
+-		auto* src = luminances + y * rowStride + xoffset;
+-		auto* const dstBegin = matrix.row(y).begin() + xoffset;
+-		// TODO: fix pixelStride > 1 case
+-		for (auto* dst = dstBegin; dst < dstBegin + BLOCK_SIZE; ++dst, ++src)
+-			*dst = (*src <= threshold) * BitMatrix::SET_V;
++		const uint8_t* __restrict src = luminances + y * rowStride + xoffset;
++		auto* __restrict dst = matrix.row(y).begin() + xoffset;
++		for (int i = 0; i < BLOCK_SIZE; ++i)
++			dst[i] = (src[i] <= threshold) * BitMatrix::SET_V;
+ 	}
+ }
+ 

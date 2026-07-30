@@ -1,0 +1,50 @@
+# Dockerfile.arm64-test — 윈도우 Docker Desktop에서 arm64(aarch64) 정확성 검증
+#
+# ⚠️ 용도를 정확히: Docker Desktop은 arm64 컨테이너를 QEMU로 에뮬레이션한다.
+#    따라서 여기서 나오는 "시간"은 전부 무의미하다 — 이 테스트는
+#    aarch64 바이너리의 **판독 정확성**(악조건 33종 검출률)만 검증한다.
+#    실제 성능은 i.MX8MP 보드에서 tools/bench_device를 돌려야 한다.
+#
+# 사용법 (PowerShell, 이 리포를 C:\Users\zxz15\Documents\barcode_m\vscan-lite-v2 에 풀었다고 가정):
+#
+#   cd C:\Users\zxz15\Documents\barcode_m\vscan-lite-v2
+#
+#   # (최초 1회) arm64 에뮬레이션 동작 확인 — "aarch64"가 나와야 함
+#   docker run --rm --platform linux/arm64 ubuntu:24.04 uname -m
+#
+#   # 이미지 빌드 (의존성만 설치, 소스는 실행 시 마운트)
+#   docker build --platform linux/arm64 -t vscan-arm64-test -f docker/Dockerfile.arm64-test .
+#
+#   # 테스트 실행 (소스 마운트 → 컨테이너 안에서 네이티브 aarch64 빌드+검증)
+#   docker run --rm --platform linux/arm64 `
+#     -v "C:\Users\zxz15\Documents\barcode_m\vscan-lite-v2:/work" `
+#     vscan-arm64-test
+#
+#   결과: 콘솔 출력 + C:\...\vscan-lite-v2\docker-out\ 에 로그/산출물 저장.
+#   기대값: 세 경로 모두 30/33 (PROJECT_NOTES §7의 기준선).
+#
+# 참고:
+# - 에뮬레이션이라 빌드가 느리다(zxing ~80파일, PC 사양 따라 10~30분).
+#   빌드는 컨테이너 내부 /tmp(네이티브 FS)에서 하므로 윈도우 마운트의
+#   느린 I/O는 피해간다. 재실행 시에도 이미지 캐시는 유지되지만 빌드는
+#   매번 새로 한다(소스가 바뀔 수 있으므로).
+# - ZBar는 이 테스트에서 OFF — configure 스크립트가 QEMU에서 극도로
+#   느리고, 검증 대상(zxing 경로 30/33)과 무관하다.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake ninja-build make file \
+        python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# 악조건 이미지 생성 스크립트 의존성 (arm64용 휠 존재, 설치 빠름)
+RUN pip3 install --break-system-packages --no-cache-dir qrcode pillow numpy
+
+WORKDIR /work
+
+# 윈도우에서 편집/체크아웃되며 줄끝이 CRLF로 바뀌어도 동작하도록,
+# 실행 전에 CR을 제거한 사본을 만들어 돌린다 (마운트된 원본은 건드리지 않음).
+CMD ["bash", "-c", "tr -d '\\r' < docker/run-tests.sh > /tmp/run.sh && bash /tmp/run.sh"]

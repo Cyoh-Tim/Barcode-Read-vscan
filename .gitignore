@@ -1,0 +1,33 @@
+# zbar(automake) 빌드
+third_party/zbar/**/*.o
+third_party/zbar/**/*.lo
+third_party/zbar/**/*.Plo
+third_party/zbar/**/*.Po
+third_party/zbar/**/.deps/
+third_party/zbar/**/.libs/
+third_party/zbar/autom4te.cache/
+third_party/zbar/config.log
+third_party/zbar/config.status
+third_party/zbar/libtool
+
+# 빌드 산출물 (CMake는 -B로 아무 이름이나 쓸 수 있어서 흔한 패턴 다 커버)
+build/
+build-*/
+
+# x86 사전빌드 산출물 (README §3.3 안내대로 로컬에서 매번 새로 빌드하면 됨)
+prebuilt/
+
+# Docker arm64 정확성 검증 결과 로그 (docker/run-tests.sh 실행 시 생성)
+docker-out/
+
+# 정확도 검증용 악조건 이미지 (tools/generate_stress_images.py로 매번 재생성 가능
+stress/
+
+# Python
+__pycache__/
+*.pyc
+
+# 에디터/OS
+.vscode/
+*.swp
+.DS_Store
