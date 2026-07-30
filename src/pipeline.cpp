@@ -174,6 +174,16 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
     if (budgetExceeded()) return hits;
 
+    // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
+    // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
+    // 가장 싸고, 실측상 가장 자주 걸린다(§3.14). [[vscan-lite-denoise-rescue]]
+    if (!cfg_.disableDenoiseRescue && !budgetExceeded()) {
+        GrayImage smoothed;
+        boxBlur3x3(image, smoothed);
+        auto dnHits = processViewCore(GrayView(smoothed));
+        if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
+    }
+
     // [DPM/점각인 구제] processViewCore()가 풀옵션으로도 빈손이면,
     // DPM(레이저 점각인) 코드일 가능성을 본다. 실물 비교 대상 리더기 대조
     // 검증까지 완료된 구제책 — §6.4 대화 참고. 위치 탐색이 필요

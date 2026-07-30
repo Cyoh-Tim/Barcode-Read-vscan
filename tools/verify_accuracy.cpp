@@ -201,6 +201,7 @@ static void usage(const char* argv0) {
         "  --max-frame-ms N 프레임 시간 예산(0=무제한). 폴백 꼬리를 자른다\n"
         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
+        "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
         "  --stdin          디렉토리 대신 stdin 스트림을 읽는다 (디스크 0). 아래 참고\n"
         "  --tag-sort n|i   태그표 정렬: name(스윕용) / imgs(기본, 이미지 수)\n"
@@ -217,7 +218,7 @@ int main(int argc, char** argv) {
     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
     int reps = 0, limit = 0, stride = 1, overlap = 500;
     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0;
+    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0;
 
     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -240,6 +241,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-frame-ms") maxFrameMs = atoi(next());
         else if (a == "--no-deskew") noDeskew = 1;
         else if (a == "--no-blank-skip") noBlankSkip = 1;
+        else if (a == "--no-denoise") noDenoise = 1;
         else if (a == "--dump-mismatch") dumpMismatch = 1;
         else if (a == "--stdin") stdinMode = 1;
         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
@@ -340,6 +342,7 @@ int main(int argc, char** argv) {
             cfg.max_frame_ms = maxFrameMs;
             cfg.disable_1d_deskew_rescue = noDeskew;
             cfg.disable_blank_frame_skip = noBlankSkip;
+            cfg.disable_denoise_rescue = noDenoise;
             // "아이템당 코드 개수를 아는 현장" 사용법: 빠른 경로가 이 개수를
             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.

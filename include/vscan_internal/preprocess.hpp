@@ -52,5 +52,18 @@ void rotateAroundPoint(const GrayView& src, float degrees, float pivotX, float p
 // 부작용 최소화 우선).
 void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& out);
 
+/*
+ * 3x3 박스 블러 (가로/세로 분리형).
+ *
+ * 용도는 하나다: **노이즈 구제 단계**. 센서 노이즈가 심하면 이진화가 무너져
+ * 코드가 통째로 안 읽히는데, 모듈 크기가 노이즈 상관거리보다 크면 살짝만
+ * 뭉개도 신호가 살아난다. 실측(모듈 4px, 노이즈 시그마 20~60 스윕):
+ * Code128 검출 23.8% -> 100%, QR 76.2% -> 100%.
+ *
+ * 분리형이라 픽셀당 덧셈 4회 수준이고, 자동 벡터화가 잘 걸리는 형태로
+ * 썼다(누적 변수 없이 인접 3픽셀 합 — [[vscan-lite-deskew-neon]]과 같은 이유).
+ */
+void boxBlur3x3(const GrayView& src, GrayImage& out);
+
 } // namespace vscan
 

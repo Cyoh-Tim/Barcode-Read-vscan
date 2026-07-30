@@ -247,6 +247,16 @@ typedef struct {
      * 바로 통과하므로 사실상 비용이 없다.
      */
     int disable_blank_frame_skip;
+
+    /*
+     * [노이즈 구제] 0 = 켜짐(기본), 1 = 끔.
+     * 모든 단계가 실패했을 때 3x3 박스 블러를 먹이고 한 번 더 본다.
+     * 노이즈가 심하면 이진화가 무너져 통째로 못 읽는데, 모듈이 노이즈보다
+     * 크면 살짝 뭉개는 것만으로 살아난다(실측: 노이즈 시그마 20~60 구간에서
+     * Code128 23.8% -> 100%, 게다가 평균 441ms -> 22ms로 더 빨라진다).
+     * 실패한 프레임에서만 도는 비용이다.
+     */
+    int disable_denoise_rescue;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

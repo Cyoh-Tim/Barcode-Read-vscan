@@ -1,6 +1,7 @@
 #include "vscan_internal/preprocess.hpp"
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include <stdexcept>
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
@@ -255,6 +256,40 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& 
     out.height = H;
     out.pixels.resize(static_cast<size_t>(W) * H);
     for (size_t i = 0; i < out.pixels.size(); ++i) out.pixels[i] = static_cast<uint8_t>(255 - closed[i]);
+}
+
+void boxBlur3x3(const GrayView& src, GrayImage& out) {
+    const int W = src.width, H = src.height;
+    const int stride = src.stride > 0 ? src.stride : W;
+    out.width = W;
+    out.height = H;
+    out.pixels.resize(static_cast<size_t>(W) * H);
+    if (W < 3 || H < 3) {
+        for (int y = 0; y < H; ++y)
+            std::memcpy(out.pixels.data() + static_cast<size_t>(y) * W,
+                        src.pixels + static_cast<size_t>(y) * stride, W);
+        return;
+    }
+
+    // 1패스: 가로 3탭 합 (16비트 중간 버퍼)
+    std::vector<uint16_t> tmp(static_cast<size_t>(W) * H);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
+        uint16_t* __restrict t = tmp.data() + static_cast<size_t>(y) * W;
+        t[0] = static_cast<uint16_t>(in[0] + in[0] + in[1]);
+        for (int x = 1; x < W - 1; ++x)
+            t[x] = static_cast<uint16_t>(in[x - 1] + in[x] + in[x + 1]);
+        t[W - 1] = static_cast<uint16_t>(in[W - 2] + in[W - 1] + in[W - 1]);
+    }
+    // 2패스: 세로 3탭 합 -> /9
+    for (int y = 0; y < H; ++y) {
+        const uint16_t* __restrict t0 = tmp.data() + static_cast<size_t>(y > 0 ? y - 1 : 0) * W;
+        const uint16_t* __restrict t1 = tmp.data() + static_cast<size_t>(y) * W;
+        const uint16_t* __restrict t2 = tmp.data() + static_cast<size_t>(y < H - 1 ? y + 1 : H - 1) * W;
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x)
+            o[x] = static_cast<uint8_t>((t0[x] + t1[x] + t2[x]) / 9);
+    }
 }
 
 } // namespace vscan
