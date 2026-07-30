@@ -34,6 +34,35 @@ bool Pipeline::budgetExceeded() const {
     return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
 }
 
+bool Pipeline::frameHasStructure(const GrayView& image) const {
+    // 축소본에서 블록별 (최대-최소)를 보고, 임계를 넘는 블록이 하나라도
+    // 있으면 true. 코드가 있는 프레임은 보통 첫 몇 블록에서 바로 걸리므로
+    // 조기 반환된다 — 진짜 빈 프레임에서만 전체를 훑는다.
+    if (cfg_.disableBlankFrameSkip) return true;
+    if (image.width < 64 || image.height < 64) return true;   // 너무 작으면 판단 안 함
+
+    const int stride = image.stride > 0 ? image.stride : image.width;
+    const int step = 4;                       // 4픽셀 건너뛰며 본다(1/16 샘플)
+    const int block = 32;                     // 블록 크기(원본 좌표 기준)
+    const int thresh = std::max(1, cfg_.blankFrameMinRange);
+
+    for (int by = 0; by + block <= image.height; by += block) {
+        for (int bx = 0; bx + block <= image.width; bx += block) {
+            int lo = 255, hi = 0;
+            for (int y = by; y < by + block; y += step) {
+                const uint8_t* __restrict row = image.pixels + static_cast<size_t>(y) * stride;
+                for (int x = bx; x < bx + block; x += step) {
+                    int v = row[x];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+            }
+            if (hi - lo >= thresh) return true;
+        }
+    }
+    return false;
+}
+
 void Pipeline::addDecoder(std::unique_ptr<IDecoder> decoder) {
     decoders_.push_back(std::move(decoder));
 }
@@ -135,6 +164,9 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
 
 std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     BudgetGuard budget(this);
+    // 코드가 물리적으로 존재할 수 없는 프레임(컨베이어 아이템 사이 등)은
+    // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
+    if (!frameHasStructure(image)) return {};
     auto hits = processViewCore(image);
     if (!hits.empty()) return hits;
 
@@ -268,6 +300,7 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
 std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image, int cropPadPx) {
     if (image.empty()) return {};
     BudgetGuard budget(this);
+    if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
 
     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
