@@ -181,6 +181,25 @@ struct PipelineConfig {
      */
     int disableDenoiseRescue = 0;
 
+    /*
+     * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+     *
+     * 심볼로지 마스크를 좁히면 zxing의 포맷별 탐색 비용이 그만큼 준다
+     * (§3.3 실측: 전체 포맷 대비 QR 단독 지정 시 약 2.5배). 문제는 배치마다
+     * 손으로 정해줘야 한다는 것 — 대부분의 현장은 그냥 기본값(전체)으로 쓴다.
+     *
+     * 켜면 파이프라인이 스스로 관찰한다: 연속 N프레임 동안 나온 심볼로지가
+     * 같은 집합 안에 머무르면 그 집합으로 마스크를 좁힌다. 좁힌 상태에서
+     * 아무것도 못 찾은 프레임이 나오면 **그 프레임에서 즉시 전체 마스크로
+     * 되돌려 다시 본다** — 새 심볼로지가 들어와도 놓치지 않는다.
+     *
+     * 워커당 파이프라인 인스턴스가 따로이므로 상태도 워커별로 독립이다.
+     */
+    int enableAdaptiveProfile = 0;
+    // 좁히기 전에 관찰할 연속 프레임 수. 너무 작으면 우연히 한 종류만 나온
+     // 구간에서 성급하게 좁힌다.
+    int adaptiveWarmupFrames = 10;
+
     int disableBlankFrameSkip = 0;
     // 블록 하나가 "구조가 있다"고 인정받는 최소 명암차(LSB). 노이즈 시그마의
     // 몇 배로 잡아야 안전하다 — 기본 24는 §3.9에서 측정한 대비 붕괴점
@@ -276,6 +295,15 @@ private:
     bool budgetExceeded() const;
     // 코드가 존재할 만한 국소 명암차가 프레임에 있는가(빈 프레임 조기 종료).
     bool frameHasStructure(const GrayView& image) const;
+
+    // 적응형 배치 프로파일 상태 (enableAdaptiveProfile)
+    uint32_t adaptiveObservedMask_ = 0;   // 관찰된 심볼로지 비트 합
+    uint32_t adaptiveBaseMask_ = 0;       // 원래 설정값(되돌릴 때 씀)
+    int adaptiveStreak_ = 0;              // 관찰 집합이 안 바뀐 연속 프레임 수
+    bool adaptiveNarrowed_ = false;
+    void adaptiveObserve(const std::vector<PipelineResult>& hits);
+    void adaptiveWiden();
+    void applyFormatMask(uint32_t mask);
 
     // coarse locate 적응형 스킵 상태
     int coarseMisses_ = 0;      // 연속 실패 횟수

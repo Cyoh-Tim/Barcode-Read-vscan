@@ -257,6 +257,16 @@ typedef struct {
      * 실패한 프레임에서만 도는 비용이다.
      */
     int disable_denoise_rescue;
+
+    /*
+     * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+     * 켜면 파이프라인이 연속 프레임에서 관찰된 심볼로지로 symbology_mask를
+     * 스스로 좁힌다(§3.3: 마스크를 좁히면 약 2.5배). 좁힌 상태에서 못 찾은
+     * 프레임이 나오면 즉시 전체 마스크로 되돌려 다시 보므로, 새 심볼로지가
+     * 들어와도 놓치지 않는다. 상태는 파이프라인 인스턴스별(=워커별)이다.
+     * symbology_mask를 이미 손으로 지정했다면 켤 이유가 없다.
+     */
+    int enable_adaptive_profile;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

@@ -202,6 +202,8 @@ static void usage(const char* argv0) {
         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
         "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
+        "  --adaptive       적응형 배치 프로파일 켜고 파이프라인을 프레임 간 재사용\n"
+        "                   (실제 워커 구조와 같은 조건. min_expected_codes=0 강제)\n"
         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
         "  --stdin          디렉토리 대신 stdin 스트림을 읽는다 (디스크 0). 아래 참고\n"
         "  --tag-sort n|i   태그표 정렬: name(스윕용) / imgs(기본, 이미지 수)\n"
@@ -218,7 +220,7 @@ int main(int argc, char** argv) {
     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
     int reps = 0, limit = 0, stride = 1, overlap = 500;
     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0;
+    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0;
 
     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -242,6 +244,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-deskew") noDeskew = 1;
         else if (a == "--no-blank-skip") noBlankSkip = 1;
         else if (a == "--no-denoise") noDenoise = 1;
+        else if (a == "--adaptive") { adaptive = 1; useMinExp = 0; }
         else if (a == "--dump-mismatch") dumpMismatch = 1;
         else if (a == "--stdin") stdinMode = 1;
         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
@@ -326,6 +329,26 @@ int main(int argc, char** argv) {
         printf("\n%s\n", std::string(lineW + 4 + NP * 21, '-').c_str());
     }
 
+    // --adaptive는 프레임 간 상태(관찰된 심볼로지)가 쌓여야 의미가 있으므로
+    // 실제 워커처럼 파이프라인을 재사용한다. 그 외 모드는 기존대로 이미지마다
+    // 새로 만든다(min_expected_codes가 이미지마다 다르기 때문).
+    std::vector<vscan_pipeline_t*> shared(NP, nullptr);
+    if (adaptive) {
+        for (int i = 0; i < NP; ++i) {
+            vscan_config_t c{};
+            c.tile_overlap_px = overlap;
+            c.fast_locate = paths[i].fast;
+            c.enable_dpm_rescue = dpmRescue;
+            c.max_frame_ms = maxFrameMs;
+            c.disable_1d_deskew_rescue = noDeskew;
+            c.disable_blank_frame_skip = noBlankSkip;
+            c.disable_denoise_rescue = noDenoise;
+            c.enable_adaptive_profile = 1;
+            c.min_expected_codes = 0;
+            shared[i] = vscan_create(&c);
+        }
+    }
+
     Gray g;
     size_t done = 0, total = files.size();
 
@@ -347,7 +370,7 @@ int main(int argc, char** argv) {
             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
             cfg.min_expected_codes = useMinExp ? expected : 0;
-            vscan_pipeline_t* p = vscan_create(&cfg);
+            vscan_pipeline_t* p = adaptive ? shared[i] : vscan_create(&cfg);
 
             double best = 1e9;
             size_t n = 0;
@@ -407,7 +430,7 @@ int main(int argc, char** argv) {
                 }
                 vscan_free_result(r);
             }
-            vscan_destroy(p);
+            if (!adaptive) vscan_destroy(p);
 
             bool ok = static_cast<int>(n) >= expected;
             st[i].add(ok, expected, static_cast<int>(n), textOk, bad, best, dups);
@@ -516,6 +539,7 @@ int main(int argc, char** argv) {
         total = done;
     }
     if (!verbose) fprintf(stderr, "\r%*s\r", 24, "");
+    for (auto* p : shared) if (p) vscan_destroy(p);
     if (csv) fclose(csv);
 
     // ---- 요약 (기존 포맷 유지: run-tests.sh가 이 줄을 grep한다)

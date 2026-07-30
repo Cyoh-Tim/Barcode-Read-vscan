@@ -34,6 +34,74 @@ bool Pipeline::budgetExceeded() const {
     return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
 }
 
+namespace {
+// Symbology -> VSCAN_FMT_* 비트. maskToFormats()(decoder_zxing.cpp)의 역방향.
+uint32_t symbologyBit(Symbology s) {
+    switch (s) {
+        case Symbology::QR:                 return 1u << 0;
+        case Symbology::MICRO_QR:           return 1u << 1;
+        case Symbology::DATA_MATRIX:
+        case Symbology::GS1_DATA_MATRIX:    return 1u << 2;
+        case Symbology::PDF417:
+        case Symbology::MICRO_PDF417:       return 1u << 3;
+        case Symbology::CODE39:
+        case Symbology::CODE39_FULL_ASCII:
+        case Symbology::TRIOPTIC_CODE39:    return 1u << 4;
+        case Symbology::CODE93:             return 1u << 5;
+        case Symbology::CODE128:
+        case Symbology::GS1_128:            return 1u << 6;
+        case Symbology::ITF:
+        case Symbology::INDUSTRIAL_2OF5:
+        case Symbology::COOP_2OF5:          return 1u << 7;
+        case Symbology::CODABAR:            return 1u << 8;
+        case Symbology::GS1_DATABAR:        return (1u << 9) | (1u << 10);
+        // EAN/UPC는 zxing이 네 포맷을 한 묶음으로 다룬다 — 하나만 봤다고
+        // 나머지를 끄면 같은 계열에서 놓칠 수 있으므로 통째로 켠다.
+        case Symbology::EAN_UPC:            return (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14);
+        default:                            return 0;
+    }
+}
+}
+
+void Pipeline::applyFormatMask(uint32_t mask) {
+    cfg_.formatMask = mask;                       // 하위 파이프라인이 상속받는다
+    for (auto& d : decoders_) d->setFormatMask(mask);
+}
+
+void Pipeline::adaptiveObserve(const std::vector<PipelineResult>& hits) {
+    if (!cfg_.enableAdaptiveProfile || hits.empty()) return;
+    uint32_t seen = 0;
+    for (const auto& r : hits) seen |= symbologyBit(r.symbol.symbology);
+    if (seen == 0) return;                        // 매핑 없는 심볼로지는 판단 보류
+
+    if (adaptiveNarrowed_) {
+        // 좁힌 상태에서 예상 밖 심볼로지가 나오면(있을 수 없지만 방어적으로)
+        // 즉시 넓힌다.
+        if (seen & ~adaptiveObservedMask_) adaptiveWiden();
+        return;
+    }
+    if (adaptiveObservedMask_ == 0 || seen == adaptiveObservedMask_) {
+        adaptiveObservedMask_ |= seen;
+        ++adaptiveStreak_;
+    } else {
+        // 집합이 바뀌었다 — 합집합으로 갱신하고 관찰을 다시 시작한다.
+        adaptiveObservedMask_ |= seen;
+        adaptiveStreak_ = 1;
+    }
+    if (adaptiveStreak_ >= std::max(1, cfg_.adaptiveWarmupFrames)) {
+        adaptiveBaseMask_ = cfg_.formatMask;
+        applyFormatMask(adaptiveObservedMask_);
+        adaptiveNarrowed_ = true;
+    }
+}
+
+void Pipeline::adaptiveWiden() {
+    if (!adaptiveNarrowed_) return;
+    applyFormatMask(adaptiveBaseMask_);
+    adaptiveNarrowed_ = false;
+    adaptiveStreak_ = 0;
+}
+
 bool Pipeline::frameHasStructure(const GrayView& image) const {
     // 축소본에서 블록별 (최대-최소)를 보고, 임계를 넘는 블록이 하나라도
     // 있으면 true. 코드가 있는 프레임은 보통 첫 몇 블록에서 바로 걸리므로
@@ -168,7 +236,15 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
     if (!frameHasStructure(image)) return {};
     auto hits = processViewCore(image);
-    if (!hits.empty()) return hits;
+    if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+
+    // 좁힌 마스크로 빈손이면 새 심볼로지일 수 있다 — 전체 마스크로 되돌려
+    // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
+    if (adaptiveNarrowed_) {
+        adaptiveWiden();
+        hits = processViewCore(image);
+        if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+    }
 
     // 여기부터는 구제 단계(DPM/1D 회전)다 — 실패 프레임에서만 도는,
     // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
@@ -377,7 +453,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
 
     Pipeline fast(fastCfg);
     auto hits = fast.processViewCore(image);
-    if ((int)hits.size() >= need) return hits;
+    if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
     // "부분 검출이라도 제때"가 "완벽하지만 늦음"보다 나은 배치를 위한 것 —
     // 기본값(maxFrameMs=0)에서는 이 검사가 전부 무효라 동작이 동일하다.

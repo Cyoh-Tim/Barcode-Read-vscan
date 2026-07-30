@@ -47,6 +47,9 @@ public:
     virtual ~IDecoder() = default;
     virtual std::vector<DecodedSymbol> decode(const GrayView& image) = 0;
     virtual std::string name() const = 0;
+    // 심볼로지 마스크를 런타임에 바꾼다(적응형 배치 프로파일용).
+    // 마스크 개념이 없는 디코더는 무시하면 된다.
+    virtual void setFormatMask(uint32_t) {}
 };
 
 } // namespace vscan

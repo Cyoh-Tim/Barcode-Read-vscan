@@ -32,6 +32,7 @@ public:
           tryCode39ExtendedMode_(tryCode39ExtendedMode), downscaleThreshold_(downscaleThreshold) {}
 
     std::vector<DecodedSymbol> decode(const GrayView& image) override;
+    void setFormatMask(uint32_t mask) override { formatMask_ = mask; }
     std::string name() const override { return "zxing-cpp"; }
 
 private:
