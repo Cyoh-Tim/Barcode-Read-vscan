@@ -245,14 +245,22 @@ int main(int argc, char** argv) {
     bool haveLabels = false;
     if (!stdinMode) {
         if (dir.empty()) { fprintf(stderr, "이미지 디렉토리가 필요합니다\n"); return 1; }
+        // 하위 폴더도 한 단계 훑는다. generate_corpus.py가 판독 가능성
+        // 버킷별로(ok/ borderline/ mixed/ impossible/) 나눠 떨어뜨리므로,
+        // 상위 폴더를 주면 전체, 'corpus/ok'를 주면 "읽혀야 정상인 것"만 채점된다.
         std::vector<std::string> all;
-        DIR* d = opendir(dir.c_str());
-        if (!d) { perror("opendir"); return 1; }
-        for (dirent* e; (e = readdir(d)); ) {
-            std::string n = e->d_name;
-            if (n.size() > 4 && n.substr(n.size() - 4) == ".pgm") all.push_back(n);
-        }
-        closedir(d);
+        auto scan = [&](const std::string& sub) {
+            DIR* d = opendir((sub.empty() ? dir : dir + "/" + sub).c_str());
+            if (!d) return;
+            for (dirent* e; (e = readdir(d)); ) {
+                std::string n = e->d_name;
+                if (n.size() > 4 && n.substr(n.size() - 4) == ".pgm")
+                    all.push_back(sub.empty() ? n : sub + "/" + n);
+            }
+            closedir(d);
+        };
+        scan("");
+        for (const char* b : {"ok", "borderline", "mixed", "impossible"}) scan(b);
         std::sort(all.begin(), all.end());
         for (size_t i = 0; i < all.size(); i += stride) {
             files.push_back(all[i]);
@@ -451,11 +459,13 @@ int main(int argc, char** argv) {
             if (!loadPGM(dir + "/" + fn, g)) { printf("%-*s LOAD FAIL\n", lineW, fn.c_str()); continue; }
             int expected = 1;
             const Label* lab = nullptr;
-            auto it = labels.find(fn);
+            size_t sl = fn.rfind('/');
+            std::string base = (sl == std::string::npos) ? fn : fn.substr(sl + 1);
+            auto it = labels.find(base);
             if (it != labels.end()) { lab = &it->second; expected = lab->expected; }
             else {
-                size_t u = fn.rfind('_');
-                if (u != std::string::npos) expected = atoi(fn.c_str() + u + 1);
+                size_t u = base.rfind('_');
+                if (u != std::string::npos) expected = atoi(base.c_str() + u + 1);
             }
             handle(fn, g, lab, expected);
         }
@@ -518,6 +528,36 @@ int main(int argc, char** argv) {
                s.mean(), s.quant(0.5), s.quant(0.95));
     }
     if (!useText && haveLabels) printf("(텍스트 대조 생략)\n");
+
+    // ---- 판독 가능성 버킷별: 이게 헤드라인 숫자다
+    // 난수 코퍼스에는 물리적으로 못 읽는 이미지가 섞인다. 그걸 포함한
+    // 전체 검출률은 "우리 성능"이 아니라 "우리 성능 + 물리 한계"의 혼합이다.
+    // dec-ok 행만 보면 개선 여지가 있는 부분의 진짜 성공률이 나온다.
+    {
+        const char* names[3] = {"dec-ok", "dec-borderline", "dec-impossible"};
+        // 라벨은 ASCII — 한글 폭 때문에 열이 어긋난다
+        const char* label[3] = {"ok  (읽혀야 정상)", "borderline (경계)", "impossible (난독)"};
+        bool any = false;
+        for (int b = 0; b < 3; ++b) if (byTag.count(names[b])) any = true;
+        if (any) {
+            printf("\n판독 가능성 버킷별 (코드 단위) — 물리적으로 읽을 수 있는가로 분류\n");
+            printf("%-18s %7s", "bucket", "codes");
+            for (auto& p : paths) printf(" | %-16s", p.name);
+            printf("\n%s\n", std::string(30 + NP * 19, '-').c_str());
+            for (int b = 0; b < 3; ++b) {
+                auto it2 = byTag.find(names[b]);
+                if (it2 == byTag.end()) continue;
+                printf("%-26s %7ld", label[b], it2->second[0].expected);
+                for (int i = 0; i < NP; ++i) {
+                    TagStat& t = it2->second[i];
+                    printf(" | %5.1f%% %8.2f", t.rate(), t.mean());
+                }
+                printf("\n");
+            }
+            printf("★ 개선 지표는 'ok' 행이다. 'impossible'은 실패가 정상이고,\n"
+                   "  100%%에 가까우면 오히려 분류 기준이 느슨하다는 뜻이다.\n");
+        }
+    }
 
     // ---- 조건 태그별 집계: "무엇이 느리고 무엇을 놓치는가"
     if (useTags && !byTag.empty()) {

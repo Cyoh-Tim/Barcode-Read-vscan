@@ -92,7 +92,6 @@ import time
 import numpy as np
 import qrcode
 import barcode as pybarcode
-from barcode.writer import ImageWriter
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # ----------------------------------------------------------------- 폰트
@@ -153,6 +152,42 @@ def _qr_img(payload, px, ec):
     return img.resize((px, px), Image.NEAREST), px / modules
 
 
+def _bits_to_image(bits, module_px, height_px, quiet=10):
+    """모듈 비트열('1'=검정 막대)을 **면적 샘플링**으로 렌더.
+
+    왜 python-barcode 이미지를 리사이즈하지 않는가:
+    미리 렌더된 2px/모듈 이미지를 정수배가 아닌 비율로 확대하면(NEAREST면
+    열 복제, BILINEAR면 번짐) **막대 폭 비율이 흐트러진다**. 1D 디코딩은 폭
+    비율로 문자를 판별하므로, 눈으로는 멀쩡한 바코드가 아예 안 읽힌다.
+    실측으로 module 2.2 / 3.6 / 4.0 / 4.8 처럼 특정 값에서만 검출률이 0%로
+    떨어지는 톱니 곡선이 나왔고, 코드만 잘라 단독 디코드해도 실패했다 —
+    라이브러리 문제가 아니라 **생성기가 만든 가짜 실패**였다.
+    모듈 폭이 스윕 축인 도구에서 이건 치명적이라, 비트열에서 직접 그린다.
+
+    출력 픽셀 하나가 덮는 모듈 구간의 평균값을 그대로 쓴다(= 카메라가 하는
+    일과 같은 면적 적분). 모듈 폭이 소수여도 경계 위치가 정확하고, 경계
+    픽셀만 중간 밝기가 된다.
+    """
+    pattern = "0" * quiet + bits + "0" * quiet          # 콰이어트존(흰색)
+    n = len(pattern)
+    white = np.array([0.0 if c == "1" else 1.0 for c in pattern], dtype=np.float64)
+    cum = np.concatenate([[0.0], np.cumsum(white)])     # 모듈 단위 적분값
+
+    w = max(60, int(round(n * module_px)))
+    edges = np.arange(w + 1, dtype=np.float64) / module_px   # 픽셀 경계 -> 모듈 좌표
+
+    def integral(t):
+        t = np.clip(t, 0.0, n)
+        i = np.floor(t).astype(np.int64)
+        frac = t - i
+        i_safe = np.clip(i, 0, n - 1)
+        return cum[np.minimum(i, n)] + frac * white[i_safe] * (i < n)
+
+    row = (integral(edges[1:]) - integral(edges[:-1])) * module_px
+    row = np.clip(row * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(np.tile(row, (max(24, int(height_px)), 1)), mode="L")
+
+
 def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
     """1D 심볼을 **모듈 폭 고정**으로 렌더 (폭은 데이터 길이에 따라 늘어난다).
 
@@ -162,22 +197,16 @@ def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
     있다(generate_stress_images.py의 code128() 주석, §3.2.15).
     실제 인쇄는 모듈 폭을 고정하고 라벨 폭이 넓어진다.
     """
-    buf = io.BytesIO()
-    obj = cls(payload, writer=ImageWriter(), **wopts)
-    obj.write(buf, options={"module_height": 20, "quiet_zone": 4,
-                            "font_size": 0, "write_text": False})
-    raw = Image.open(buf).convert("L")
-    native_modules = raw.width / 2.0          # ImageWriter 기본 모듈 폭 ≈ 2px
-    w = max(60, int(round(native_modules * module_px)))
-    # 높이는 **실제 렌더 폭** 기준으로 잡는다. 셀 폭 기준으로 잡으면 짧은
-    # 데이터일 때 거의 정사각형인 1D 코드가 나와서 현실과 안 맞는다.
+    obj = cls(payload, **wopts)
+    bits = obj.build()[0]
+    w = int(round((len(bits) + 20) * module_px))
     h = int(max(24, min(box_h, w * ratio)))
-    return raw.resize((w, h), Image.NEAREST), obj.get_fullcode()
+    return _bits_to_image(bits, module_px, h), obj.get_fullcode()
 
 
 _LINEAR = {
     "CODE128": (pybarcode.Code128, "CODE_128", {}),
-    "EAN13":   (pybarcode.EAN13,   "EAN_13",   {"no_checksum": False}),
+    "EAN13":   (pybarcode.EAN13,   "EAN_13",   {}),
     "CODE39":  (pybarcode.Code39,  "CODE_39",  {"add_checksum": False}),
     "ITF":     (pybarcode.ITF,     "ITF",      {}),
 }
@@ -200,7 +229,7 @@ def _linear_payload(kind, rng, n):
 
 
 def make_symbol(kind, rng, box_w, box_h, mod_range):
-    """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트)를 돌려준다.
+    """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트, 실제 모듈 픽셀크기).
 
     box_w/box_h = 배치 가능한 최대 크기. mod_range = 모듈 픽셀 크기 범위
     (난이도 프리셋에서 옴) — 이걸 먼저 정하고 거기서 코드 크기가 나온다.
@@ -230,7 +259,7 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
             n = max(4, n // 2)                        # 그래도 안 되면 데이터를 줄인다
         px = max(21, min(px, limit))
         img, real_mod = _qr_img(payload, px, ec)
-        return img, "QR_CODE", payload, [_mod_tag(real_mod)]
+        return img, "QR_CODE", payload, [_mod_tag(real_mod)], real_mod
 
     cls, symname, wopts = _LINEAR[kind]
     n = int(rng.integers(6, 20))
@@ -250,7 +279,7 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
             img = img.resize((int(box_w), img.height), Image.NEAREST)
             break
         n = max(4, n // 2)                            # 그래도 안 되면 데이터를 줄인다
-    return img, symname, full, [_mod_tag(mod_px)]
+    return img, symname, full, [_mod_tag(mod_px)], mod_px
 
 
 # ============================================================ 코드 단위 열화
@@ -266,17 +295,20 @@ def _to_dpm(arr, step=5):
     return dot
 
 
-def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
+def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
     """코드 이미지 자체에 걸리는 열화(대비/반전/DPM/인쇄불량/손상).
 
     프레임 전체가 아니라 코드별로 적용한다 — 한 프레임에 '깨끗한 코드 +
     망가진 코드'가 섞이는 상황(부분 검출 함정, §3.2.10)이 자연히 생긴다.
     """
     a = np.array(img).astype(np.float32)
+    if phys is None:
+        phys = {}
 
     if rng.random() < 0.28 * p_deg:                                   # 저대비
         ratio = float(np.interp(sev, [0, 1], [0.75, 0.07]))
         a = 128 + (a - 128) * ratio
+        phys["contrast"] = ratio
         tags.append("lowcontrast" + ("-strong" if ratio < 0.2 else ""))
 
     if rng.random() < 0.15 * p_deg:                                   # 흑백 반전
@@ -290,6 +322,7 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
 
     if allow_dpm and rng.random() < 0.10 * p_deg:                     # DPM 도트 각인
         a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8)).astype(np.float32)
+        phys["dpm"] = 1
         tags.append("dpm")
 
     if rng.random() < 0.14 * p_deg:                                   # 인쇄 불량(잉크 끊김)
@@ -313,7 +346,9 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
         if is_2d and rng.random() < 0.4 * sev + 0.1:
             cut = int(min(w, h) * float(np.interp(sev, [0, 1], [0.10, 0.30])))
             d.polygon([(w, h), (w - cut, h), (w, h - cut)], fill=200)
+            phys["cut"] = float(np.interp(sev, [0, 1], [0.10, 0.30]))
         a = np.array(im).astype(np.float32)
+        phys["damaged"] = 1
         tags.append("damaged")
 
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
@@ -354,6 +389,123 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
             k = cell_min / max(img.size)
             img = img.resize((max(20, int(img.width * k)), max(20, int(img.height * k))))
     return img, ang
+
+
+# ============================================================ 판독 가능성 분류
+#
+# 왜 이게 필요한가
+# ----------------
+# 난수로 조건을 뽑으면 **물리적으로 아무도 못 읽는 이미지**가 반드시 섞인다
+# (모듈이 1px, 대비가 노이즈보다 작음, 블러 시그마가 모듈보다 큼...).
+# 이걸 섞어놓고 "검출률 46%"라고 하면 그 숫자가 우리 라이브러리 성능인지
+# 물리 한계인지 알 수 없다 — 개선해도 숫자가 안 움직이니 판단이 불가능하다.
+#
+# 그래서 생성 레시피(정확한 수치를 우리가 알고 있다)로 코드마다
+#   ok         : 읽을 수 있어야 정상  <- **여기 성공률이 진짜 지표**
+#   borderline : 리더에 따라 갈리는 경계
+#   impossible : 원래 안 되는 게 맞음(난독). 실패해도 감점 아님
+# 을 매기고, 파일 모드에서는 **폴더까지 나눠서** 떨어뜨린다.
+#
+# 매우 중요한 선긋기
+# ------------------
+# 분류 기준은 **물리(신호가 남아있는가)** 뿐이다. "우리 zxing이 못 읽는
+# 조건"은 절대 impossible로 넣지 않는다. 예를 들어 20~30도 회전한 1D는
+# 현재 우리가 못 읽지만(§8) 상용 리더는 읽는다 — 이건 ok로 분류돼서
+# 실패로 잡혀야 한다. 그게 개선 대상이기 때문이다.
+# 라이브러리 한계를 impossible에 넣기 시작하면, 못 읽는 걸 못 읽는다고
+# 선언하는 것만으로 성공률이 올라가는 자기기만이 된다.
+
+BUCKETS = ("ok", "borderline", "impossible")
+
+
+def classify_code(mod_px, cphys, fphys):
+    """코드 하나의 판독 가능성. (버킷, 사유태그들) 반환.
+
+    판정은 전부 "신호 대 열화" 비교다. 상수의 근거는 각 항목 주석 참고.
+    """
+    reasons = []
+    worst = 0                                   # 0=ok 1=borderline 2=impossible
+
+    def mark(level, reason):
+        nonlocal worst
+        if level > worst:
+            worst = level
+        if level:
+            reasons.append(reason)
+
+    m = float(mod_px)
+    contrast = float(cphys.get("contrast", 1.0))
+    gain = float(fphys.get("gain", 1.0))
+    shadow = float(fphys.get("shadow", 1.0))
+    noise = float(fphys.get("noise", 3.0))
+    blur = float(fphys.get("blur", 0.6))
+    motion = float(fphys.get("motion", 0.0))
+    glare = float(fphys.get("glare", 0.0))
+
+    # 1) 모듈 크기 — 샘플링 한계. 모듈당 1픽셀 미만이면 정보가 사라진다.
+    #    2D 코드는 실무적으로 모듈당 2px는 있어야 안정적으로 읽힌다.
+    if m < 1.3:
+        mark(2, "x-module")
+    elif m < 2.0:
+        mark(1, "b-module")
+
+    # 2) 대비 대 노이즈 — 코드 진폭은 127*contrast, 여기에 노출/그림자가 곱해진다.
+    #    중요: 디코더는 모듈 하나를 m x m 픽셀로 보므로 노이즈가 그만큼
+    #    평균화된다(실효 시그마 ~ sigma/m). 이걸 빼먹으면 "큰 모듈 + 저대비"를
+    #    난독으로 잘못 분류한다 — 실제로는 잘 읽힌다.
+    amp = 127.0 * contrast * gain * shadow
+    noise_eff = noise / max(1.0, 0.8 * m)
+    if amp < 1.0 * noise_eff:
+        mark(2, "x-contrast")
+    elif amp < 2.5 * noise_eff:
+        mark(1, "b-contrast")
+
+    # 3) 노출 클리핑 — 밝은 쪽/어두운 쪽이 같은 값으로 뭉개지면 코드가 사라진다.
+    dark = (128.0 - 127.0 * contrast) * gain * shadow
+    bright = (128.0 + 127.0 * contrast) * gain * shadow + glare
+    if dark > 248.0 or bright < 8.0 or (bright - dark) < 6.0:
+        mark(2, "x-exposure")
+    elif dark > 235.0 or bright < 18.0:
+        mark(1, "b-exposure")
+
+    # 4) 블러 — 가우시안 시그마가 모듈 크기에 육박하면 인접 모듈이 섞인다.
+    #    (실측 보정: sigma > 0.75*module 이면 검출률 0%, > 0.45*module 부터 흔들린다)
+    if blur > 0.75 * m:
+        mark(2, "x-blur")
+    elif blur > 0.45 * m:
+        mark(1, "b-blur")
+
+    # 5) 모션 블러 — 이동 길이가 모듈 크기를 크게 넘으면 막대 구분이 사라진다.
+    #    다만 블러 **방향**이 막대와 나란하면 거의 손해가 없다(1D는 특히).
+    #    방향을 모른 채 판정하므로 임계값을 넉넉히 잡는다(실측: 2.5*m 기준은
+    #    17%가 읽혀서 난독 분류로 부적합했다).
+    if motion > 5.0 * m:
+        mark(2, "x-motion")
+    elif motion > 2.2 * m:
+        mark(1, "b-motion")
+
+    # 6) 물리적 결손 — 2D 모서리 결손이 30%에 가까우면 ECC 한계를 넘는다.
+    #    (QR ECC-H가 복원 가능한 최대가 약 30%, 실무 안전선은 25%)
+    if float(cphys.get("cut", 0.0)) > 0.26:
+        mark(2, "x-damage")
+
+    # 주의: 회전/DPM/콰이어트존 침범/클러터는 여기서 절대 impossible이 아니다.
+    # 물리적으로 정보는 남아있고, 상용 리더가 읽는 조건이다 — 우리가 못 읽으면
+    # 그건 개선 대상(§8)이지 난독이 아니다.
+    return BUCKETS[worst], reasons
+
+
+def image_bucket(code_buckets):
+    """이미지 단위 폴더 분류. 코드가 섞여 있으면 mixed."""
+    if not code_buckets:
+        return "empty"
+    if all(b == "impossible" for b in code_buckets):
+        return "impossible"
+    if all(b == "ok" for b in code_buckets):
+        return "ok"
+    if any(b == "impossible" for b in code_buckets):
+        return "mixed"
+    return "borderline"
 
 
 # ============================================================ 프레임 배경
@@ -436,13 +588,15 @@ def _cylinder_warp(a, strength):
     return a[:, x0] * (1 - frac) + a[:, x1] * frac
 
 
-def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes, phys=None):
     """프레임 전체에 걸리는 열화를 n_degrade개 골라 적용. 반환은 float32 배열.
 
     boxes = 배치된 코드들의 (x, y, w, h). 국소 열화(반사광/오염/콰이어트존
     침범)는 **코드 위에** 걸려야 의미가 있다 — 빈 배경에 뿌리면 난이도가
     올라가지 않아서 측정값이 그냥 희석된다.
     """
+    if phys is None:
+        phys = {}
     pool = ["defocus", "motion", "noise", "overexp", "underexp",
             "glare", "shadow", "dirty", "curved", "quietzone"]
     picks = list(rng.choice(pool, size=min(n_degrade, len(pool)), replace=False)) if n_degrade else []
@@ -476,6 +630,7 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
     if "defocus" in picks:
         r = float(np.interp(sev, [0, 1], [1.0, 6.5]))
         img = img.filter(ImageFilter.GaussianBlur(r))
+        phys["blur"] = r
         tags.append("defocus" + ("-strong" if r > 3.8 else ""))
         a = np.array(img).astype(np.float32)
     else:
@@ -484,11 +639,13 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
     if "motion" in picks:
         length = int(np.interp(sev, [0, 1], [7, 27]))
         a = _motion_blur(a, length, float(rng.uniform(0, 180)))
+        phys["motion"] = float(length)
         tags.append("motion" + ("-strong" if length > 17 else ""))
 
     if "curved" in picks:
         s = float(np.interp(sev, [0, 1], [0.15, 0.5]))
         a = _cylinder_warp(a, s)
+        phys["curve"] = s
         tags.append("curved")
 
     if "glare" in picks:
@@ -500,6 +657,7 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
             amp = float(np.interp(sev, [0, 1], [90, 215]))
             a = a + amp * np.exp(-(((xx - gx) ** 2) / (2 * sx ** 2) +
                                    ((yy - gy) ** 2) / (2 * sy ** 2)))
+            phys["glare"] = max(phys.get("glare", 0.0), amp)
         tags.append("glare")
 
     if "shadow" in picks:
@@ -509,20 +667,24 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
         band = np.array(Image.fromarray((band * 255).astype(np.uint8), mode="L")
                         .filter(ImageFilter.GaussianBlur(12))).astype(np.float32) / 255.0
         a = a * band
+        phys["shadow"] = float(np.interp(sev, [0, 1], [0.62, 0.28]))
         tags.append("shadow")
 
     if "overexp" in picks:
         g = float(np.interp(sev, [0, 1], [1.15, 1.7]))
         a = a * g
+        phys["gain"] = g
         tags.append("overexposed")
     elif "underexp" in picks:
         g = float(np.interp(sev, [0, 1], [0.55, 0.15]))
         a = a * g + rng.normal(0, 4, size=(h, w))
+        phys["gain"] = g
         tags.append("underexposed" + ("-strong" if g < 0.25 else ""))
 
     if "noise" in picks:
         s = float(np.interp(sev, [0, 1], [12, 58]))
         a = a + rng.normal(0, s, size=(h, w))
+        phys["noise"] = s
         tags.append("noise" + ("-strong" if s > 35 else ""))
 
     return a
@@ -571,11 +733,13 @@ def build_one(index, cfg):
             continue
         kind = str(rng.choice(kinds))
         try:
-            sym, symname, text, ctags = make_symbol(kind, rng, avail_w, avail_h, prof["mod"])
+            sym, symname, text, ctags, mod_px = make_symbol(kind, rng, avail_w, avail_h,
+                                                            prof["mod"])
         except Exception:
             continue
+        cphys = {}
         sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
-                             is_2d=(kind == "QR"), p_deg=prof["p_deg"])
+                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys)
         sym, ang = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
                                    p_rot=prof["p_rot"])
         px = cx0 + margin + int(rng.integers(0, max(1, avail_w - sym.width + 1)))
@@ -584,22 +748,32 @@ def build_one(index, cfg):
         tags.extend(ctags)
         codes.append({"symbology": symname, "text": text, "x": px, "y": py,
                       "w": sym.width, "h": sym.height, "rot": round(ang, 1),
-                      "tags": ctags})
+                      "tags": ctags, "module_px": round(mod_px, 2), "phys": cphys})
 
     nd = int(rng.integers(prof["n_degrade"][0], prof["n_degrade"][1] + 1))
     boxes = [(c["x"], c["y"], c["w"], c["h"]) for c in codes]
-    a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes)
+    fphys = {}
+    a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes, phys=fphys)
+
+    # 판독 가능성 분류 — 프레임 열화까지 정해진 뒤에야 판정할 수 있다
+    for c in codes:
+        b, reasons = classify_code(c["module_px"], c["phys"], fphys)
+        c["bucket"] = b
+        c["tags"] = c["tags"] + ["dec-" + b] + reasons
+    bucket = image_bucket([c["bucket"] for c in codes])
 
     # 태그 중복 제거(순서 유지) + 심볼로지 태그
     seen, utags = set(), []
-    for t in tags + sorted({"sym-" + c["symbology"] for c in codes}) + [f"n{len(codes)}"]:
+    for t in tags + sorted({"sym-" + c["symbology"] for c in codes}) \
+             + [f"n{len(codes)}", "img-" + bucket]:
         if t not in seen:
             seen.add(t); utags.append(t)
 
     name = f"c{index:06d}_{len(codes)}"
     rec = {"file": name + ("." + cfg["format"]), "index": index, "expected": len(codes),
-           "width": w, "height": h, "severity": round(sev, 3),
-           "difficulty": cfg["difficulty"], "tags": utags, "codes": codes}
+           "width": w, "height": h, "severity": round(sev, 3), "bucket": bucket,
+           "difficulty": cfg["difficulty"], "tags": utags, "codes": codes,
+           "frame_phys": {k2: round(v, 3) for k2, v in fphys.items()}}
     return name, np.clip(a, 0, 255).astype(np.uint8), rec
 
 
@@ -742,7 +916,9 @@ def build_sweep(index, combo, cfg):
         if cx0 is None:
             cx0 = (max(0, px) + sym.width / 2, max(0, py) + sym.height / 2)
         codes.append({"symbology": symname, "text": text, "x": max(0, px), "y": max(0, py),
-                      "w": sym.width, "h": sym.height, "rot": float(p["angle"]), "tags": []})
+                      "w": sym.width, "h": sym.height, "rot": float(p["angle"]),
+                      "tags": [], "module_px": round(eff_mod, 2),
+                      "phys": {"contrast": float(p["contrast"])}})
 
     if p["blur"]:
         img = img.filter(ImageFilter.GaussianBlur(float(p["blur"])))
@@ -767,15 +943,27 @@ def build_sweep(index, combo, cfg):
     if p["noise"]:
         arr = arr + rng.normal(0, float(p["noise"]), size=(h, w))
 
+    fphys = {"blur": float(p["blur"]), "motion": float(p["motion"]),
+             "noise": float(p["noise"]), "gain": float(p["bright"]),
+             "shadow": float(p["shadow"]), "glare": float(p["glare"]),
+             "curve": float(p["curve"])}
+    for c in codes:
+        b, reasons = classify_code(c["module_px"], c["phys"], fphys)
+        c["bucket"] = b
+        c["tags"] = c["tags"] + ["dec-" + b] + reasons
+    bucket = image_bucket([c["bucket"] for c in codes])
+
     tags = [f"{ax}={_fmt_val(v)}" for ax, v in sorted(combo.items())]
     tags.append("sym-" + codes[0]["symbology"])
+    tags.append("img-" + bucket)
     name = "sw" + "".join(f"_{ax}-{_fmt_val(v)}" for ax, v in sorted(combo.items())) \
            + f"_{len(codes)}"
     params = {k2: _fmt_val(v) for k2, v in p.items()}
     params["module_effective"] = f"{eff_mod:.2f}"   # 셀에 안 들어가 클램프됐을 수 있다
     rec = {"file": name + "." + cfg["format"], "index": index, "expected": len(codes),
            "width": w, "height": h, "severity": 0.0, "difficulty": "sweep",
-           "tags": tags, "params": params, "codes": codes}
+           "bucket": bucket, "tags": tags, "params": params, "codes": codes,
+           "frame_phys": fphys}
     return name, np.clip(arr, 0, 255).astype(np.uint8), rec
 
 
@@ -830,7 +1018,14 @@ def _build(index):
 def _work_file(index):
     try:
         name, arr, rec = _build(index)
-        write_image(_CFG["outdir"], name, arr, _CFG["format"])
+        # 버킷별 하위 폴더로 나눠 떨어뜨린다. verify_accuracy는 디렉토리 하나를
+        # 받으므로, 폴더가 나뉘어 있으면 "읽을 수 있어야 하는 것만" 골라
+        # 채점하는 게 그냥 경로 하나 바꾸는 일이 된다.
+        if _CFG["buckets"] and rec["bucket"] not in _CFG["buckets"]:
+            return {"index": index, "skipped": True}
+        sub = os.path.join(_CFG["outdir"], rec["bucket"])
+        os.makedirs(sub, exist_ok=True)
+        write_image(sub, name, arr, _CFG["format"])
         return rec
     except Exception as e:                      # 한 장 실패로 전체를 죽이지 않는다
         return {"index": index, "error": f"{type(e).__name__}: {e}"}
@@ -840,6 +1035,8 @@ def _work_stream(index):
     """스트리밍용: 파일을 안 쓰고 (헤더, 원본바이트)를 부모로 돌려준다."""
     try:
         name, arr, rec = _build(index)
+        if _CFG["buckets"] and rec["bucket"] not in _CFG["buckets"]:
+            return b"", b"", 0                 # 필터로 걸러진 프레임
         hdr = "\t".join([STREAM_MAGIC, str(rec["width"]), str(rec["height"]), name,
                          str(rec["expected"]), ",".join(rec["tags"]),
                          "|".join(c["text"] for c in rec["codes"]),
@@ -923,6 +1120,9 @@ def main():
                          "받는 쪽: ./verify_accuracy --stdin")
     ap.add_argument("--max-disk-gb", type=float, default=20.0,
                     help="파일 모드 용량 상한(GB). 예상치가 넘으면 시작하지 않는다")
+    ap.add_argument("--bucket", default="", metavar="ok|borderline|mixed|impossible",
+                    help="이 버킷만 내보낸다(쉼표로 여러 개). 스트리밍에서 "
+                         "'읽을 수 있어야 하는 것'만 채점할 때 --bucket ok")
     ap.add_argument("--jobs", type=int, default=0, help="0=CPU 수")
     ap.add_argument("--est", action="store_true", help="생성 없이 개수/용량/시간만 추정")
     a = ap.parse_args()
@@ -981,6 +1181,7 @@ def main():
     cfg = {"seed": a.seed, "width": a.width, "height": a.height, "outdir": a.outdir,
            "difficulty": a.difficulty, "max_codes": a.max_codes, "format": a.format,
            "base": base,
+           "buckets": {b.strip() for b in a.bucket.split(",") if b.strip()},
            "symbologies": [s.strip().upper() for s in a.symbologies.split(",") if s.strip()]}
 
     log = sys.stderr                    # 스트리밍 중에는 stdout이 프레임 전용이다
@@ -1013,7 +1214,7 @@ def main():
                         if hdr is None:
                             errs += 1
                             print(f"  !! {exp}: {payload.decode()}", file=log)
-                        else:
+                        elif hdr:
                             out.write(hdr); out.write(payload)
                             ncodes += exp
                         progress(done)
@@ -1024,7 +1225,7 @@ def main():
                         if "error" in rec:
                             errs += 1
                             print(f"  !! {rec['index']}: {rec['error']}", file=log)
-                        else:
+                        elif not rec.get("skipped"):
                             recs.append(rec)
                         progress(done)
     else:
@@ -1034,13 +1235,13 @@ def main():
                 hdr, payload, exp = _work_stream(ix)
                 if hdr is None:
                     errs += 1
-                else:
+                elif hdr:
                     out.write(hdr); out.write(payload); ncodes += exp
             else:
                 rec = _work_file(ix)
                 if "error" in rec:
                     errs += 1
-                else:
+                elif not rec.get("skipped"):
                     recs.append(rec)
             progress(i)
         if a.stream:
@@ -1048,8 +1249,15 @@ def main():
 
     if not a.stream:
         recs.sort(key=lambda r: r["index"])
-        write_labels(a.outdir, recs)
+        by_bucket = {}
+        for r in recs:
+            by_bucket.setdefault(r["bucket"], []).append(r)
+        for b, rs in by_bucket.items():
+            write_labels(os.path.join(a.outdir, b), rs)
+        write_labels(a.outdir, recs)          # 전체 합본(원하면 통으로 채점)
         ncodes = sum(r["expected"] for r in recs)
+        print(">> 버킷별: " + ", ".join(
+            f"{b}/ {len(rs)}장" for b, rs in sorted(by_bucket.items())), file=log)
     n_done = len(idxs) - errs
     print(f">> 완료: {n_done}장 / 코드 {ncodes}개 / {time.time() - t0:.0f}s"
           + (f" / 실패 {errs}장" if errs else ""), file=log)
