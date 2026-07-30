@@ -205,6 +205,11 @@ python3 tools/generate_corpus.py --sweep angle:0:359:1 --sweep noise:0:50:2 --es
 python3 tools/generate_corpus.py -o ./corpus -n 2000 --max-disk-gb 10
 ```
 
+**심볼로지 14종 전부** 생성한다: QR, DataMatrix, PDF417, Code128, Code39,
+Code93, EAN-13, EAN-8, UPC-A, UPC-E, ITF, Codabar, DataBar, DataBar Expanded.
+(추가 의존성 `pip install pdf417gen ppf-datamatrix treepoem` + `ghostscript` —
+없으면 그 심볼로지만 빠진다. 심볼로지별 판독 특성은 PROJECT_NOTES §3.15)
+
 스윕 축: `angle module contrast bright blur motion noise persp curve glare
 shadow count sym ec` (`--sweep AXIS:START:STOP:STEP` 또는 `AXIS:v1,v2,v3`,
 나머지 축은 `--base k=v,k=v`로 고정). 스윕은 **결정적**이다 — 지정한 축
