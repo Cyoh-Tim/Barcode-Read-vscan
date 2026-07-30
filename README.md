@@ -60,8 +60,9 @@ src/                     구현 (pipeline.cpp가 핵심 오케스트레이션)
 third_party/             zxing-cpp, zbar 벤더링 (오프라인 빌드용, 네트워크 불필요)
 examples/                decode_image, decode_rois, decode_workers 사용 예제
 tools/
-  generate_stress_images.py   악조건 40종 테스트 이미지 생성 (§4 참고)
-  verify_accuracy.cpp         정확도 회귀 테스트 하네스
+  generate_stress_images.py   악조건 40종 테스트 이미지 생성 — 회귀 게이트 (§4)
+  generate_corpus.py          대량 코퍼스/파라미터 스윕 생성 (수만~수십만 장, §4.2)
+  verify_accuracy.cpp         정확도 회귀 테스트 하네스 (40종 + 대량 코퍼스 겸용)
   bench_device.cpp            실기 캘리브레이션 벤치 (§6)
 docker/                  Windows에서 aarch64 정확성 검증 (§5)
 build-aarch64.sh          Yocto SDK 기반 크로스 빌드 스크립트
@@ -145,6 +146,65 @@ image                              exp | full               | 2stage            
 ...
 검출 성공 / 전체                 | 37/40      1155.0ms | 37/40       638.2ms | 37/40       593.8ms
 ```
+
+### 4.2 대량 코퍼스 / 파라미터 스윕 (튜닝용)
+
+40종은 **회귀 게이트**다(통과/실패). 성능이나 검출률을 실제로 개선할 때는
+표본이 40장뿐이라 부족하다 — 조건당 이미지 1장이라 개선인지 우연인지
+구분이 안 되고, 조건 조합이 없고, 40장에 과적합된다.
+`tools/generate_corpus.py`가 이걸 채운다.
+
+**중요 — 용량**: 2048×1536 PGM 한 장이 3.1MB다. 1도 간격 회전 360장 ×
+대비 50단계면 18,000장 = **56GB**. 축을 더 걸면 수십만 장 = 수백 GB로
+디스크가 그냥 찬다. 그래서 기본 사용법은 파일 저장이 아니라 **스트리밍**이다
+— 프레임을 만들어 파이프로 바로 디코더에 먹이고 버린다(**디스크 0**).
+
+```bash
+# (a) 파라미터 스윕: 1도 간격 360장을 디스크에 한 장도 안 남기고 측정
+python3 tools/generate_corpus.py --sweep angle:0:359:1 --stream \
+  | ./verify_accuracy --stdin --paths 2stage
+
+# (b) 축 2개 곱하기 (대비 x 모듈 크기 = 20 x 27 = 540장)
+python3 tools/generate_corpus.py --stream \
+    --sweep contrast:0.05:1.0:0.05 --sweep module:1.5:8:0.25 --base sym=CODE128 \
+  | ./verify_accuracy --stdin
+
+# (c) 난수 코퍼스 A/B — 변경 전/후에 같은 --seed 로 두 번 돌려 CSV 비교
+python3 tools/generate_corpus.py -n 5000 --difficulty mixed --stream \
+  | ./verify_accuracy --stdin --csv before.csv
+
+# (d) 용량/시간 미리보기 (아무것도 안 만든다)
+python3 tools/generate_corpus.py --sweep angle:0:359:1 --sweep noise:0:50:2 --est
+
+# (e) 정말 파일로 남겨야 할 때만 (용량 상한이 걸려 있다 — 넘으면 시작조차 안 함)
+python3 tools/generate_corpus.py -o ./corpus -n 2000 --max-disk-gb 10
+```
+
+스윕 축: `angle module contrast bright blur motion noise persp curve glare
+shadow count sym ec` (`--sweep AXIS:START:STOP:STEP` 또는 `AXIS:v1,v2,v3`,
+나머지 축은 `--base k=v,k=v`로 고정). 스윕은 **결정적**이다 — 지정한 축
+외에는 난수 열화가 전혀 안 들어가서, 차이가 그 축 때문이라고 말할 수 있다.
+
+`verify_accuracy`는 정답(코드 개수/텍스트/조건 태그)을 프레임 헤더나
+`labels.tsv`에서 읽어서 이렇게 보여준다:
+
+```
+path           img_pass         codes   text_ok  misdec    dup   mean_ms  p50_ms  p95_ms
+2stage            78.3%    340/374        80.2%       0     40     44.36   24.07  108.07
+
+조건 태그별 (코드 단위 검출률 % / 이미지당 평균 ms)
+angle=19                    1 | 100.0%    53.74
+angle=20                    1 |   0.0%   114.20      <- 여기서 끊긴다
+```
+
+- **코드 단위** 검출률(이미지 합격/불합격보다 해상도가 높다)
+- 디코딩 **텍스트 정답 대조** — 개수만 세면 안 보이는 오디코딩(`misdec`)과
+  같은 코드 중복 반환(`dup`)을 분리해서 센다
+- **조건 태그별 집계** — 무엇이 느리고 어디서 끊기는지가 축 단위로 보인다
+
+대량 코퍼스에는 물리적으로 못 읽는 이미지가 섞이므로 **절대 검출률의
+목표치는 의미가 없다.** 항상 같은 `--seed`로 만든 같은 코퍼스에 대해
+변경 전/후를 비교할 것. (자세한 배경은 PROJECT_NOTES §3.5)
 
 ---
 

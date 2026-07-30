@@ -1,0 +1,1062 @@
+#!/usr/bin/env python3
+"""
+generate_corpus.py — 악조건 **대량 코퍼스** 생성기 (수백~수만 장).
+
+## 이게 왜 따로 있나
+
+`generate_stress_images.py`는 손으로 고른 **40종 고정 셋**이다. 회귀 게이트
+(세 경로 모두 37/40, PROJECT_NOTES §7)라서 바이트 단위로 재현돼야 하고,
+그래서 손대지 않는다. 반면 성능/정확도 튜닝을 할 때 40장은 표본이 너무
+작다:
+
+- 조건 하나에 이미지 1장 -> "노이즈에서 3ms 빨라졌다"가 실제 개선인지
+  그 한 장의 우연인지 구분이 안 된다.
+- 조건 조합(블러+저대비+회전 동시)이 거의 없다. 현장은 조합이 기본이다.
+- 40장에 맞춰 튜닝하면 그 40장에 과적합된다. 실제로 있었던 일:
+  1D 회전 케이스가 없어서 "회전은 잘 된다"고 잘못 결론냈다(§3.2.15).
+
+이 스크립트는 조건 축(심볼로지 / 개수 / 크기 / 블러 / 노이즈 / 노출 /
+대비 / 회전 / 원근 / 곡면 / 반사 / 그림자 / 오염 / 손상 / 인쇄불량 /
+DPM / 콰이어트존 / 클러터)을 **난수로 조합**해서 원하는 만큼 뽑는다.
+각 이미지의 정답(코드 개수 + 각 코드의 심볼로지/텍스트/위치)과 적용된
+조건 태그를 `labels.tsv`에 같이 쓴다. `verify_accuracy`가 이 파일을 읽어
+**조건 축별 검출률/시간**을 집계한다 — "무엇이 느린가/무엇을 놓치는가"를
+축 단위로 볼 수 있다는 게 40장 셋과의 결정적 차이다.
+
+## 중요: 이 코퍼스는 합격/불합격 게이트가 아니다
+
+40종은 "37/40 미달이면 회귀"라는 절대 기준선이다. 대량 코퍼스는 조건을
+난수로 뽑으므로 물리적으로 못 읽는 이미지(45도 1D, 45px + 강블러 등)가
+섞인다. **절대 검출률의 목표치는 의미가 없다.** 쓰는 방법은 항상 A/B다:
+
+    같은 --seed로 만든 같은 코퍼스에 대해, 변경 전/후의
+    검출률과 시간을 비교한다.
+
+씨드가 같으면 코퍼스는 완전히 동일하게 재생성된다(이미지별 씨드가
+(마스터 씨드, 인덱스)에서 파생되므로 --jobs 수나 생성 순서와도 무관).
+
+## 두 가지 모드
+
+**(1) 난수 코퍼스** — 18개 조건축을 난수로 조합. 전반적 A/B 비교용.
+**(2) 스윕** — 한 축만 촘촘히 밀고 나머지는 완전 고정(난수 열화 0).
+"몇 도부터 끊기나" 같은 임계점을 찾는 용도. 축을 여러 개 주면 데카르트 곱.
+
+## 용량 (중요)
+
+2048x1536 PGM 한 장 = 3.1MB. 1도 간격 360장 x 대비 50단계 = 18,000장 =
+**56GB**. 축을 더 걸면 수십만 장 = 수백 GB로 디스크가 그냥 찬다.
+그래서 기본 사용법은 파일 저장이 아니라 **스트리밍**이다 — 프레임을 만들어
+파이프로 바로 디코더에 먹이고 버린다. 디스크 0, 장수 상한 없음.
+파일 모드에는 --max-disk-gb(기본 20GB) 상한이 걸려 있고, 예상 용량이
+상한이나 남은 공간의 80%를 넘으면 생성을 시작조차 하지 않는다.
+
+## 사용
+
+    # 스윕: 1도 간격 360장 — 디스크에 한 장도 안 남는다
+    python3 tools/generate_corpus.py --sweep angle:0:359:1 --stream \
+      | ./verify_accuracy --stdin --paths 2stage
+
+    # 축 두 개 (대비 20단계 x 모듈 27단계 = 540장), 나머지 축은 --base로 고정
+    python3 tools/generate_corpus.py --stream \
+        --sweep contrast:0.05:1.0:0.05 --sweep module:1.5:8:0.25 \
+        --base sym=CODE128 | ./verify_accuracy --stdin
+
+    # 난수 코퍼스 A/B: 변경 전/후에 같은 --seed 로 두 번
+    python3 tools/generate_corpus.py -n 5000 --difficulty mixed --stream \
+      | ./verify_accuracy --stdin --csv before.csv
+
+    # 용량/시간 미리보기 (아무것도 안 만든다)
+    python3 tools/generate_corpus.py --sweep angle:0:359:1 --sweep noise:0:50:2 --est
+
+    # 정말 파일로 남겨야 할 때 (재사용할 고정 코퍼스, 눈으로 볼 이미지)
+    python3 tools/generate_corpus.py -o ./corpus -n 2000 --jobs 4 --max-disk-gb 10
+    python3 tools/generate_corpus.py -o ./look -n 20 --format png   # 보기용
+
+    # 특정 이미지만 다시 뽑기(실패 케이스 디버깅) — 씨드가 같으면 동일 이미지
+    python3 tools/generate_corpus.py -o ./one --only 1734
+
+스윕 축 목록은 --help 참고 (angle module contrast bright blur motion noise
+persp curve glare shadow count sym ec).
+
+의존성: pip install qrcode python-barcode pillow numpy
+"""
+import argparse
+import io
+import json
+import math
+import multiprocessing as mp
+import os
+import sys
+import time
+
+import numpy as np
+import qrcode
+import barcode as pybarcode
+from barcode.writer import ImageWriter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+# ----------------------------------------------------------------- 폰트
+try:
+    _FNT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    _FNTB = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+except OSError:
+    _FNT = _FNTB = ImageFont.load_default()
+
+ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-."
+
+# 난이도 프리셋
+#   n_degrade: 한 이미지에 몇 개의 조건을 겹쳐 적용할지
+#   sev      : 각 조건 파라미터를 최대치 대비 어디까지 밀지 (0~1)
+#   mod      : **모듈 하나의 픽셀 크기** 범위. 코드 크기는 여기서 파생된다
+#              (모듈 수 x 모듈 픽셀). 검출 난이도를 실제로 지배하는 값이
+#              "코드 px"가 아니라 "모듈 px"라서 이걸 1차 손잡이로 삼는다 —
+#              1.1px면 원리적으로 못 읽는 영역, 4px 이상이면 여유가 있다.
+#   p_deg    : 코드 단위 열화(저대비/반전/DPM/인쇄불량/손상) 확률 배율
+#   p_rot    : 회전이 걸릴 확률
+# 실측 기준(2048x1536, two_stage, 코드 단위 검출률): easy ~90% / mixed ~55%
+# / hard ~15%. A/B 비교는 중간대(mixed)가 가장 민감하다 — 100%나 0%에
+# 붙어 있으면 변경 효과가 천장/바닥에 가려서 안 보인다.
+DIFFICULTY = {
+    "easy":  {"n_degrade": (0, 1), "sev": (0.05, 0.25), "mod": (6.0, 18.0),
+              "p_deg": 0.20, "p_rot": 0.18},
+    "mixed": {"n_degrade": (1, 3), "sev": (0.10, 0.70), "mod": (3.0, 14.0),
+              "p_deg": 0.85, "p_rot": 0.45},
+    "hard":  {"n_degrade": (2, 4), "sev": (0.35, 0.95), "mod": (2.2, 8.0),
+              "p_deg": 1.20, "p_rot": 0.65},
+}
+
+
+# ============================================================ 심볼 렌더링
+def _mod_tag(mod_px):
+    """모듈 하나가 몇 픽셀인지 — 난이도를 실제로 지배하는 값이라 태그로 남긴다.
+
+    "코드 크기 px"는 데이터 길이에 따라 의미가 달라진다(같은 400px여도
+    21모듈 QR과 57모듈 QR은 완전히 다른 문제다). 집계는 모듈 픽셀 기준으로
+    봐야 비교가 된다.
+    """
+    if mod_px < 1.6:
+        return "mod-1px"
+    if mod_px < 2.6:
+        return "mod-2px"
+    if mod_px < 4.5:
+        return "mod-3px"
+    return "mod-5px+"
+
+
+def _qr_img(payload, px, ec):
+    """QR 렌더. 모듈 수를 알아야 모듈 픽셀 크기를 태깅할 수 있어서 같이 반환."""
+    q = qrcode.QRCode(border=2, box_size=6, error_correction=ec)
+    q.add_data(payload)
+    q.make(fit=True)
+    modules = q.modules_count + 2 * q.border
+    img = q.make_image(fill_color="black", back_color="white").convert("L")
+    return img.resize((px, px), Image.NEAREST), px / modules
+
+
+def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
+    """1D 심볼을 **모듈 폭 고정**으로 렌더 (폭은 데이터 길이에 따라 늘어난다).
+
+    목표 폭에 억지로 맞춰 리사이즈하면 데이터가 길수록 막대가 가늘어지는
+    비현실적 아티팩트가 생긴다 — 같은 "1D 회전 테스트"인데 실제 난이도가
+    텍스트 길이에 따라 완전히 달라져서, 알고리즘 한계로 오진했던 전례가
+    있다(generate_stress_images.py의 code128() 주석, §3.2.15).
+    실제 인쇄는 모듈 폭을 고정하고 라벨 폭이 넓어진다.
+    """
+    buf = io.BytesIO()
+    obj = cls(payload, writer=ImageWriter(), **wopts)
+    obj.write(buf, options={"module_height": 20, "quiet_zone": 4,
+                            "font_size": 0, "write_text": False})
+    raw = Image.open(buf).convert("L")
+    native_modules = raw.width / 2.0          # ImageWriter 기본 모듈 폭 ≈ 2px
+    w = max(60, int(round(native_modules * module_px)))
+    # 높이는 **실제 렌더 폭** 기준으로 잡는다. 셀 폭 기준으로 잡으면 짧은
+    # 데이터일 때 거의 정사각형인 1D 코드가 나와서 현실과 안 맞는다.
+    h = int(max(24, min(box_h, w * ratio)))
+    return raw.resize((w, h), Image.NEAREST), obj.get_fullcode()
+
+
+_LINEAR = {
+    "CODE128": (pybarcode.Code128, "CODE_128", {}),
+    "EAN13":   (pybarcode.EAN13,   "EAN_13",   {"no_checksum": False}),
+    "CODE39":  (pybarcode.Code39,  "CODE_39",  {"add_checksum": False}),
+    "ITF":     (pybarcode.ITF,     "ITF",      {}),
+}
+
+
+def _linear_payload(kind, rng, n):
+    if kind == "CODE128":
+        return "".join(rng.choice(list(ALPHA), size=n))
+    if kind == "CODE39":
+        return "".join(rng.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), size=n))
+    if kind == "EAN13":
+        # 첫 자리를 0으로 두면 안 된다: 선행 0인 EAN-13은 zxing이 UPC-A(12자리)로
+        # 돌려주기 때문에 정답 문자열과 형식이 어긋난다(정답이 틀린 게 아니라
+        # 표기가 다른 것 — 텍스트 대조 지표가 오염된다).
+        return str(int(rng.integers(1, 10))) + \
+            "".join(str(int(d)) for d in rng.integers(0, 10, size=11))       # 길이 고정
+    if kind == "ITF":
+        return "".join(str(int(d)) for d in rng.integers(0, 10, size=max(2, (n // 2) * 2)))
+    raise ValueError(kind)
+
+
+def make_symbol(kind, rng, box_w, box_h, mod_range):
+    """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트)를 돌려준다.
+
+    box_w/box_h = 배치 가능한 최대 크기. mod_range = 모듈 픽셀 크기 범위
+    (난이도 프리셋에서 옴) — 이걸 먼저 정하고 거기서 코드 크기가 나온다.
+    박스에 안 들어가면 모듈을 줄이고, 그래도 안 되면 데이터를 줄인다.
+    """
+    # 로그 균등: 작은 모듈(어려움) 쪽 표본이 선형 균등보다 충분히 나온다
+    mod_px = float(math.exp(rng.uniform(math.log(mod_range[0]), math.log(mod_range[1]))))
+
+    if kind == "QR":
+        n = int(rng.integers(6, 40))
+        ec = rng.choice([qrcode.constants.ERROR_CORRECT_L, qrcode.constants.ERROR_CORRECT_M,
+                         qrcode.constants.ERROR_CORRECT_Q, qrcode.constants.ERROR_CORRECT_H])
+        limit = int(min(box_w, box_h))
+        for _ in range(4):
+            payload = "VSCAN-" + "".join(rng.choice(list(ALPHA), size=n))
+            q = qrcode.QRCode(border=2, box_size=6, error_correction=ec)
+            q.add_data(payload); q.make(fit=True)
+            modules = q.modules_count + 2 * q.border
+            px = int(round(modules * mod_px))
+            if px <= limit:
+                break
+            if mod_px > mod_range[0]:                 # 먼저 모듈을 줄여본다
+                mod_px = max(mod_range[0], limit / modules)
+                px = int(round(modules * mod_px))
+                if px <= limit:
+                    break
+            n = max(4, n // 2)                        # 그래도 안 되면 데이터를 줄인다
+        px = max(21, min(px, limit))
+        img, real_mod = _qr_img(payload, px, ec)
+        return img, "QR_CODE", payload, [_mod_tag(real_mod)]
+
+    cls, symname, wopts = _LINEAR[kind]
+    n = int(rng.integers(6, 20))
+    ratio = float(rng.uniform(0.16, 0.45))            # 높이/폭
+    for _ in range(4):
+        payload = _linear_payload(kind, rng, n)
+        img, full = _linear_render(cls, payload, mod_px, ratio, box_h, **wopts)
+        if img.width <= box_w:
+            break
+        if mod_px > mod_range[0]:                     # 먼저 모듈을 줄인다
+            mod_px = max(mod_range[0], mod_px * box_w / img.width)
+            img, full = _linear_render(cls, payload, mod_px, ratio, box_h, **wopts)
+            if img.width <= box_w:
+                break
+        if kind == "EAN13":                           # 길이 고정 심볼은 축소만
+            mod_px *= box_w / img.width
+            img = img.resize((int(box_w), img.height), Image.NEAREST)
+            break
+        n = max(4, n // 2)                            # 그래도 안 되면 데이터를 줄인다
+    return img, symname, full, [_mod_tag(mod_px)]
+
+
+# ============================================================ 코드 단위 열화
+def _to_dpm(arr, step=5):
+    """도트 각인(DPM) 흉내 — 모듈을 점으로만 찍는다. 21_dpm_dotpeen과 동일 원리."""
+    dot = np.full_like(arr, 255)
+    h, w = arr.shape
+    for y0 in range(0, h, step):
+        for x0 in range(0, w, step):
+            if arr[y0:y0 + step, x0:x0 + step].mean() < 128:
+                cy, cx = y0 + step // 2, x0 + step // 2
+                dot[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2] = 70
+    return dot
+
+
+def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
+    """코드 이미지 자체에 걸리는 열화(대비/반전/DPM/인쇄불량/손상).
+
+    프레임 전체가 아니라 코드별로 적용한다 — 한 프레임에 '깨끗한 코드 +
+    망가진 코드'가 섞이는 상황(부분 검출 함정, §3.2.10)이 자연히 생긴다.
+    """
+    a = np.array(img).astype(np.float32)
+
+    if rng.random() < 0.28 * p_deg:                                   # 저대비
+        ratio = float(np.interp(sev, [0, 1], [0.75, 0.07]))
+        a = 128 + (a - 128) * ratio
+        tags.append("lowcontrast" + ("-strong" if ratio < 0.2 else ""))
+
+    if rng.random() < 0.15 * p_deg:                                   # 흑백 반전
+        # 반전 전에 흰 여백을 덧대야 반전 후에 **어두운 콰이어트존**이 남는다.
+        # 안 그러면 반전된 코드가 밝은 배경에 바로 붙어서 콰이어트존이
+        # 사라지고, "반전"이 아니라 "콰이어트존 파괴" 케이스가 돼버린다.
+        pad = max(8, int(min(a.shape) * 0.06))
+        a = np.pad(a, pad, mode="constant", constant_values=255)
+        a = 255 - a
+        tags.append("inverted")
+
+    if allow_dpm and rng.random() < 0.10 * p_deg:                     # DPM 도트 각인
+        a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8)).astype(np.float32)
+        tags.append("dpm")
+
+    if rng.random() < 0.14 * p_deg:                                   # 인쇄 불량(잉크 끊김)
+        h = a.shape[0]
+        gap = max(6, int(h * float(np.interp(sev, [0, 1], [0.10, 0.035]))))
+        for y in range(0, h, gap):
+            a[y:y + max(1, int(h * 0.006)), :] = 235
+        tags.append("printdefect")
+
+    if rng.random() < 0.16 * p_deg:                                   # 물리 손상(긁힘/결손)
+        im = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+        d = ImageDraw.Draw(im)
+        h, w = a.shape
+        for _ in range(int(np.interp(sev, [0, 1], [2, 9]))):
+            x0, y0 = int(rng.integers(0, w)), int(rng.integers(0, h))
+            d.line([x0, y0, x0 + int(rng.integers(-w // 4, w // 4)),
+                    y0 + int(rng.integers(-h // 4, h // 4))],
+                   fill=235, width=int(rng.integers(3, 4 + int(6 * sev))))
+        # 모서리 결손은 2D에만. 1D는 ECC가 없어서 시작/정지 패턴이 잘리면
+        # **무조건** 못 읽는다 — 라이브러리 성능이 아니라 물리를 측정하게 된다.
+        if is_2d and rng.random() < 0.4 * sev + 0.1:
+            cut = int(min(w, h) * float(np.interp(sev, [0, 1], [0.10, 0.30])))
+            d.polygon([(w, h), (w - cut, h), (w, h - cut)], fill=200)
+        a = np.array(im).astype(np.float32)
+        tags.append("damaged")
+
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+
+
+def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
+    """코드 단위 기하 변환(회전/원근). 회전 후 bbox가 셀을 넘지 않게 미리 축소."""
+    ang = 0.0
+    if rng.random() < p_rot:
+        # 1D는 회전에 원리적으로 취약하다(§3.2.15) — 작은 기울기와 큰 각도를
+        # 둘 다 뽑는다. 90도 근방은 TryRotate 회귀 감시용으로 일부러 자주.
+        pick = rng.random()
+        if pick < 0.45:
+            ang = float(rng.uniform(-18, 18))
+        elif pick < 0.70:
+            ang = float(rng.choice([90.0, 180.0, 270.0]))
+        else:
+            ang = float(rng.uniform(0, 360))
+        tags.append("rot" + ("-ortho" if ang % 90 == 0 else
+                             ("-small" if abs(((ang + 180) % 360) - 180) <= 20 else "-free")))
+
+    if rng.random() < 0.18 * p_rot / 0.45:                     # 원근
+        s = float(np.interp(sev, [0, 1], [0.06, 0.34]))
+        w, h = img.size
+        coeffs = (1, s * 0.9, -w * s * 0.12, s * 0.35, 1, -h * s * 0.10,
+                  s * 0.0011, s * 0.00035)
+        img = img.transform(img.size, Image.PERSPECTIVE, coeffs,
+                            resample=Image.BICUBIC, fillcolor=255)
+        tags.append("perspective" + ("-strong" if s > 0.2 else ""))
+
+    if ang:
+        if ang % 90 != 0:
+            # 회전 bbox 확대분(최대 sqrt(2))만큼 미리 줄여야 셀 안에 들어간다
+            k = 1.0 / 1.42
+            img = img.resize((max(30, int(img.width * k)), max(20, int(img.height * k))))
+        img = img.rotate(ang, expand=True, fillcolor=255, resample=Image.BICUBIC)
+        if max(img.size) > cell_min:
+            k = cell_min / max(img.size)
+            img = img.resize((max(20, int(img.width * k)), max(20, int(img.height * k))))
+    return img, ang
+
+
+# ============================================================ 프레임 배경
+def background(rng, w, h, style, tags):
+    """배경. 'plain'은 조명 그라디언트 + 센서 노이즈, 나머지는 현장형 클러터.
+
+    클러터(텍스트/표/체커보드/줄무늬)는 가짜 후보를 만들어 full 경로를
+    40~60% 느리게 한다(§3.4) — 속도 측정에 반드시 섞여 있어야 하는 축이다.
+    """
+    base = float(rng.integers(120, 230))
+    xs = np.arange(w, dtype=np.float32)[None, :] / w
+    ys = np.arange(h, dtype=np.float32)[:, None] / h
+    a = base + 25 * (1 - xs * 0.6 - ys * 0.3) + rng.normal(0, 3, size=(h, w))
+    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+    if style == "plain":
+        return img
+    d = ImageDraw.Draw(img)
+    sc = w / 2048.0
+    if style == "label":                                   # 물류 라벨(텍스트/표)
+        d.rectangle([int(60 * sc), int(60 * sc), w - int(60 * sc), h - int(60 * sc)],
+                    outline=10, width=max(2, int(8 * sc)))
+        for i in range(int(rng.integers(6, 14))):
+            y = int(rng.integers(0, h))
+            d.line([0, y, w, y], fill=int(rng.integers(10, 40)), width=max(1, int(4 * sc)))
+        for _ in range(int(rng.integers(10, 26))):
+            d.text((int(rng.integers(0, w * 0.8)), int(rng.integers(0, h * 0.95))),
+                   f"LOT {int(rng.integers(1000, 9999))}  PART-{int(rng.integers(100, 999))}",
+                   font=_FNT, fill=int(rng.integers(15, 60)))
+    elif style == "warehouse":                             # 박스 모서리/테이프 조각
+        for _ in range(int(rng.integers(8, 20))):
+            x0, y0 = int(rng.integers(0, w)), int(rng.integers(0, h))
+            d.rectangle([x0, y0, x0 + int(rng.integers(120, 600) * sc),
+                         y0 + int(rng.integers(100, 450) * sc)],
+                        outline=int(rng.integers(40, 110)), width=int(rng.integers(3, 9)))
+        for _ in range(int(rng.integers(3, 9))):
+            x0, y0 = int(rng.integers(0, w)), int(rng.integers(0, h))
+            d.rectangle([x0, y0, x0 + int(rng.integers(200, 600) * sc), y0 + int(22 * sc)],
+                        fill=235)
+    elif style == "falsepattern":                          # 파인더/1D 미끼
+        for _ in range(int(rng.integers(1, 4))):
+            bx, by = int(rng.integers(0, w * 0.8)), int(rng.integers(0, h * 0.8))
+            cs = int(rng.integers(14, 30) * sc) or 1
+            for i in range(8):
+                for j in range(8):
+                    if (i + j) % 2 == 0:
+                        d.rectangle([bx + i * cs, by + j * cs,
+                                     bx + i * cs + cs - 1, by + j * cs + cs - 1], fill=20)
+        for _ in range(int(rng.integers(1, 4))):
+            x, sy = int(rng.integers(0, w * 0.8)), int(rng.integers(0, h * 0.85))
+            for _ in range(30):
+                bw = int(rng.integers(3, 12))
+                d.rectangle([x, sy, x + bw, sy + int(130 * sc)], fill=15)
+                x += bw + int(rng.integers(3, 10))
+    tags.append("clutter-" + style)
+    return img
+
+
+# ============================================================ 프레임 열화
+def _motion_blur(a, length, angle_deg):
+    rad = math.radians(angle_deg)
+    dx, dy = math.cos(rad), math.sin(rad)
+    acc = np.zeros_like(a)
+    half = max(1, length // 2)
+    for t in range(-half, half + 1):
+        acc += np.roll(np.roll(a, int(round(dy * t)), axis=0), int(round(dx * t)), axis=1)
+    return acc / (2 * half + 1)
+
+
+def _cylinder_warp(a, strength):
+    """원통 라벨의 수평 압축. 행 루프 없이 전부 벡터화 (대량 생성용)."""
+    h, w = a.shape
+    xs = np.arange(w, dtype=np.float32)
+    cx = w / 2.0
+    norm = (xs - cx) / cx
+    warped = np.clip(cx + np.sin(norm * (np.pi / 2)) * cx * (1 - strength) + norm * cx * strength,
+                     0, w - 1)
+    x0 = np.floor(warped).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    frac = (warped - x0)[None, :]
+    return a[:, x0] * (1 - frac) + a[:, x1] * frac
+
+
+def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+    """프레임 전체에 걸리는 열화를 n_degrade개 골라 적용. 반환은 float32 배열.
+
+    boxes = 배치된 코드들의 (x, y, w, h). 국소 열화(반사광/오염/콰이어트존
+    침범)는 **코드 위에** 걸려야 의미가 있다 — 빈 배경에 뿌리면 난이도가
+    올라가지 않아서 측정값이 그냥 희석된다.
+    """
+    pool = ["defocus", "motion", "noise", "overexp", "underexp",
+            "glare", "shadow", "dirty", "curved", "quietzone"]
+    picks = list(rng.choice(pool, size=min(n_degrade, len(pool)), replace=False)) if n_degrade else []
+
+    def near_code():
+        """코드 하나를 골라 그 중심 근처 좌표를 돌려준다(코드가 없으면 아무 곳)."""
+        if not boxes:
+            return float(rng.uniform(0, w)), float(rng.uniform(0, h))
+        bx, by, bw, bh = boxes[int(rng.integers(0, len(boxes)))]
+        return (bx + bw * float(rng.uniform(0.2, 0.8)), by + bh * float(rng.uniform(0.2, 0.8)))
+
+    if "quietzone" in picks:      # 코드에 밀착한 테두리/텍스트 (드로잉이므로 먼저)
+        d = ImageDraw.Draw(img)
+        for bx, by, bw, bh in (boxes or []):
+            if rng.random() < 0.7:
+                pad = int(rng.integers(2, 10))
+                d.rectangle([bx - pad, by - pad, bx + bw + pad, by + bh + pad],
+                            outline=20, width=int(rng.integers(4, 9)))
+                d.text((bx, max(0, by - 34)), f"LOT {int(rng.integers(10000, 99999))} / GTIN 008123456",
+                       font=_FNT, fill=15)
+        tags.append("quietzone")
+
+    if "dirty" in picks:
+        d = ImageDraw.Draw(img)
+        for _ in range(int(np.interp(sev, [0, 1], [30, 220]))):
+            x, y = near_code() if rng.random() < 0.75 else (rng.uniform(0, w), rng.uniform(0, h))
+            r = int(rng.integers(3, 4 + int(14 * sev)))
+            d.ellipse([x, y, x + r, y + r], fill=int(rng.integers(50, 215)))
+        tags.append("dirty")
+
+    if "defocus" in picks:
+        r = float(np.interp(sev, [0, 1], [1.0, 6.5]))
+        img = img.filter(ImageFilter.GaussianBlur(r))
+        tags.append("defocus" + ("-strong" if r > 3.8 else ""))
+        a = np.array(img).astype(np.float32)
+    else:
+        a = np.array(img.filter(ImageFilter.GaussianBlur(0.6))).astype(np.float32)  # 렌즈 MTF
+
+    if "motion" in picks:
+        length = int(np.interp(sev, [0, 1], [7, 27]))
+        a = _motion_blur(a, length, float(rng.uniform(0, 180)))
+        tags.append("motion" + ("-strong" if length > 17 else ""))
+
+    if "curved" in picks:
+        s = float(np.interp(sev, [0, 1], [0.15, 0.5]))
+        a = _cylinder_warp(a, s)
+        tags.append("curved")
+
+    if "glare" in picks:
+        yy = np.arange(h, dtype=np.float32)[:, None]
+        xx = np.arange(w, dtype=np.float32)[None, :]
+        for _ in range(int(rng.integers(1, 3))):
+            gx, gy = near_code()                    # 반사광은 코드 위에 걸려야 의미가 있다
+            sx, sy = float(rng.uniform(90, 260)), float(rng.uniform(60, 180))
+            amp = float(np.interp(sev, [0, 1], [90, 215]))
+            a = a + amp * np.exp(-(((xx - gx) ** 2) / (2 * sx ** 2) +
+                                   ((yy - gy) ** 2) / (2 * sy ** 2)))
+        tags.append("glare")
+
+    if "shadow" in picks:
+        band = np.ones((h, w), dtype=np.float32)
+        x0 = int(rng.integers(0, w * 0.7))
+        band[:, x0:x0 + int(rng.integers(300, 900))] = float(np.interp(sev, [0, 1], [0.62, 0.28]))
+        band = np.array(Image.fromarray((band * 255).astype(np.uint8), mode="L")
+                        .filter(ImageFilter.GaussianBlur(12))).astype(np.float32) / 255.0
+        a = a * band
+        tags.append("shadow")
+
+    if "overexp" in picks:
+        g = float(np.interp(sev, [0, 1], [1.15, 1.7]))
+        a = a * g
+        tags.append("overexposed")
+    elif "underexp" in picks:
+        g = float(np.interp(sev, [0, 1], [0.55, 0.15]))
+        a = a * g + rng.normal(0, 4, size=(h, w))
+        tags.append("underexposed" + ("-strong" if g < 0.25 else ""))
+
+    if "noise" in picks:
+        s = float(np.interp(sev, [0, 1], [12, 58]))
+        a = a + rng.normal(0, s, size=(h, w))
+        tags.append("noise" + ("-strong" if s > 35 else ""))
+
+    return a
+
+
+# ============================================================ 한 장 생성
+def sample_layout(rng, w, h, k):
+    """k개 코드를 겹치지 않게 놓을 셀 목록. (셀 x0,y0,셀폭,셀높이)"""
+    cols = int(min(4, max(1, math.ceil(math.sqrt(k * w / h)))))
+    rows = int(max(1, math.ceil(k / cols)))
+    cw, ch = w // cols, h // rows
+    cells = [(c * cw, r * ch, cw, ch) for r in range(rows) for c in range(cols)]
+    idx = rng.choice(len(cells), size=min(k, len(cells)), replace=False)
+    return [cells[int(i)] for i in idx]
+
+
+def build_one(index, cfg):
+    """인덱스 하나에 대응하는 이미지를 만들고 (파일명, 레코드)를 돌려준다.
+
+    씨드는 (마스터 씨드, 인덱스)에서 파생 — 생성 순서/병렬도와 무관하게
+    같은 인덱스는 항상 같은 이미지가 된다.
+    """
+    rng = np.random.default_rng([cfg["seed"], index])
+    w, h = cfg["width"], cfg["height"]
+    prof = DIFFICULTY[cfg["difficulty"]]
+    sev = float(rng.uniform(*prof["sev"]))
+    tags = [cfg["difficulty"]]
+
+    # 코드 개수: 1개가 가장 흔하고, 다중도 충분히 섞는다
+    r = rng.random()
+    k = 1 if r < 0.40 else (int(rng.integers(2, 4)) if r < 0.70
+                            else (int(rng.integers(4, 7)) if r < 0.90
+                                  else int(rng.integers(7, cfg["max_codes"] + 1))))
+    k = max(1, min(k, cfg["max_codes"]))
+
+    style = str(rng.choice(["plain", "label", "warehouse", "falsepattern"],
+                           p=[0.55, 0.15, 0.15, 0.15]))
+    img = background(rng, w, h, style, tags)
+
+    kinds = cfg["symbologies"]
+    codes = []
+    for (cx0, cy0, cw, ch) in sample_layout(rng, w, h, k):
+        margin = int(min(cw, ch) * 0.08) + 8
+        avail_w, avail_h = cw - 2 * margin, ch - 2 * margin
+        if avail_w < 60 or avail_h < 60:
+            continue
+        kind = str(rng.choice(kinds))
+        try:
+            sym, symname, text, ctags = make_symbol(kind, rng, avail_w, avail_h, prof["mod"])
+        except Exception:
+            continue
+        sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
+                             is_2d=(kind == "QR"), p_deg=prof["p_deg"])
+        sym, ang = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
+                                   p_rot=prof["p_rot"])
+        px = cx0 + margin + int(rng.integers(0, max(1, avail_w - sym.width + 1)))
+        py = cy0 + margin + int(rng.integers(0, max(1, avail_h - sym.height + 1)))
+        img.paste(sym, (px, py))
+        tags.extend(ctags)
+        codes.append({"symbology": symname, "text": text, "x": px, "y": py,
+                      "w": sym.width, "h": sym.height, "rot": round(ang, 1),
+                      "tags": ctags})
+
+    nd = int(rng.integers(prof["n_degrade"][0], prof["n_degrade"][1] + 1))
+    boxes = [(c["x"], c["y"], c["w"], c["h"]) for c in codes]
+    a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes)
+
+    # 태그 중복 제거(순서 유지) + 심볼로지 태그
+    seen, utags = set(), []
+    for t in tags + sorted({"sym-" + c["symbology"] for c in codes}) + [f"n{len(codes)}"]:
+        if t not in seen:
+            seen.add(t); utags.append(t)
+
+    name = f"c{index:06d}_{len(codes)}"
+    rec = {"file": name + ("." + cfg["format"]), "index": index, "expected": len(codes),
+           "width": w, "height": h, "severity": round(sev, 3),
+           "difficulty": cfg["difficulty"], "tags": utags, "codes": codes}
+    return name, np.clip(a, 0, 255).astype(np.uint8), rec
+
+
+# ============================================================ 스윕(격자) 생성
+# 난수 조합은 "전반적으로 어떤가"를 보지만, **어디서 끊기는지**는 못 짚는다.
+# 1도 간격 360장, 대비 0.02 간격 50장처럼 한 축만 촘촘히 밀면 임계점이
+# 그래프로 보인다 (예: "38도까지 되고 39도부터 안 됨").
+#
+# 규칙: 스윕은 **결정적**이다. 스윕 축 외의 모든 값은 baseline으로 고정되고
+# 난수 열화가 전혀 안 들어간다. 안 그러면 축 하나를 움직였을 때의 차이가
+# 난수 잡음에 묻힌다.
+SWEEP_BASE = {
+    "sym": "QR", "ec": "M", "count": 1, "module": 4.0, "angle": 0.0,
+    "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
+    "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0,
+}
+SWEEP_HELP = {
+    "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
+    "count": "코드 개수", "module": "모듈 하나의 픽셀 크기", "angle": "코드 회전각(도)",
+    "contrast": "코드 대비 비율 (1.0=원본, 0.05=초저대비)", "bright": "노출 배율",
+    "blur": "디포커스 가우시안 시그마(px)", "motion": "모션 블러 길이(px)",
+    "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
+    "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
+    "shadow": "그림자 밝기 배율 (1.0=없음)",
+}
+_EC = {"L": qrcode.constants.ERROR_CORRECT_L, "M": qrcode.constants.ERROR_CORRECT_M,
+       "Q": qrcode.constants.ERROR_CORRECT_Q, "H": qrcode.constants.ERROR_CORRECT_H}
+
+
+def parse_sweep(spec):
+    """'angle:0:359:1' -> ('angle', [0,1,...,359]) / 'sym:QR,CODE128' -> 목록"""
+    name, _, rest = spec.partition(":")
+    if name not in SWEEP_BASE:
+        raise SystemExit(f"알 수 없는 스윕 축: {name}\n"
+                         + "\n".join(f"  {k:9} {v}" for k, v in SWEEP_HELP.items()))
+    if not rest:
+        raise SystemExit(f"스윕 형식: {name}:START:STOP:STEP 또는 {name}:v1,v2,v3")
+    if ":" in rest:
+        a, b, st = (float(x) for x in rest.split(":"))
+        if st <= 0:
+            raise SystemExit("STEP은 0보다 커야 합니다")
+        n = int(math.floor((b - a) / st + 1e-9)) + 1
+        vals = [a + i * st for i in range(max(1, n))]
+        if name == "count":
+            vals = [int(v) for v in vals]
+        return name, vals
+    vals = [x.strip() for x in rest.split(",") if x.strip()]
+    if name in ("sym", "ec"):
+        return name, [v.upper() for v in vals]
+    return name, [int(v) if name == "count" else float(v) for v in vals]
+
+
+def _fmt_val(v):
+    return f"{v:g}" if isinstance(v, float) else str(v)
+
+
+_SWEEP_1D_RATIO = 0.32          # 1D 높이/폭 (스윕 내내 고정)
+
+
+def sweep_fit_box(sym, cell_w, cell_h):
+    """회전각과 무관하게 셀 안에 들어가는 최대 코드 폭.
+
+    w x h 박스를 임의 각도로 돌리면 bbox는 최악(45도)에 0.707*(w+h)다.
+    그래서 **정사각(QR)은 /1.41, 납작한 1D는 /0.93** — 1D에 QR 기준을
+    쓰면 폭이 2/3로 깎여서 모듈이 1px대로 얇아지고, 각도 축을 재는 게
+    아니라 "너무 작아서 못 읽음"을 재게 된다.
+    각도와 무관하게 같은 값을 쓰는 게 핵심이다(각도별로 크기가 달라지면
+    각도 축 비교가 성립하지 않는다).
+    """
+    ratio = 1.0 if sym == "QR" else _SWEEP_1D_RATIO
+    limit = min(cell_w, cell_h) * 0.92 / (0.7072 * (1.0 + ratio))
+    return max(60, int(min(limit, cell_w * 0.95)))
+
+
+def sweep_symbol(p, box):
+    """스윕용 결정적 심볼 렌더. 페이로드가 고정이라 모듈 수도 고정이고,
+    따라서 크기는 module 값에만 비례한다 (축 하나만 움직인다는 보장).
+
+    반환에 실제 모듈 픽셀 크기를 같이 준다 — 셀에 안 들어가서 클램프되면
+    요청값과 달라지고, 그걸 모르면 스윕 결과를 잘못 읽는다.
+    """
+    if p["sym"] == "QR":
+        payload = "VSCAN-SWEEP-0001"
+        q = qrcode.QRCode(border=2, box_size=6, error_correction=_EC[p["ec"]])
+        q.add_data(payload); q.make(fit=True)
+        modules = q.modules_count + 2 * q.border
+        px = max(21, min(int(round(modules * p["module"])), box))
+        img = q.make_image(fill_color="black", back_color="white").convert("L")
+        return img.resize((px, px), Image.NEAREST), "QR_CODE", payload, px / modules
+    cls, symname, wopts = _LINEAR[p["sym"]]
+    payload = {"CODE128": "VSCAN-SWEEP-01", "CODE39": "VSCANSWEEP01",
+               "EAN13": "1234567890128", "ITF": "12345670"}[p["sym"]]
+    mod = float(p["module"])
+    img, full = _linear_render(cls, payload, mod, _SWEEP_1D_RATIO, 10 ** 6, **wopts)
+    if img.width > box:
+        mod *= box / img.width
+        img = img.resize((box, max(24, int(img.height * box / img.width))), Image.NEAREST)
+    return img, symname, full, mod
+
+
+def build_sweep(index, combo, cfg):
+    """스윕 조합 하나 -> (이름, 이미지배열, 레코드). 난수는 배경 노이즈에만 쓴다."""
+    p = dict(SWEEP_BASE)
+    p.update(cfg["base"])
+    p.update(combo)
+    w, h = cfg["width"], cfg["height"]
+    rng = np.random.default_rng([cfg["seed"], 0xC0FFEE, index])
+
+    xs = np.arange(w, dtype=np.float32)[None, :] / w
+    ys = np.arange(h, dtype=np.float32)[:, None] / h
+    a = 195 + 25 * (1 - xs * 0.6 - ys * 0.3) + rng.normal(0, 3, size=(h, w))
+    img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+
+    k = max(1, int(p["count"]))
+    cols = int(min(4, max(1, math.ceil(math.sqrt(k * w / h)))))
+    rows = int(max(1, math.ceil(k / cols)))
+    cw, ch = w // cols, h // rows
+    codes, cx0 = [], None
+    for i in range(k):
+        r, c = divmod(i, cols)
+        cell = (c * cw, r * ch, cw, ch)
+        box = sweep_fit_box(p["sym"], cw, ch)
+        sym, symname, text, eff_mod = sweep_symbol(p, box)
+        s = np.array(sym).astype(np.float32)
+        if p["contrast"] != 1.0:
+            s = 128 + (s - 128) * float(p["contrast"])
+        sym = Image.fromarray(np.clip(s, 0, 255).astype(np.uint8), mode="L")
+        if p["persp"]:
+            v = float(p["persp"])
+            sym = sym.transform(sym.size, Image.PERSPECTIVE,
+                                (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
+                                 -sym.height * v * 0.10, v * 0.0011, v * 0.00035),
+                                resample=Image.BICUBIC, fillcolor=255)
+        if p["angle"]:
+            sym = sym.rotate(float(p["angle"]), expand=True, fillcolor=255,
+                             resample=Image.BICUBIC)
+        px = cell[0] + (cw - sym.width) // 2
+        py = cell[1] + (ch - sym.height) // 2
+        img.paste(sym, (max(0, px), max(0, py)))
+        if cx0 is None:
+            cx0 = (max(0, px) + sym.width / 2, max(0, py) + sym.height / 2)
+        codes.append({"symbology": symname, "text": text, "x": max(0, px), "y": max(0, py),
+                      "w": sym.width, "h": sym.height, "rot": float(p["angle"]), "tags": []})
+
+    if p["blur"]:
+        img = img.filter(ImageFilter.GaussianBlur(float(p["blur"])))
+    arr = np.array(img).astype(np.float32)
+    if p["curve"]:
+        arr = _cylinder_warp(arr, float(p["curve"]))
+    if p["motion"]:
+        arr = _motion_blur(arr, int(p["motion"]), 0.0)
+    if p["glare"]:
+        yy = np.arange(h, dtype=np.float32)[:, None]
+        xx = np.arange(w, dtype=np.float32)[None, :]
+        arr = arr + float(p["glare"]) * np.exp(-(((xx - cx0[0]) ** 2) / (2 * 150.0 ** 2) +
+                                                 ((yy - cx0[1]) ** 2) / (2 * 95.0 ** 2)))
+    if p["shadow"] != 1.0:
+        band = np.ones((h, w), dtype=np.float32)
+        band[:, int(cx0[0]):] = float(p["shadow"])
+        band = np.array(Image.fromarray((band * 255).astype(np.uint8), mode="L")
+                        .filter(ImageFilter.GaussianBlur(12))).astype(np.float32) / 255.0
+        arr = arr * band
+    if p["bright"] != 1.0:
+        arr = arr * float(p["bright"])
+    if p["noise"]:
+        arr = arr + rng.normal(0, float(p["noise"]), size=(h, w))
+
+    tags = [f"{ax}={_fmt_val(v)}" for ax, v in sorted(combo.items())]
+    tags.append("sym-" + codes[0]["symbology"])
+    name = "sw" + "".join(f"_{ax}-{_fmt_val(v)}" for ax, v in sorted(combo.items())) \
+           + f"_{len(codes)}"
+    params = {k2: _fmt_val(v) for k2, v in p.items()}
+    params["module_effective"] = f"{eff_mod:.2f}"   # 셀에 안 들어가 클램프됐을 수 있다
+    rec = {"file": name + "." + cfg["format"], "index": index, "expected": len(codes),
+           "width": w, "height": h, "severity": 0.0, "difficulty": "sweep",
+           "tags": tags, "params": params, "codes": codes}
+    return name, np.clip(arr, 0, 255).astype(np.uint8), rec
+
+
+def write_image(outdir, name, arr, fmt):
+    path = os.path.join(outdir, f"{name}.{fmt}")
+    if fmt == "pgm":
+        h, w = arr.shape
+        with open(path, "wb") as f:
+            f.write(f"P5\n{w} {h}\n255\n".encode())
+            f.write(arr.tobytes())
+    else:
+        Image.fromarray(arr, mode="L").save(path, optimize=True)
+    return path
+
+
+# ============================================================ 병렬 구동 / 출력
+#
+# 용량 문제에 대해 (중요)
+# ----------------------
+# 2048x1536 PGM 한 장 = 3.1MB. 1도 간격 360장 x 대비 50단계 = 18,000장 =
+# **56GB**. 축을 두어 개만 더 걸면 수십만 장 = 수백 GB — 데스크탑 디스크가
+# 그냥 찬다. 그래서 기본 사용법은 파일로 떨구는 게 아니라 **스트리밍**이다:
+#
+#   python3 tools/generate_corpus.py --sweep angle:0:359:1 --stream \
+#     | ./verify_accuracy --stdin
+#
+# 프레임을 만들어 파이프로 바로 디코더에 먹이고 버린다. 디스크 사용량 0,
+# 이미지 수에 상한이 없다. 정답(개수/텍스트/태그)은 프레임마다 헤더 한 줄로
+# 같이 흘러가므로 라벨 파일도 필요 없다.
+#
+# 파일로 저장하는 건 "눈으로 볼 소수의 이미지"나 "여러 번 재사용할 고정
+# 코퍼스"일 때만. 그래서 파일 모드에는 용량 상한(--max-disk-gb)이 걸려 있고,
+# 예상 용량이 상한이나 남은 공간을 넘으면 아예 시작하지 않는다.
+
+STREAM_MAGIC = "FRAME"
+
+_CFG = None
+_COMBOS = None
+
+
+def _init(cfg, combos):
+    global _CFG, _COMBOS
+    _CFG, _COMBOS = cfg, combos
+
+
+def _build(index):
+    if _COMBOS is not None:
+        return build_sweep(index, _COMBOS[index], _CFG)
+    return build_one(index, _CFG)
+
+
+def _work_file(index):
+    try:
+        name, arr, rec = _build(index)
+        write_image(_CFG["outdir"], name, arr, _CFG["format"])
+        return rec
+    except Exception as e:                      # 한 장 실패로 전체를 죽이지 않는다
+        return {"index": index, "error": f"{type(e).__name__}: {e}"}
+
+
+def _work_stream(index):
+    """스트리밍용: 파일을 안 쓰고 (헤더, 원본바이트)를 부모로 돌려준다."""
+    try:
+        name, arr, rec = _build(index)
+        hdr = "\t".join([STREAM_MAGIC, str(rec["width"]), str(rec["height"]), name,
+                         str(rec["expected"]), ",".join(rec["tags"]),
+                         "|".join(c["text"] for c in rec["codes"]),
+                         codetags_field(rec)]) + "\n"
+        return hdr.encode("utf-8"), arr.tobytes(), rec["expected"]
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}".encode(), index
+
+
+def codetags_field(rec):
+    """코드별 태그를 '&'로 묶어 코드 순서대로 '|' 구분.
+
+    구분자가 '&'인 이유: 태그 이름 자체에 '+'가 들어간다("mod-5px+").
+    '+'로 묶으면 파싱할 때 쪼개져서 유령 태그가 생긴다.
+
+    모듈 크기/반전/DPM 같은 건 **코드의 속성**이지 이미지의 속성이 아니다.
+    이미지 단위로만 집계하면 "2px 코드가 하나 섞인 이미지"의 나머지 큰
+    코드들까지 mod-2px 행에 들어가서 축이 뭉개진다. verify_accuracy는 이
+    열이 있으면 정답 텍스트 대조 결과를 코드별로 태그에 귀속시킨다.
+    """
+    return "|".join("&".join(c.get("tags") or ["-"]) for c in rec["codes"])
+
+
+def write_labels(outdir, recs):
+    """labels.tsv — C++ 쪽(verify_accuracy)이 파싱하기 쉬운 평면 포맷.
+
+        file <TAB> expected <TAB> tags(,) <TAB> texts(|) <TAB> symbologies(|)
+
+    JSON을 안 쓰는 이유는 verify_accuracy가 의존성 없이 읽어야 하기 때문.
+    풍부한 정답(좌표/회전각/코드별 태그/스윕 파라미터)은 labels.jsonl에 쓴다.
+    """
+    with open(os.path.join(outdir, "labels.tsv"), "w", encoding="utf-8") as f:
+        f.write("# file\texpected\ttags\ttexts\tsymbologies\tcodetags\n")
+        for r in recs:
+            f.write("\t".join([
+                r["file"], str(r["expected"]), ",".join(r["tags"]),
+                "|".join(c["text"] for c in r["codes"]),
+                "|".join(c["symbology"] for c in r["codes"]),
+                codetags_field(r),
+            ]) + "\n")
+    with open(os.path.join(outdir, "labels.jsonl"), "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def build_combos(specs):
+    """--sweep 여러 개의 데카르트 곱. 순서는 지정한 순서 그대로."""
+    axes = [parse_sweep(s) for s in specs]
+    combos = [{}]
+    for name, vals in axes:
+        combos = [dict(c, **{name: v}) for c in combos for v in vals]
+    return axes, combos
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="악조건 대량 코퍼스/스윕 생성 (파일 저장 또는 스트리밍)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="스윕 축:\n" + "\n".join(f"  {k:9} {v}" for k, v in SWEEP_HELP.items()))
+    ap.add_argument("-o", "--outdir", default="corpus")
+    ap.add_argument("-n", "--count", type=int, default=1000,
+                    help="난수 모드에서 생성할 이미지 수 (--sweep을 쓰면 무시)")
+    ap.add_argument("--start", type=int, default=0, help="시작 인덱스(코퍼스 이어붙이기)")
+    ap.add_argument("--only", type=int, default=None, help="이 인덱스 한 장만 재생성")
+    ap.add_argument("--seed", type=int, default=20260730, help="마스터 씨드")
+    ap.add_argument("--difficulty", choices=sorted(DIFFICULTY), default="mixed")
+    ap.add_argument("--width", type=int, default=2048)
+    ap.add_argument("--height", type=int, default=1536)
+    ap.add_argument("--max-codes", type=int, default=12)
+    ap.add_argument("--symbologies", default="QR,QR,QR,CODE128,CODE128,EAN13,CODE39,ITF",
+                    help="난수 모드 심볼로지. 중복해서 쓰면 그만큼 가중치가 올라간다")
+    ap.add_argument("--sweep", action="append", default=[], metavar="AXIS:START:STOP:STEP",
+                    help="격자 스윕 축. 여러 번 쓰면 데카르트 곱 "
+                         "(예: --sweep angle:0:359:1 --sweep contrast:0.05:1:0.05)")
+    ap.add_argument("--base", default="", metavar="k=v,k=v",
+                    help="스윕에서 고정할 나머지 축 값 (예: sym=CODE128,module=3)")
+    ap.add_argument("--format", choices=["pgm", "png"], default="pgm",
+                    help="pgm=C 도구가 바로 읽는 원본, png=보관/눈으로 확인용(약 1/5 용량)")
+    ap.add_argument("--stream", action="store_true",
+                    help="파일 대신 stdout으로 프레임을 흘린다 (디스크 0). "
+                         "받는 쪽: ./verify_accuracy --stdin")
+    ap.add_argument("--max-disk-gb", type=float, default=20.0,
+                    help="파일 모드 용량 상한(GB). 예상치가 넘으면 시작하지 않는다")
+    ap.add_argument("--jobs", type=int, default=0, help="0=CPU 수")
+    ap.add_argument("--est", action="store_true", help="생성 없이 개수/용량/시간만 추정")
+    a = ap.parse_args()
+
+    base = {}
+    for kv in filter(None, (x.strip() for x in a.base.split(","))):
+        k, _, v = kv.partition("=")
+        k = k.strip()
+        if k not in SWEEP_BASE:
+            raise SystemExit(f"--base: 알 수 없는 축 {k}")
+        base[k] = v.strip().upper() if k in ("sym", "ec") else (
+            int(v) if k == "count" else float(v))
+
+    axes, combos = (None, None)
+    if a.sweep:
+        axes, combos = build_combos(a.sweep)
+        idxs = list(range(len(combos)))
+        if a.only is not None:
+            idxs = [a.only]
+    else:
+        idxs = [a.only] if a.only is not None else list(range(a.start, a.start + a.count))
+
+    jobs = max(1, a.jobs or os.cpu_count() or 1)
+    per_mb = a.width * a.height / 1e6 * (1.0 if a.format == "pgm" else 0.22)
+    total_gb = per_mb * len(idxs) / 1024.0
+    # 실측 0.22s/장(2048x1536, 1코어)에서 해상도 비례 환산
+    secs = len(idxs) * 0.22 * (a.width * a.height) / (2048 * 1536) / jobs
+
+    if a.sweep:
+        print(">> 스윕: " + " x ".join(f"{n}({len(v)}단계)" for n, v in axes)
+              + f" = {len(combos)}장", file=sys.stderr)
+    if a.est:
+        print(f"{len(idxs)}장 / 파일 저장 시 {per_mb:.1f}MB x {len(idxs)} = {total_gb:.1f}GB "
+              f"/ 생성 약 {secs / 60:.1f}분 ({jobs} jobs)\n"
+              f"--stream 이면 디스크 0GB (프레임을 파이프로 바로 디코더에 넘김)",
+              file=sys.stderr)
+        return
+
+    # ---- 용량 가드 (파일 모드에서만)
+    if not a.stream:
+        os.makedirs(a.outdir, exist_ok=True)
+        free_gb = __import__("shutil").disk_usage(a.outdir).free / 1024 ** 3
+        if total_gb > a.max_disk_gb:
+            raise SystemExit(
+                f"!! 예상 용량 {total_gb:.1f}GB > 상한 {a.max_disk_gb:.1f}GB — 중단합니다.\n"
+                f"   해결책 (권장 순):\n"
+                f"   1) --stream 으로 파이프에 흘리기 (디스크 0GB):\n"
+                f"      python3 {os.path.basename(__file__)} ... --stream | ./verify_accuracy --stdin\n"
+                f"   2) --width 1024 --height 768 (용량 1/4)\n"
+                f"   3) --format png (약 1/5)\n"
+                f"   4) 정말 저장해야 하면 --max-disk-gb {math.ceil(total_gb) + 1}")
+        if total_gb > free_gb * 0.8:
+            raise SystemExit(f"!! 예상 용량 {total_gb:.1f}GB 가 남은 공간 {free_gb:.1f}GB 의 "
+                             f"80%를 넘습니다 — 중단합니다. --stream 을 쓰세요.")
+
+    cfg = {"seed": a.seed, "width": a.width, "height": a.height, "outdir": a.outdir,
+           "difficulty": a.difficulty, "max_codes": a.max_codes, "format": a.format,
+           "base": base,
+           "symbologies": [s.strip().upper() for s in a.symbologies.split(",") if s.strip()]}
+
+    log = sys.stderr                    # 스트리밍 중에는 stdout이 프레임 전용이다
+    print(f">> {len(idxs)}장 ({'sweep' if a.sweep else a.difficulty}, seed={a.seed}, "
+          f"{a.width}x{a.height}, jobs={jobs}) -> "
+          + ("stdout 스트림 (디스크 0)" if a.stream else f"{a.outdir}/ ({total_gb:.1f}GB)"),
+          file=log, flush=True)
+
+    t0 = time.time()
+    recs, errs, ncodes = [], 0, 0
+    out = sys.stdout.buffer if a.stream else None
+
+    def progress(i):
+        if i % 200 == 0 or i == len(idxs):
+            el = time.time() - t0
+            print(f"  {i}/{len(idxs)}  {el:.0f}s  (남은 시간 약 "
+                  f"{el / max(1, i) * (len(idxs) - i):.0f}s)", file=log, flush=True)
+
+    if jobs > 1 and len(idxs) > 1:
+        # 배치로 끊어서 돌린다 — 스트리밍에서 워커가 앞서 달려 나가면
+        # 3MB짜리 프레임이 부모 메모리에 무한정 쌓인다. 배치 크기로 상한을 건다.
+        batch = jobs * 2
+        done = 0
+        with mp.Pool(jobs, initializer=_init, initargs=(cfg, combos)) as pool:
+            for s in range(0, len(idxs), batch):
+                chunk = idxs[s:s + batch]
+                if a.stream:
+                    for hdr, payload, exp in pool.imap(_work_stream, chunk):
+                        done += 1
+                        if hdr is None:
+                            errs += 1
+                            print(f"  !! {exp}: {payload.decode()}", file=log)
+                        else:
+                            out.write(hdr); out.write(payload)
+                            ncodes += exp
+                        progress(done)
+                    out.flush()
+                else:
+                    for rec in pool.imap(_work_file, chunk):
+                        done += 1
+                        if "error" in rec:
+                            errs += 1
+                            print(f"  !! {rec['index']}: {rec['error']}", file=log)
+                        else:
+                            recs.append(rec)
+                        progress(done)
+    else:
+        _init(cfg, combos)
+        for i, ix in enumerate(idxs, 1):
+            if a.stream:
+                hdr, payload, exp = _work_stream(ix)
+                if hdr is None:
+                    errs += 1
+                else:
+                    out.write(hdr); out.write(payload); ncodes += exp
+            else:
+                rec = _work_file(ix)
+                if "error" in rec:
+                    errs += 1
+                else:
+                    recs.append(rec)
+            progress(i)
+        if a.stream:
+            out.flush()
+
+    if not a.stream:
+        recs.sort(key=lambda r: r["index"])
+        write_labels(a.outdir, recs)
+        ncodes = sum(r["expected"] for r in recs)
+    n_done = len(idxs) - errs
+    print(f">> 완료: {n_done}장 / 코드 {ncodes}개 / {time.time() - t0:.0f}s"
+          + (f" / 실패 {errs}장" if errs else ""), file=log)
+    if not a.stream:
+        print(f">> 정답: {a.outdir}/labels.tsv (verify_accuracy가 자동으로 읽는다), "
+              f"labels.jsonl", file=log)
+
+
+if __name__ == "__main__":
+    main()
