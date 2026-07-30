@@ -136,6 +136,12 @@ LD_LIBRARY_PATH=build:build/third_party/zxing-cpp/core:build/zbar_install/lib \
     ./verify_accuracy ./stress
 ```
 
+> **속도 손잡이**: `vscan_config_t.max_frame_ms`(기본 0=무제한)로 프레임당
+> 시간 예산을 두면 폴백 체인의 꼬리를 자를 수 있다. 실측(악조건 혼합):
+> 120ms 예산에서 검출 −0.6%p / 평균 −31% / p95 −58%. 컨베이어처럼 주기가
+> 정해진 배치는 평균보다 최악값이 마감을 결정하므로 p95 감소가 크게 온다.
+> 자세한 트레이드오프 곡선은 PROJECT_NOTES §3.10.
+
 **기준선: 세 경로(full/two_stage/two_stage-fast) 모두 37/40.** 이보다
 떨어지면 회귀다. (`enable_dpm_rescue=1`을 명시하면 38/40 — DPM 구제는 opt-in,
 PROJECT_NOTES §3.2.18 참고)
