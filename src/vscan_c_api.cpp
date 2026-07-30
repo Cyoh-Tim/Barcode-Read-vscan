@@ -103,6 +103,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->coarse_factor == 2) pcfg.coarseFactor = 2;
         if (cfg->disable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = false;
         if (cfg->enable_dpm_rescue) pcfg.enableDPMRescue = true;
+        if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

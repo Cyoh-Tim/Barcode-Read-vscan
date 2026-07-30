@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <memory>
 #include <vector>
 #include "vscan_internal/decoder.hpp"
@@ -131,6 +132,24 @@ struct PipelineConfig {
     // 닫힘 연산 커널 크기. 점 간격보다 살짝 크게. 실측(점 간격 5px
     // 기준) k=5~9 전부 성공했고, 가장 작은 값(부작용 최소)을 기본으로.
     int dpmKernelSize = 5;
+
+    /*
+     * [프레임 시간 예산] 0 = 무제한(기본, 기존 동작 그대로).
+     *
+     * 대량 코퍼스 실측(§3.9): **전체 디코드 시간의 51%가 "결국 하나도 못
+     * 찾는" 프레임에 쓰인다.** 성공 프레임 평균 56ms인데 실패 프레임은
+     * 150ms(full) / 209ms(2stage) — 폴백 체인을 끝까지 돌고 실패하는 비용이다.
+     *
+     * 이 값을 두면 폴백 **단계 경계마다** 경과 시간을 확인해서, 예산을 넘겼
+     * 으면 남은 단계를 생략하고 그때까지 찾은 결과를 돌려준다.
+     * - 이미 성공한 프레임은 영향이 없다(성공하면 즉시 반환하므로).
+     * - 실행 중인 단계를 중간에 끊지는 않는다. 따라서 실제 소요는 예산을
+     *   한 단계만큼 초과할 수 있다 — 하드 리얼타임 보장이 아니라
+     *   "꼬리를 자르는" 장치다.
+     * - 컨베이어처럼 프레임 주기가 정해진 배치에서는 평균보다 **최악값**이
+     *   마감을 결정하므로, 여기에 주기의 60~80%를 넣는 게 보통 맞다.
+     */
+    int maxFrameMs = 0;
 };
 
 class Pipeline {
@@ -205,6 +224,20 @@ private:
     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
     std::vector<Rect> lastPositions_;
     int framesSinceFullScan_ = 0;
+
+    // 프레임 시간 예산 (maxFrameMs). 최상위 호출에서만 시작/해제한다 —
+    // 폴백이 processView()를 다시 부를 때 예산이 리셋되면 안 되기 때문.
+    std::chrono::steady_clock::time_point deadline_{};
+    bool deadlineActive_ = false;
+    // 예산을 시작하고 스코프를 벗어날 때 해제하는 가드. 이미 활성이면(=중첩
+    // 호출이면) 아무것도 하지 않는다.
+    struct BudgetGuard {
+        Pipeline* p; bool owner;
+        explicit BudgetGuard(Pipeline* pp);
+        ~BudgetGuard();
+    };
+    // 예산을 넘겼는가. 예산이 0이거나 미설정이면 항상 false.
+    bool budgetExceeded() const;
 
     // coarse locate 적응형 스킵 상태
     int coarseMisses_ = 0;      // 연속 실패 횟수

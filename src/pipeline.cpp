@@ -20,6 +20,20 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
                                                          cfg_.downscaleThreshold));
 }
 
+Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
+    if (p->cfg_.maxFrameMs > 0 && !p->deadlineActive_) {
+        p->deadline_ = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(p->cfg_.maxFrameMs);
+        p->deadlineActive_ = true;
+        owner = true;
+    }
+}
+Pipeline::BudgetGuard::~BudgetGuard() { if (owner) p->deadlineActive_ = false; }
+
+bool Pipeline::budgetExceeded() const {
+    return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
+}
+
 void Pipeline::addDecoder(std::unique_ptr<IDecoder> decoder) {
     decoders_.push_back(std::move(decoder));
 }
@@ -120,8 +134,13 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
 }
 
 std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+    BudgetGuard budget(this);
     auto hits = processViewCore(image);
     if (!hits.empty()) return hits;
+
+    // 여기부터는 구제 단계(DPM/1D 회전)다 — 실패 프레임에서만 도는,
+    // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
+    if (budgetExceeded()) return hits;
 
     // [DPM/점각인 구제] processViewCore()가 풀옵션으로도 빈손이면,
     // DPM(레이저 점각인) 코드일 가능성을 본다. 실물 비교 대상 리더기 대조
@@ -142,7 +161,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 찾아내는 진짜 검출 능력 확장이라, two_stage뿐 아니라 순수 풀옵션
     // 경로(processView/vscan_process_gray)에도 있어야 맞다.
     // [[vscan-lite-1d-deskew-rescue]]
-    if (!cfg_.enable1DDeskewRescue) return hits;
+    if (!cfg_.enable1DDeskewRescue || budgetExceeded()) return hits;
     int need = std::max(1, cfg_.minExpectedCodes);
     auto rescued = tryDeskewRescue1D(image, need);
     return rescued.empty() ? hits : rescued;
@@ -199,6 +218,7 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
     Pipeline rescuePipe(rescueCfg);
 
     for (float ang : {45.0f, 135.0f}) {
+        if (budgetExceeded()) break;
         GrayImage rotated;
         rotateAroundPoint(GrayView(crop), ang, pivotX, pivotY, rotated);
         auto hits = rescuePipe.processViewCore(GrayView(rotated));
@@ -213,6 +233,7 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
 
 std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image, int cropPadPx) {
     if (image.empty()) return {};
+    BudgetGuard budget(this);
     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
 
     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
@@ -280,6 +301,10 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline fast(fastCfg);
     auto hits = fast.processViewCore(image);
     if ((int)hits.size() >= need) return hits;
+    // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
+    // "부분 검출이라도 제때"가 "완벽하지만 늦음"보다 나은 배치를 위한 것 —
+    // 기본값(maxFrameMs=0)에서는 이 검사가 전부 무효라 동작이 동일하다.
+    if (budgetExceeded()) return hits;
 
     // [중간 단계] TryHarder만 켠 풀해상도 재시도 (Rotate/Invert는 여전히 끔).
     //
@@ -300,6 +325,8 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline harder(harderCfg);
     auto hardHits = harder.processViewCore(image);
     if ((int)hardHits.size() >= need) return hardHits;
+    if (hardHits.size() > hits.size()) hits = std::move(hardHits);
+    if (budgetExceeded()) return hits;
 
     // [3단계] TryHarder + TryInvert (여전히 TryRotate는 끔).
     //
@@ -322,13 +349,16 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline hi(hiCfg);
     auto hiHits = hi.processViewCore(image);
     if ((int)hiHits.size() >= need) return hiHits;
+    if (hiHits.size() > hits.size()) hits = std::move(hiHits);
+    if (budgetExceeded()) return hits;
 
     // [최종 폴백] TryRotate까지 포함한 완전한 풀옵션. processView()가
     // 이제 내부적으로 1D 회전 구제(5단계, [[vscan-lite-1d-deskew-rescue]])
     // 까지 자체적으로 시도하므로 여기서 따로 또 부를 필요는 없다 —
     // 그래서 이 최종 호출 하나가 사실상 4~5단계를 전부 커버한다.
     // [[vscan-lite-two-stage-fallback]]
-    return processView(image);
+    auto full = processView(image);
+    return full.size() >= hits.size() ? full : hits;
 }
 
 
