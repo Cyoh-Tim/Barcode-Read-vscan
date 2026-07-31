@@ -159,6 +159,40 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
         }
         if (!merged) pts.push_back({h.cx, h.cy, h.module, 1});
     }
+    // [부분화소 정밀화] 각 파인더 중심을 어두운 질량의 무게중심으로
+    // 다시 잡는다.
+    //
+    // 왜 필요한가. 행/열 스캔에서 얻는 중심은 런 경계의 정수 좌표에서
+    // 나오므로 오차가 ±1px 수준인데, 모듈이 2.1px이면 그게 **반 모듈**이다.
+    // 격자를 세울 때 이 오차가 코드 반대편까지 누적돼서, 파인더는 맞아
+    // 보여도 데이터 칸은 한 칸씩 밀린다(실측: 재샘플한 격자를 눈으로 보면
+    // 파인더 모양이 깨져 있었고 판독이 0곳이었다).
+    //
+    // 파인더는 7x7 안에서 검정이 압도적이라 무게중심이 곧 중심이다.
+    // 창은 ±3.5모듈 — 딱 파인더 크기다.
+    for (auto& p : pts) {
+        // 창 반경 2.5모듈: 파인더의 검은 테두리(반경 3.5)까지 다 넣으면
+        // 바로 옆 데이터 칸이 섞여 무게중심이 끌린다. 조금 좁게 잡아
+        // 파인더 안쪽 구조만 본다.
+        const int r = std::max(2, static_cast<int>(2.5f * p.module + 0.5f));
+        const int cx = static_cast<int>(p.cx + 0.5f), cy = static_cast<int>(p.cy + 0.5f);
+        const int x0 = std::max(0, cx - r), x1 = std::min(image.width - 1, cx + r);
+        const int y0 = std::max(0, cy - r), y1 = std::min(image.height - 1, cy + r);
+        if (x1 <= x0 || y1 <= y0) continue;
+        const int stride = image.stride > 0 ? image.stride : image.width;
+        double wsum = 0, sx = 0, sy = 0;
+        for (int y = y0; y <= y1; ++y) {
+            const uint8_t* __restrict row = image.pixels + static_cast<size_t>(y) * stride;
+            for (int x = x0; x <= x1; ++x) {
+                const double w = 255.0 - row[x];   // 어두울수록 무겁게
+                wsum += w;
+                sx += w * x;
+                sy += w * y;
+            }
+        }
+        if (wsum > 1e-6) { p.cx = static_cast<float>(sx / wsum); p.cy = static_cast<float>(sy / wsum); }
+    }
+
     // 표가 적은 것은 잡음이다 — 파인더는 가로 7모듈 x 세로 7모듈이라
     // 가로 스캔에서도 세로 스캔에서도 여러 번 걸린다. 임계 3은 실측값:
     // 2로 두면 후보가 9곳 나오는데 그중 하나가 가짜였고(ROI 디코드를
@@ -280,6 +314,14 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
                     y0 = std::min(y0, ys[t]); y1 = std::max(y1, ys[t]);
                 }
                 QrCandidate c;
+                c.cornerX = P[corner]->cx; c.cornerY = P[corner]->cy;
+                c.armAX = P[a]->cx;        c.armAY = P[a]->cy;
+                c.armBX = P[b]->cx;        c.armBY = P[b]->cy;
+                // 변 길이에서 버전을 역산해 유효 격자(17+4k)로 맞춘다.
+                {
+                    const int v = static_cast<int>(std::lround((t.leg / mod + 7.0f - 17.0f) / 4.0f));
+                    c.versionModules = 17 + 4 * std::max(1, std::min(40, v));
+                }
                 c.bbox.x0 = std::max(0, static_cast<int>(x0 - pad));
                 c.bbox.y0 = std::max(0, static_cast<int>(y0 - pad));
                 c.bbox.x1 = std::min(image.width, static_cast<int>(x1 + pad) + 1);

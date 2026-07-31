@@ -29,7 +29,17 @@ namespace vscan {
 struct QrCandidate {
     Rect bbox;        // 코드 전체를 감싸는 상자 (정지대 제외)
     float modulePx;   // 파인더에서 잰 모듈 한 칸의 픽셀 크기
+
+    // 파인더 세 개의 중심. corner가 직각(좌상단), armA/armB가 두 팔이다.
+    // 상자 계산에 쓰고, 모듈 격자를 직접 세우려는 쪽에도 그대로 넘길 수
+    // 있게 내보낸다(§3.22 마일스톤 4 참고 — 지금은 정밀도가 모자라
+    // 파이프라인에서 쓰지 않는다).
+    float cornerX, cornerY;
+    float armAX, armAY;
+    float armBX, armBY;
+    int versionModules;   // 한 변의 모듈 수 (21, 25, ..., 177)
 };
+
 
 /*
  * 파인더 패턴 세 개가 직각이등변을 이루는 조합을 찾아 QR 후보를 돌려준다.
