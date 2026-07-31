@@ -397,9 +397,30 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     if (rects.empty()) return {};
 
     std::vector<PipelineResult> hits;
-    if (pass != RegionPass::RotateOnly) {
-        hits = decodeRegionsParallel(image, rects, 0, roiCfg);
-        if ((int)hits.size() >= need) return hits;
+
+    // [정밀 각도 캐시] refineRegionAngle()은 원본 해상도 구조텐서라 영역당
+    // 1.2ms쯤 든다. 아래에서 "회전을 먼저 할까"를 정할 때와 실제로 회전할
+    // 때 두 번 필요하므로 한 번만 재서 나눠 쓴다. 실제 각도는 (-45,45]이고
+    // "방향 없음"은 +1e9라, -1e9를 "아직 안 쟀다" 센티널로 쓸 수 있다.
+    constexpr float kNotMeasured = -1e9f;
+    std::vector<float> refined(regions.size(), kNotMeasured);
+    auto angleOf = [&](size_t i) -> float {
+        if (refined[i] == kNotMeasured) {
+            float a = refineRegionAngle(image, regions[i].bbox);
+            // 원본 해상도에서 방향성이 안 잡히면 축소본 추정값이라도 쓴다.
+            refined[i] = (a >= CodeRegion::kAngleUnknown) ? regions[i].angleDeg : a;
+        }
+        return refined[i];
+    };
+
+    auto take = [&](std::vector<PipelineResult>&& found) -> bool {
+        if ((int)found.size() >= need) { hits = std::move(found); return true; }
+        if (found.size() > hits.size()) hits = std::move(found);
+        return false;
+    };
+
+    auto cropPass = [&]() -> bool {
+        if (take(decodeRegionsParallel(image, rects, 0, roiCfg))) return true;
 
         // [저대비 ROI 구제] 자르기만으로 안 되면 ROI 안에서 대비를 편다.
         // 심볼로지마다 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다
@@ -449,12 +470,10 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
                 stretched.insert(stretched.end(), sHits.begin(), sHits.end());
             }
-            stretched = dedup(std::move(stretched));
-            if ((int)stretched.size() >= need) return stretched;
-            if (stretched.size() > hits.size()) hits = std::move(stretched);
+            if (take(dedup(std::move(stretched)))) return true;
         }
-    }
-    if (pass == RegionPass::CropOnly) return hits;
+        return false;
+    };
 
     // [2차: 영역을 각도만큼 되돌려 다시] 여기까지 오면 자르는 것만으로는
     // 부족한 심볼로지다 — 실측상 PDF417과 1D가 그렇다. 2D 행렬코드는
@@ -469,6 +488,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     // 회전은 리샘플링이 들어가 영역 디코드보다 비싸므로, 방향이 뚜렷한
     // (angleDeg가 있는) 영역에만, 그리고 상위 몇 개에만 건다.
     const int rotLimit = std::min<int>(cfg_.regionRescueMaxRotations, (int)regions.size());
+    auto rotatePass = [&]() -> bool {
     for (int i = 0; i < rotLimit; ++i) {
         if (budgetExceeded()) break;
         if (regions[i].angleDeg >= CodeRegion::kAngleUnknown) continue;
@@ -490,9 +510,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         // 값이라 축 쪽으로 3~4도 끌려 있다. PDF417은 되돌린 뒤 읽히는
         // 각도 창이 8도 남짓이라 그 오차면 창을 벗어난다(25/30도 실패).
         // 여기서 영역 안만 원본 해상도로 다시 재면 오차가 0.7도로 줄어든다.
-        // 회전할 영역(최대 2개)에만 드는 비용이다.
-        float useAngle = refineRegionAngle(image, regions[i].bbox);
-        if (useAngle >= CodeRegion::kAngleUnknown) useAngle = regions[i].angleDeg;
+        // 회전할 영역(최대 2개)에만 드는 비용이다. angleOf()가 캐시하므로
+        // 아래 "회전을 먼저 할까" 판정에서 이미 쟀다면 공짜다.
+        const float useAngle = angleOf(static_cast<size_t>(i));
 
         GrayImage rotated;
         rotateAroundPoint(GrayView(crop), -useAngle,
@@ -519,8 +539,30 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
             rotated = std::move(tight);
         }
 
-        Pipeline roiPipe(roiCfg);
-        auto rotHits = roiPipe.processViewCore(GrayView(rotated));
+        // [되돌린 다음엔 먼저 싸게 물어본다] 여기 들어온 이미지는 방금
+        // 축에 정렬해 놓고 여백까지 잘라낸 상태라, TryHarder/TryInvert가
+        // 필요 없다. 그런데 roiCfg는 풀옵션이라 성공하는 경우까지 그 값을
+        // 다 낸다. 실측(Code128 module 8, 45/70도, 927x357 / 369x931):
+        // 풀옵션 9.0~9.5ms인데 이 가벼운 설정은 2.5~3.0ms로 결과가 같다.
+        //
+        // 단 TryRotate는 켜둔다. "되돌렸으니 축에 맞았을 텐데 왜"라고
+        // 생각하기 쉽지만, 되돌리는 각이 (-45,45]로 접힌 값이라 실제
+        // 기울기가 50~70도였던 코드는 되돌린 뒤 **세로**로 선다(70도 ->
+        // 접은 각 -20 -> 되돌리면 순수 90도). 실측으로 정확히 그 구간만
+        // 이 단계가 빈손이 되어 풀옵션까지 내려갔다(50~70도 29ms,
+        // 20~40도 21ms). TryRotate를 켜면 크롭이 작아서 비용은 거의 0이고
+        // 그 구간이 21~23ms로 붙는다.
+        PipelineConfig plainCfg = roiCfg;
+        plainCfg.tryHarder = false;
+        plainCfg.tryRotate = true;
+        plainCfg.tryInvert = false;
+        Pipeline plainPipe(plainCfg);
+        auto rotHits = plainPipe.processViewCore(GrayView(rotated));
+        if ((int)rotHits.size() < need) {
+            Pipeline roiPipe(roiCfg);
+            auto full = roiPipe.processViewCore(GrayView(rotated));
+            if (full.size() > rotHits.size()) rotHits = std::move(full);
+        }
         if (!rotHits.empty()) {
             // [좌표 되돌리기] zxing이 준 건 회전된 크롭의 좌표라 그대로
             // 쓰면 안 된다. rotateAroundPoint()의 목적지->원본 매핑을
@@ -539,10 +581,49 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
                     pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
                 }
-            if ((int)rotHits.size() >= need) return rotHits;
-            if (rotHits.size() > hits.size()) hits = std::move(rotHits);
+            if (take(std::move(rotHits))) return true;
         }
     }
+    return false;
+    };
+
+    // [순서 결정 — 자를까 돌릴까를 영역이 알려준다]
+    // [[vscan-lite-region-rotate-first]]
+    //
+    // 지금까지는 항상 "자르기 -> (안 되면) 회전"이었다. 그런데 회전이
+    // 필요한 프레임에서는 자르기 패스가 **반드시 실패한다** — 원인이
+    // 기울기지 면적이 아니기 때문이다. 실측(Code128 module 8, 2단계 경로,
+    // 각도별 총 시간 분해):
+    //
+    //   0도    coarse 2.1 + fast 9.6                                = 11.9ms
+    //   20도   ... + locate 2.4 + **자르기 17.3** + 대비 1.0 + 회전 21.0 = 55.5ms
+    //   45도   ... + locate 2.9 + **자르기 19.9** + 대비 1.1 + 회전 15.8 = 49.2ms
+    //
+    // 굵게 표시한 17~20ms가 통째로 헛수고다. 그래서 영역이 "방향이 뚜렷
+    // 하고 그 각이 충분히 크다"고 말하면 회전을 먼저 돌린다.
+    //
+    // 임계 15도의 근거. zxing은 TryRotate로 90도 배수를 알아서 처리하므로
+    // 실제로 문제가 되는 건 (-45,45]로 접은 각이다. 접은 각 기준으로
+    // 자르기만으로 읽히는 한계를 재보면 (Code128 module 8):
+    //   접은 각  0(0도) 10(10도) 20(20도) ... -20(70도) -10(80도) 0(90도)
+    //   자르기    성공    성공     실패          실패      성공     성공
+    // 10도는 되고 20도는 안 된다. 그 사이에 임계를 두되, 판정에 쓰는 각이
+    // 원본 해상도 추정값(오차 0.7도)이므로 여유는 크게 필요 없다.
+    //
+    // 순서를 바꾸는 것뿐이라 검출력에는 영향이 없다 — 회전이 빈손이면
+    // 자르기 패스가 그대로 뒤에서 돈다. 잘못 짚었을 때의 손해는 "원래
+    // 순서로 했을 때와 같은 총합"이 상한이다.
+    constexpr float kRotateFirstDeg = 15.0f;
+    bool rotateFirst = false;
+    if (pass == RegionPass::Both && !regions.empty() &&
+        regions[0].angleDeg < CodeRegion::kAngleUnknown) {
+        const float a = angleOf(0);
+        rotateFirst = (a < CodeRegion::kAngleUnknown) && (std::fabs(a) >= kRotateFirstDeg);
+    }
+
+    if (pass != RegionPass::RotateOnly && !rotateFirst) { if (cropPass()) return hits; }
+    if (pass != RegionPass::CropOnly) { if (rotatePass()) return hits; }
+    if (pass != RegionPass::RotateOnly && rotateFirst) { if (cropPass()) return hits; }
     return hits;
 }
 
