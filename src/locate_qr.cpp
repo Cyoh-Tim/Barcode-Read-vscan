@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace vscan {
@@ -104,6 +105,104 @@ void scanRow(const uint8_t* row, int W, int y, float minModulePx, float maxModul
     push(runStart, W - runStart, cur);
 }
 
+/*
+ * [부분화소 정합] 파인더 중심을 원본 그레이스케일에서 다시 잡는다.
+ *
+ * 이진화한 런 경계는 정수 좌표라 오차가 ±0.5px인데, 모듈이 2.1px이면
+ * 그게 4분의 1 모듈이고 격자를 세우면 반대편에서 누적된다. 대신 원본의
+ * **50% 교차점**을 선형 보간으로 잡으면 픽셀 사이를 나눌 수 있다.
+ *
+ * 파인더의 중심을 지나는 선은 항상 이 모양이다:
+ *   흰(정지대) 검(1) 흰(1) 검(3) 흰(1) 검(1) 흰(정지대)
+ * 그래서 **처음 흰->검 교차점과 마지막 검->흰 교차점의 중점**이 중심이다.
+ * 안쪽 경계들은 흐림에 더 오염되므로 바깥 두 개만 쓴다.
+ *
+ * 여러 줄에서 재서 평균 낸다 — 한 줄만 보면 그 줄의 잡음이 그대로 남는다.
+ */
+float refineAxis(const GrayView& img, float cx, float cy, float module, bool horizontal) {
+    const int stride = img.stride > 0 ? img.stride : img.width;
+    const int reach = std::max(4, static_cast<int>(5.0f * module));
+    const int lines = std::max(1, static_cast<int>(module));   // 중심 ±(모듈/2)줄
+
+    // 국소 흑/백 수준: 창 안의 최소/최대에서 조금 들어온 값
+    int lo = 255, hi = 0;
+    for (int d = -reach; d <= reach; ++d) {
+        for (int e = -lines; e <= lines; ++e) {
+            const int x = static_cast<int>(horizontal ? cx + d : cx + e);
+            const int y = static_cast<int>(horizontal ? cy + e : cy + d);
+            if (x < 0 || y < 0 || x >= img.width || y >= img.height) continue;
+            const int v = img.pixels[static_cast<size_t>(y) * stride + x];
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+    if (hi - lo < 20) return horizontal ? cx : cy;
+    const float mid = 0.5f * (lo + hi);
+
+    double sum = 0;
+    int n = 0;
+    for (int e = -lines; e <= lines; ++e) {
+        // 이 줄의 값을 뽑는다
+        std::vector<float> prof;
+        prof.reserve(2 * reach + 1);
+        bool ok = true;
+        for (int d = -reach; d <= reach; ++d) {
+            const int x = static_cast<int>(horizontal ? cx + d : cx + e);
+            const int y = static_cast<int>(horizontal ? cy + e : cy + d);
+            if (x < 0 || y < 0 || x >= img.width || y >= img.height) { ok = false; break; }
+            prof.push_back(static_cast<float>(img.pixels[static_cast<size_t>(y) * stride + x]));
+        }
+        if (!ok || prof.size() < 5) continue;
+
+        // [교차점 전부 모으기] 부분화소 위치와 방향(내려감=흰->검)을 함께.
+        std::vector<std::pair<float, bool>> cross;   // (위치, 내려감?)
+        for (size_t i = 1; i < prof.size(); ++i) {
+            if (prof[i - 1] > mid && prof[i] <= mid) {
+                const float t = (prof[i - 1] - mid) / (prof[i - 1] - prof[i]);
+                cross.emplace_back(static_cast<float>(i - 1) + t, true);
+            } else if (prof[i - 1] <= mid && prof[i] > mid) {
+                const float t = (mid - prof[i - 1]) / (prof[i] - prof[i - 1]);
+                cross.emplace_back(static_cast<float>(i - 1) + t, false);
+            }
+        }
+        if (cross.size() < 6) continue;
+
+        /*
+         * [1:1:3:1:1로 검증한다] 파인더 중심을 지나는 줄에는 교차점이
+         * 정확히 여섯 개 있고(흰검흰검흰검흰), 그 사이 다섯 구간의 비가
+         * 1:1:3:1:1이다. 창 안에서 그 조건을 만족하는 연속 6개를 찾아
+         * 바깥 두 개의 중점을 쓴다.
+         *
+         * 앞서 "창 안의 첫 교차 ~ 마지막 교차"로 했다가 두 팔 길이가
+         * 10%까지 어긋났다 — 정지대에 먼지가 있거나 옆 데이터 칸이
+         * 붙어 있으면 엉뚱한 교차점을 집는다. 중심을 안 지나는 줄
+         * (파인더 위/아래를 스치는 줄)도 그렇게 걸러진다.
+         */
+        float best = -1;
+        float bestErr = 1e9f;
+        for (size_t i = 0; i + 5 < cross.size(); ++i) {
+            if (!cross[i].second) continue;   // 흰->검으로 시작해야 한다
+            float g[5];
+            for (int k = 0; k < 5; ++k) g[k] = cross[i + k + 1].first - cross[i + k].first;
+            const float tot = g[0] + g[1] + g[2] + g[3] + g[4];
+            if (tot < 4.0f) continue;
+            const float u = tot / 7.0f;
+            const float want[5] = {u, u, 3.0f * u, u, u};
+            float err = 0;
+            for (int k = 0; k < 5; ++k) err += std::fabs(g[k] - want[k]) / u;
+            // 이 줄에서 잰 모듈이 후보 전체의 모듈과 크게 다르면 다른 것이다.
+            if (u < 0.55f * module || u > 1.8f * module) continue;
+            if (err < bestErr) { bestErr = err; best = (cross[i].first + cross[i + 5].first) * 0.5f; }
+        }
+        // 다섯 구간 합쳐 평균 0.35모듈 이내로 안 맞으면 신뢰하지 않는다.
+        if (best < 0 || bestErr > 1.75f) continue;
+        sum += best - reach;   // 창 중심 기준 오프셋
+        ++n;
+    }
+    if (n == 0) return horizontal ? cx : cy;
+    return (horizontal ? cx : cy) + static_cast<float>(sum / n);
+}
+
 } // namespace
 
 std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidates,
@@ -159,38 +258,20 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
         }
         if (!merged) pts.push_back({h.cx, h.cy, h.module, 1});
     }
-    // [부분화소 정밀화] 각 파인더 중심을 어두운 질량의 무게중심으로
-    // 다시 잡는다.
-    //
-    // 왜 필요한가. 행/열 스캔에서 얻는 중심은 런 경계의 정수 좌표에서
-    // 나오므로 오차가 ±1px 수준인데, 모듈이 2.1px이면 그게 **반 모듈**이다.
-    // 격자를 세울 때 이 오차가 코드 반대편까지 누적돼서, 파인더는 맞아
-    // 보여도 데이터 칸은 한 칸씩 밀린다(실측: 재샘플한 격자를 눈으로 보면
-    // 파인더 모양이 깨져 있었고 판독이 0곳이었다).
-    //
-    // 파인더는 7x7 안에서 검정이 압도적이라 무게중심이 곧 중심이다.
-    // 창은 ±3.5모듈 — 딱 파인더 크기다.
+    // [부분화소 정합] 원본 그레이스케일의 50% 교차점으로 중심을 다시 잡는다.
+    // 근거는 refineAxis() 주석. 무게중심으로도 해봤는데(창 ±2.5모듈)
+    // 두 팔 길이 비만 0.94~1.13 -> 0.98~1.08로 좋아지고 격자는 여전히
+    // 밀렸다 — 무게중심은 옆 데이터 칸의 흑백 분포에 끌린다.
+    // 두 축을 각각 정합한다. x는 가로 줄에서, y는 세로 줄에서.
+    // 두 번 돌리는 이유는 첫 번째 정합으로 중심이 옮겨가면 두 번째 줄
+    // 위치가 달라져 더 정확해지기 때문이다(1회 추가로 수렴한다).
     for (auto& p : pts) {
-        // 창 반경 2.5모듈: 파인더의 검은 테두리(반경 3.5)까지 다 넣으면
-        // 바로 옆 데이터 칸이 섞여 무게중심이 끌린다. 조금 좁게 잡아
-        // 파인더 안쪽 구조만 본다.
-        const int r = std::max(2, static_cast<int>(2.5f * p.module + 0.5f));
-        const int cx = static_cast<int>(p.cx + 0.5f), cy = static_cast<int>(p.cy + 0.5f);
-        const int x0 = std::max(0, cx - r), x1 = std::min(image.width - 1, cx + r);
-        const int y0 = std::max(0, cy - r), y1 = std::min(image.height - 1, cy + r);
-        if (x1 <= x0 || y1 <= y0) continue;
-        const int stride = image.stride > 0 ? image.stride : image.width;
-        double wsum = 0, sx = 0, sy = 0;
-        for (int y = y0; y <= y1; ++y) {
-            const uint8_t* __restrict row = image.pixels + static_cast<size_t>(y) * stride;
-            for (int x = x0; x <= x1; ++x) {
-                const double w = 255.0 - row[x];   // 어두울수록 무겁게
-                wsum += w;
-                sx += w * x;
-                sy += w * y;
-            }
+        for (int pass = 0; pass < 2; ++pass) {
+            const float nx = refineAxis(image, p.cx, p.cy, p.module, true);
+            const float ny = refineAxis(image, p.cx, p.cy, p.module, false);
+            p.cx = nx;
+            p.cy = ny;
         }
-        if (wsum > 1e-6) { p.cx = static_cast<float>(sx / wsum); p.cy = static_cast<float>(sy / wsum); }
     }
 
     // 표가 적은 것은 잡음이다 — 파인더는 가로 7모듈 x 세로 7모듈이라

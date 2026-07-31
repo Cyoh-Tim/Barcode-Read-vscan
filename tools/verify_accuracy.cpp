@@ -203,6 +203,7 @@ static void usage(const char* argv0) {
         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
         "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
         "  --no-region      영역(ROI) 구제 끔 (효과/비용 분리 측정용)\n"
+        "  --zbar           ZBar 보조 디코더 켬\n"        "  --qr-finder      QR 파인더 구제 켬 (작고 밀집한 QR용)\n"
         "  --adaptive       적응형 배치 프로파일 켜고 파이프라인을 프레임 간 재사용\n"
         "                   (실제 워커 구조와 같은 조건. min_expected_codes=0 강제)\n"
         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
@@ -221,7 +222,7 @@ int main(int argc, char** argv) {
     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
     int reps = 0, limit = 0, stride = 1, overlap = 500;
     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0, noRegion = 0;
+    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0, noRegion = 0, useZbar = 0, qrFinder = 0;
 
     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -246,6 +247,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-blank-skip") noBlankSkip = 1;
         else if (a == "--no-denoise") noDenoise = 1;
         else if (a == "--no-region") noRegion = 1;
+        else if (a == "--zbar") useZbar = 1;
+        else if (a == "--qr-finder") qrFinder = 1;
         else if (a == "--adaptive") { adaptive = 1; useMinExp = 0; }
         else if (a == "--dump-mismatch") dumpMismatch = 1;
         else if (a == "--stdin") stdinMode = 1;
@@ -346,6 +349,8 @@ int main(int argc, char** argv) {
             c.disable_blank_frame_skip = noBlankSkip;
             c.disable_denoise_rescue = noDenoise;
             c.disable_region_rescue = noRegion;
+            c.enable_zbar_fastpath = useZbar;
+            c.enable_qr_finder_rescue = qrFinder;
             c.enable_adaptive_profile = 1;
             c.min_expected_codes = 0;
             shared[i] = vscan_create(&c);
@@ -370,6 +375,8 @@ int main(int argc, char** argv) {
             cfg.disable_blank_frame_skip = noBlankSkip;
             cfg.disable_denoise_rescue = noDenoise;
             cfg.disable_region_rescue = noRegion;
+            cfg.enable_zbar_fastpath = useZbar;
+            cfg.enable_qr_finder_rescue = qrFinder;
             // "아이템당 코드 개수를 아는 현장" 사용법: 빠른 경로가 이 개수를
             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.

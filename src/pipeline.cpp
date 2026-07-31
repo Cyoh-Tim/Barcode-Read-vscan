@@ -29,7 +29,13 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
     // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
     // cfg_를 복사하므로 자동으로 같이 따라간다.
     // [[vscan-lite-zbar-in-subpipelines]]
-    if (cfg_.enableZBar) decoders_.push_back(std::make_unique<ZBarDecoder>());
+    // ZBar는 **디코더 목록에 안 넣는다** — 그러면 폴백 체인의 모든 패스에서
+    // 매번 돌아 코퍼스 평균이 3.2배가 된다(실측 149 -> 478ms). 대신
+    // tryZBarRescue()에서 실패 프레임에 한 번만 쓴다.
+    // zbarAsRescue를 끄면 예전처럼 상시 디코더로 동작한다.
+    // [[vscan-lite-zbar-rescue]]
+    if (cfg_.enableZBar && !cfg_.zbarAsRescue)
+        decoders_.push_back(std::make_unique<ZBarDecoder>());
 #endif
 }
 
@@ -269,7 +275,12 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     if (!cfg_.disableDenoiseRescue && !budgetExceeded()) {
         GrayImage smoothed;
         boxBlur3x3(image, smoothed);
-        auto dnHits = processViewCore(GrayView(smoothed));
+        // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
+        // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
+        PipelineConfig dnCfg = cfg_;
+        dnCfg.zbarAsRescue = false;
+        Pipeline dn(dnCfg);
+        auto dnHits = dn.processViewCore(GrayView(smoothed));
         if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
     }
 
@@ -303,6 +314,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
     }
+
 
 
     // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
@@ -364,6 +376,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     roiCfg.tryRotate = true;
     roiCfg.tryInvert = true;
     roiCfg.enableRegionRescue = false;   // 재귀 방지
+    roiCfg.zbarAsRescue = false;         // ROI 디코드에는 ZBar를 붙인다
     roiCfg.enable1DDeskewRescue = false;
     roiCfg.enableDPMRescue = false;
 
@@ -852,6 +865,7 @@ std::vector<PipelineResult> Pipeline::processViewROIs(const GrayView& image, con
     // 경로는 그 근거가 없어서 기본 꺼짐이다.
     // [[vscan-lite-small-code-upscale]]
     if (regionCfg.smallRoiUpscale <= 1) regionCfg.smallRoiUpscale = 3;
+    regionCfg.zbarAsRescue = false;      // ROI 디코드에는 ZBar를 붙인다
 
     return decodeRegionsParallel(image, rects, padPx, regionCfg);
 }
@@ -1087,6 +1101,35 @@ bool textContains(const std::string& outer, const std::string& inner) {
            outer.find(inner) != std::string::npos;
 }
 
+// 한쪽이 다른 쪽의 **얇은 스캔 조각**인가.
+//
+// 실측(DataBar Expanded, 노이즈 15): 같은 텍스트가 두 상자로 나오는데
+//   (67,612)-(956,624)   두께  12
+//   (67,726)-(956,872)   두께 146
+// x 범위가 67~956으로 **완전히 같고** 하나는 두께 12px짜리다. 그건 라벨이
+// 아니라 스캔 밴드 한 줄이다. 그런데 세로 간격이 102px라 밴드 규칙
+// ([[vscan-lite-dedup-stacked-band]], 간격 < 합친 두께의 10%)을 빠져나간다.
+//
+// 두께 비로 가른다: 긴 축이 90% 이상 겹치면서 얇은 쪽 두께가 두꺼운 쪽의
+// 35% 미만이면, 그건 같은 심볼을 스쳐 지나간 조각이다. 나란히 붙은 같은
+// 라벨 2장은 두께가 비슷하므로 이 조건에 안 걸린다.
+// [[vscan-lite-dedup-thin-slice]]
+bool isThinSlice(const BBox& a, const BBox& b) {
+    const double aw = a.x1 - a.x0, ah = a.y1 - a.y0;
+    const double bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+    if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return false;
+
+    auto sliver = [](double aLo, double aHi, double bLo, double bHi,   // 긴 축
+                     double cLo, double cHi, double dLo, double dHi) { // 두께 축
+        const double ov = std::min(aHi, bHi) - std::max(aLo, bLo);
+        if (ov < 0.90 * std::min(aHi - aLo, bHi - bLo)) return false;
+        const double t1 = cHi - cLo, t2 = dHi - dLo;
+        return std::min(t1, t2) < 0.35 * std::max(t1, t2);
+    };
+    return sliver(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
+           sliver(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
+}
+
 bool hasDegenerateQuad(const DecodedSymbol& s) {
     for (int i = 0; i < 4; ++i)
         for (int j = i + 1; j < 4; ++j)
@@ -1201,6 +1244,34 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
         bool isDup = false;
         for (auto& kept : out) {
             if (kept.symbol.symbology != cand.symbol.symbology) continue;
+
+            /*
+             * [같은 자리, 다른 내용 = 한쪽은 오독]
+             *
+             * 실측(UPC-E, 모듈 5px):
+             *   "01234565" (257,670)-(766,864)   <- 정답
+             *   "01244564" (252,675)-(756,855)   <- 오독, 체크디짓까지 통과
+             * 두 상자가 거의 완전히 겹친다. 같은 자리에 코드 두 개가 인쇄될
+             * 수는 없으므로 둘 중 하나는 틀렸다 — 둘 다 돌려주면 호출자에게
+             * 모순을 넘기는 셈이고, 그건 하나만 주는 것보다 나쁘다.
+             *
+             * 남기는 쪽은 **상자가 큰 쪽**이다. 심볼을 더 온전히 본 결과가
+             * 맞을 가능성이 높다는 기존 규칙과 같은 근거이고, 위 실측에서도
+             * 정답 쪽이 509x194로 오독(504x180)보다 크다.
+             *
+             * 겹침 임계 0.9는 일부러 높다. 0.5(중복 판정용)로 잡으면
+             * 나란히 붙은 서로 다른 코드가 조금만 겹쳐도 하나가 사라진다.
+             * [[vscan-lite-dedup-conflicting-overlap]]
+             */
+            if (kept.symbol.text != cand.symbol.text) {
+                const auto cb = bboxOf(cand.symbol), kb = bboxOf(kept.symbol);
+                if (!hasDegenerateQuad(cand.symbol) && !hasDegenerateQuad(kept.symbol) &&
+                    containRatio(cb, kb) >= 0.9) {
+                    isDup = true;
+                    if (areaOf(cb) > areaOf(kb)) kept = std::move(cand);
+                    break;
+                }
+            }
             // 같은 텍스트이거나, 한쪽이 다른 쪽의 부분 문자열이거나.
             // 후자는 1D 부분 스캔 — 아래 기하 조건까지 만족할 때만 지운다.
             const bool sameText = kept.symbol.text == cand.symbol.text;
@@ -1218,7 +1289,8 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
             if (near || containRatio(candBox, keptBox) >= kOverlapDup ||
                 hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol) ||
                 (partial && onSameBarcodeBand(candBox, keptBox)) ||
-                (sameText && isStackedBand(candBox, keptBox))) {
+                (sameText && isStackedBand(candBox, keptBox)) ||
+                (sameText && isThinSlice(candBox, keptBox))) {
                 isDup = true;
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —

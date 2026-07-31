@@ -35,10 +35,33 @@ std::vector<DecodedSymbol> ZBarDecoder::decode(const GrayView& image) {
     std::vector<DecodedSymbol> results;
     if (image.empty()) return results;
 
+    /*
+     * [심볼로지 선별] 전부 켜면 안 된다.
+     *
+     * ZBar를 켜는 이유는 **저대비**에서 zxing보다 강해서다. 실측(모듈 6px,
+     * 대비 축 0.05~1.0 스윕):
+     *   Code128  90% -> 100%      EAN13   90% -> 100%
+     *   EAN8     85% -> 100%      UPC-A   90% -> 100%
+     *   Code39   85% ->  90%
+     * zxing이 대비 0.15에서 끊기는데 ZBar는 0.05까지 읽는다.
+     *
+     * 그런데 전부 켜면 DataBar에서 **오디코딩 19~20건**이 쏟아진다
+     * (DataBar 90% -> 75%, DataBar Expanded 90% -> 75%). ZBar가 DataBar의
+     * 막대 일부를 EAN/UPC나 I2/5로 잘못 읽는 것으로 보인다. Codabar도
+     * 3건 나온다. 산업 현장에서 오디코딩은 미검출보다 나쁘므로(§3.18)
+     * 이득이 확인된 것만 켠다.
+     *
+     * 2D(QR)도 끈다 — zxing이 담당하고, 스캔 범위를 줄여 비용도 아낀다.
+     * [[vscan-lite-zbar-selective]]
+     */
     zbar::ImageScanner scanner;
-    scanner.set_config(zbar::ZBAR_NONE, zbar::ZBAR_CFG_ENABLE, 1);
-    // 2D는 zxing-cpp가 담당하므로 ZBar에서는 끈다 (속도를 위해 스캔 범위 축소)
-    scanner.set_config(zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_ENABLE, 0);
+    scanner.set_config(zbar::ZBAR_NONE, zbar::ZBAR_CFG_ENABLE, 0);   // 전부 끄고 시작
+    scanner.set_config(zbar::ZBAR_EAN13,   zbar::ZBAR_CFG_ENABLE, 1);
+    scanner.set_config(zbar::ZBAR_EAN8,    zbar::ZBAR_CFG_ENABLE, 1);
+    scanner.set_config(zbar::ZBAR_UPCA,    zbar::ZBAR_CFG_ENABLE, 1);
+    scanner.set_config(zbar::ZBAR_UPCE,    zbar::ZBAR_CFG_ENABLE, 1);
+    scanner.set_config(zbar::ZBAR_CODE128, zbar::ZBAR_CFG_ENABLE, 1);
+    scanner.set_config(zbar::ZBAR_CODE39,  zbar::ZBAR_CFG_ENABLE, 1);
 
     zbar::Image zimg(image.width, image.height, "Y800",
                       image.pixels, static_cast<size_t>(image.width) * image.height);
