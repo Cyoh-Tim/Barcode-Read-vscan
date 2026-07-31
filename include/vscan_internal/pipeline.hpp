@@ -368,8 +368,9 @@ private:
 
     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
     std::vector<Rect> lastPositions_;
-    // 이번 프레임에서 영역 자르기 패스를 이미 돌았는가 (중복 방지).
+    // 이번 프레임에서 영역 자르기/회전 패스를 이미 돌았는가 (중복 방지).
     bool regionCropDone_ = false;
+    bool regionRotDone_ = false;
     int framesSinceFullScan_ = 0;
 
     // 프레임 시간 예산 (maxFrameMs). 최상위 호출에서만 시작/해제한다 —

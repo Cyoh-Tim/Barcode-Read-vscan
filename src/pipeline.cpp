@@ -294,6 +294,9 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
     // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
     if (cfg_.enableRegionRescue && !budgetExceeded()) {
+        // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
+        // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
+        if (regionCropDone_ && regionRotDone_) return hits;
         auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
@@ -602,6 +605,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     BudgetGuard budget(this);
     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
     regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
+    regionRotDone_ = false;
     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
 
     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
@@ -687,8 +691,21 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
     // [[vscan-lite-region-first]]
     if (cfg_.enableRegionRescue && !budgetExceeded()) {
+        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
+        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
+        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
+        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
+        // 40종도 726 -> 592ms, 단일코드 코퍼스도 평균 152 -> 144ms로
+        // 같이 빨라진다 — 뒤의 비싼 단계들을 건너뛰기 때문이다.
+        //
+        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
+        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다
+        // (다중 코드 코퍼스에서 그 경우 평균이 7% 늘었다).
+        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
         regionCropDone_ = true;
-        auto roiHits = tryRegionRescue(image, need, RegionPass::CropOnly);
+        regionRotDone_ = earlyRotate;
+        auto roiHits = tryRegionRescue(image, need,
+                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
         if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
     }
