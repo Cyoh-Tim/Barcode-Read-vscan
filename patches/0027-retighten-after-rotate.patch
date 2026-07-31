@@ -1,0 +1,261 @@
+From be4edc1885a0bc213bc819aa89082480a0705b5e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 08:57:35 +0000
+Subject: [PATCH] =?UTF-8?q?=ED=9A=8C=EC=A0=84=20=EA=B5=AC=EC=A0=9C:=20?=
+ =?UTF-8?q?=EB=90=98=EB=8F=8C=EB=A6=B0=20=EB=92=A4=20=EB=8B=A4=EC=8B=9C=20?=
+ =?UTF-8?q?=EC=A2=81=ED=98=80=EC=84=9C=20=EB=94=94=EC=BD=94=EB=93=9C=20?=
+ =?UTF-8?q?=E2=80=94=20ROI=2017ms=20->=2010ms?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+회전 구제 43ms의 내역을 쟀다(Code128 모듈 8px, 25~70도):
+  locate 3.4 / 각도정밀화 2.0 / 크롭+회전 7.0 / ROI 디코드 17.0ms
+ROI 디코드가 지배항이고, 그 ROI가 1184x1088 — 프레임의 42%다.
+기울어진 코드를 담으려면 크롭이 대각선 길이만큼 커야 해서다.
+
+옵션을 줄이는 쪽은 안 됐다. TryRotate는 못 끈다 — 각도를 (-45,45]로
+접으므로 70도 코드는 되돌려도 net 90도이고 그걸 읽는 게 TryRotate다
+(25/40도는 꺼도 되지만 70도가 죽는 것을 실측으로 확인).
+
+대신 되돌린 뒤 다시 좁힌다. 되돌리고 나면 코드가 축에 정렬돼서 상자의
+20% 남짓만 차지하고 나머지는 회전으로 생긴 흰 여백이다:
+
+           25도            40도            70도
+  회전본   1184x1088       1184x1088       1056x1344
+  실제코드  882x320(22%)    878x312(21%)    320x882(20%)
+  풀옵션    16.8ms          16.3ms          20.5ms
+  좁힌 뒤    9.8ms           9.6ms           9.4ms
+
+임계값은 이미지 자신의 명암 범위에서 잡는다(노출이 프레임마다 다르므로
+고정 상수를 쓸 수 없다). 회전으로 생긴 여백은 흰색이라 자연스럽게
+배경 쪽으로 떨어진다. 2픽셀 건너뛰며 훑어 비용은 1/4다.
+
+결과:
+  20~70도 평균      43 -> 39ms
+  전체 최악        114 -> 101ms
+  고정 40종 2단계  609 -> 591ms, fast 550 -> 507ms
+  단일 코퍼스     61.3% -> 61.9%
+  다중 코퍼스      평균 153 -> 149ms (검출 동일)
+
+기대(17->10ms)보다 총합 개선이 작은 이유는 회전 패스 앞에 자르기 패스의
+풀사이즈 ROI 디코드가 한 번 더 있어서다. 그쪽은 아직 안 돌린 상태라
+코드가 상자를 비스듬히 채워서 같은 방법으로는 못 줄인다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      | 57 +++++++++++++++++++++++----
+ include/vscan_internal/preprocess.hpp | 20 ++++++++++
+ src/pipeline.cpp                      | 26 +++++++++++-
+ src/preprocess.cpp                    | 51 ++++++++++++++++++++++++
+ 4 files changed, 145 insertions(+), 9 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index d9d09cb..bfc402d 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -1662,15 +1662,58 @@ n = 배율. 3배 + amount 150이 위 6곳 조합이다.)
+ (2)보다 많으면 이 자리에서 돌려도 need를 못 채우고 어차피 뒤로 넘어가므로,
+ 그 경우엔 자르기만 하도록 막아뒀다.
+ 
++#### 회전 구제 43ms의 내역과 그 다음 한 걸음
++43ms를 쪼개보면(Code128 모듈 8px, 25~70도):
++
++| 단계 | 시간 |
++|---|---|
++| locate | 3.4ms |
++| 각도 정밀화 | 2.0ms |
++| 크롭 + 회전 | 7.0ms |
++| **ROI 디코드** | **17ms** |
++
++ROI 디코드가 지배항인데, 그 ROI가 1184x1088 — **프레임의 42%**다.
++기울어진 코드를 담으려면 크롭이 대각선 길이만큼 커야 해서다.
++
++옵션을 줄여봤다. **TryRotate는 못 끈다** — 각도를 (-45,45]로 접으므로
++70도 코드는 되돌려도 net 90도이고, 그걸 읽는 게 TryRotate다. 실측으로
++확인했다(25/40도는 꺼도 되지만 70도가 죽는다).
++
++대신 **되돌린 뒤 다시 좁히면** 된다. 되돌리고 나면 코드가 축에 정렬돼서
++그 상자의 20% 남짓만 차지하고 나머지는 회전으로 생긴 흰 여백이다:
++
++| | 25도 | 40도 | 70도 |
++|---|---|---|---|
++| 회전본 크기 | 1184x1088 | 1184x1088 | 1056x1344 |
++| 실제 코드 범위 | 882x320 (22%) | 878x312 (21%) | 320x882 (20%) |
++| 풀옵션 디코드 | 16.8ms | 16.3ms | 20.5ms |
++| **타이트 크롭 후** | **9.8ms** | **9.6ms** | **9.4ms** |
++
++넣은 결과(`[[vscan-lite-retight-after-rotate]]`):
++
++| | 이전 | 이후 |
++|---|---|---|
++| 20~70도 평균 | 43ms | **39ms** |
++| 전체 최악 | 114ms | **101ms** |
++| 고정 40종 2단계 / fast | 609 / 550ms | **591 / 507ms** |
++| 단일 코퍼스 | 61.3% | **61.9%** |
++
++기대(17→10ms)보다 총합 개선이 작은 이유는, 회전 패스 앞에 자르기
++패스의 풀사이즈 ROI 디코드가 한 번 더 있어서다. 그쪽도 같은 방식으로
++줄일 수는 없다 — 아직 안 돌린 상태라 코드가 상자를 비스듬히 채운다.
++
+ #### 남은 불균일
+-카디널 근처가 2ms인데 회전 구간이 43ms라 **비율로는 여전히 20배**다.
++카디널 근처가 2ms인데 회전 구간이 39ms라 **비율로는 여전히 20배**다.
+ 다만 성격이 다르다 — 이전에는 "회전하면 못 읽거나 0.4초"였고 지금은
+-"회전하면 40~110ms"다. 산업용 리더기가 광고하는 10~20ms 대에 들어가려면
+-회전 구간의 43ms를 더 줄여야 하는데, 그 43ms의 내역은 locate 4ms +
+-크롭 회전 리샘플 + ROI 풀옵션 디코드다. 다음 후보는 ROI 디코드 옵션을
+-좁히는 것인데, 예전에 재봤을 때는 옵션을 줄이면 ROI 성공률이 떨어져
+-뒤 단계로 넘어가는 바람에 총합이 커졌다(§3.17). 회전이 앞으로 온 지금은
+-조건이 달라졌으니 다시 재볼 만하다.
++"회전하면 40~110ms"다. 산업용 리더기가 광고하는 10~20ms 대에 들어가려면 39ms를 더 줄여야 한다.
++남은 내역은 locate 3.4 + 각도 정밀화 2.0 + 회전 7.0 + ROI 디코드(자르기
++패스 + 회전 패스)다. 다음 후보는 **자르기 패스와 회전 패스를 합치는 것**
++이다 — 지금은 같은 영역을 두 번 자르고 두 번 디코드하는데, 영역의
++angleDeg가 이미 있으면 자르기 패스에서 곧바로 회전까지 갈 수 있다.
++1D/PDF417은 자르기만으로는 어차피 안 되므로(§3.17) 그 프레임에서
++자르기 패스는 순수 낭비다. 다만 2D 행렬코드는 반대라(자르기만으로
++읽히고 회전은 낭비) 심볼로지를 모르는 상태에서 어느 쪽을 먼저 할지
++정하는 게 핵심이고, 영역의 코히런스(방향성 유무)가 그 신호가 될 수 있다.
+ 
+ ---
+ 
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index a762dfc..7a621d4 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -94,6 +94,26 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
+  */
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+ 
++/*
++ * 내용이 실제로 들어있는 범위를 찾아 그만큼만 잘라낸다(여백 marginPx).
++ * 잘라낼 게 없으면(내용이 거의 전체) false.
++ *
++ * 용도는 **회전 구제 뒤 재크롭**이다. 기울어진 코드를 담으려면 크롭이
++ * 대각선 길이만큼 커야 하는데, 되돌리고 나면 코드는 축에 정렬돼서
++ * 그 상자의 20% 남짓만 차지한다. 나머지는 회전으로 생긴 흰 여백이라
++ * 디코더가 훑을 이유가 없다.
++ *
++ * 실측(Code128 모듈 8px, 회전 25/40/70도): 회전본 1184x1088에서 실제
++ * 코드는 882x320(면적의 22%)이었고, 그만큼만 잘라 풀옵션으로 디코드하면
++ * 16.8 -> 9.8ms다(검출은 동일).
++ *
++ * 임계값은 이미지 자신의 명암 범위에서 잡는다 — 노출이 프레임마다
++ * 다르므로 고정 상수를 쓸 수 없다. 회전으로 생긴 여백은 흰색(255)이라
++ * 자연스럽게 배경 쪽으로 떨어진다.
++ * [[vscan-lite-retight-after-rotate]]
++ */
++bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24);
++
+ 
+ } // namespace vscan
+ 
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index f75d411..46a0899 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -475,6 +475,28 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+         GrayImage rotated;
+         rotateAroundPoint(GrayView(crop), -useAngle,
+                           static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
++
++        // [되돌린 뒤 다시 좁힌다] 기울어진 코드를 담으려면 크롭이 대각선
++        // 길이만큼 커야 하는데, 되돌리고 나면 코드가 축에 정렬돼서 그
++        // 상자의 20% 남짓만 차지한다. 나머지는 회전으로 생긴 흰 여백이라
++        // 디코더가 훑을 이유가 없다. 실측(Code128 모듈 8px, 25/40/70도):
++        // 회전본 1184x1088에서 실제 코드는 882x320이고, 그만큼만 잘라
++        // 디코드하면 16.8 -> 9.8ms다(검출 동일). 이 단계가 회전 구제
++        // 시간의 지배항이라 효과가 그대로 총합에 남는다.
++        //
++        // 좌표 보정을 위해 잘라낸 원점을 기억해둔다.
++        int tightX = 0, tightY = 0;
++        GrayImage tight;
++        if (tightenToContent(GrayView(rotated), tight)) {
++            // tightenToContent()는 오프셋을 돌려주지 않으므로 폭/높이 차이로
++            // 되짚는다 — 여백이 상하좌우 대칭이 아닐 수 있어 정확하지 않다.
++            // 회전 좌표는 어차피 근사(아래 역회전도 크롭 중심 기준)이므로
++            // 중심이 유지되는 이 근사로 충분하다.
++            tightX = (rotated.width - tight.width) / 2;
++            tightY = (rotated.height - tight.height) / 2;
++            rotated = std::move(tight);
++        }
++
+         Pipeline roiPipe(roiCfg);
+         auto rotHits = roiPipe.processViewCore(GrayView(rotated));
+         if (!rotHits.empty()) {
+@@ -490,8 +512,8 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+             const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
+             for (auto& r : rotHits)
+                 for (auto& pt : r.symbol.position) {
+-                    const float dx = static_cast<float>(pt.first) - px;
+-                    const float dy = static_cast<float>(pt.second) - py;
++                    const float dx = static_cast<float>(pt.first + tightX) - px;
++                    const float dy = static_cast<float>(pt.second + tightY) - py;
+                     pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
+                     pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
+                 }
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 189a738..5069893 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -369,4 +369,55 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     return true;
+ }
+ 
++bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
++    const int W = src.width, H = src.height;
++    if (W < 64 || H < 64) return false;
++    const int stride = src.stride > 0 ? src.stride : W;
++
++    // 2픽셀 건너뛰며 훑는다 — 경계를 픽셀 단위로 정확히 잡을 필요가 없다
++    // (어차피 여백을 덧붙인다). 표본이 1/4이라 비용도 1/4다.
++    const int step = 2;
++    int lo = 255, hi = 0;
++    for (int y = 0; y < H; y += step) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        for (int x = 0; x < W; x += step) {
++            const int v = row[x];
++            if (v < lo) lo = v;
++            if (v > hi) hi = v;
++        }
++    }
++    if (hi - lo < 24) return false;   // 명암이 없으면 자를 근거도 없다
++    const int thresh = lo + (hi - lo) * 2 / 5;
++
++    int x0 = W, x1 = -1, y0 = H, y1 = -1;
++    for (int y = 0; y < H; y += step) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        for (int x = 0; x < W; x += step) {
++            if (row[x] > thresh) continue;
++            if (x < x0) x0 = x;
++            if (x > x1) x1 = x;
++            if (y < y0) y0 = y;
++            if (y > y1) y1 = y;
++        }
++    }
++    if (x1 < x0 || y1 < y0) return false;
++
++    x0 = std::max(0, x0 - marginPx);
++    y0 = std::max(0, y0 - marginPx);
++    x1 = std::min(W - 1, x1 + marginPx);
++    y1 = std::min(H - 1, y1 + marginPx);
++    const int tw = x1 - x0 + 1, th = y1 - y0 + 1;
++    if (tw < 32 || th < 32) return false;
++    // 줄어드는 게 얼마 없으면 복사 비용만 낸다.
++    if (static_cast<double>(tw) * th > 0.75 * static_cast<double>(W) * H) return false;
++
++    out.width = tw;
++    out.height = th;
++    out.pixels.resize(static_cast<size_t>(tw) * th);
++    for (int y = 0; y < th; ++y)
++        std::memcpy(out.pixels.data() + static_cast<size_t>(y) * tw,
++                    src.pixels + static_cast<size_t>(y0 + y) * stride + x0, tw);
++    return true;
++}
++
+ } // namespace vscan
+-- 
+2.43.0
+
