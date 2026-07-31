@@ -1,0 +1,145 @@
+From fda55cf73e8c4fb72907b8ef1c0bba6b2f53c939 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 04:10:32 +0000
+Subject: [PATCH 19/23] =?UTF-8?q?=EC=98=81=EC=97=AD=20=EA=B0=81=EB=8F=84?=
+ =?UTF-8?q?=EB=A5=BC=20=EC=9B=90=EB=B3=B8=20=ED=95=B4=EC=83=81=EB=8F=84?=
+ =?UTF-8?q?=EB=A1=9C=20=EB=8B=A4=EC=8B=9C=20=EC=9E=B0=EB=8B=A4=20=E2=80=94?=
+ =?UTF-8?q?=20PDF417=2025/30=EB=8F=84?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+findCodeRegions()의 추정각은 4배 축소본에서 나오는데, 축소가 각도를
+0도 쪽으로 끌어당긴다. 박스 다운샘플이 고주파를 깎는 방향이 x/y 축에
+정렬돼 있어서 생기는 앨리어싱이다. 배율별 실측(PDF417, 참값은 각도를
+(-45,45]로 접은 값):
+
+  참값    -5    -10    -20    -25    -30    -35    30     15
+  4배   -4.6   -8.5  -17.2  -21.9  -26.9  -33.2  25.8   11.2
+  2배   -4.7   -9.4  -18.9  -23.9  -28.5  -34.4  28.3   13.6
+  1배   -4.9   -9.8  -19.6  -24.6  -29.1  -34.9  28.9   14.3
+
+4배 오차가 최대 4.2도인데 원본은 0.7도다. PDF417은 되돌린 뒤 읽히는
+각도 창이 8도 남짓이라 3~4도면 창을 벗어난다 — 25/30도가 정확히 그
+경우였고, 추정각이 창 아래쪽 경계를 0.1~1.1도 차이로 놓치고 있었다.
+
+회전을 시도하는 영역(최대 2개)에 한해 영역 안만 원본 해상도로 다시
+재는 refineRegionAngle()을 넣었다. 상수로 보정하지 않은 이유는 이게
+데이터에 맞춘 편향 보정이 아니라 원인 제거이기 때문이다.
+
+PDF417 각도 스윕 89.5% -> 100%.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/locate.hpp | 22 ++++++++++++++++++++++
+ src/locate.cpp                    | 31 +++++++++++++++++++++++++++++++
+ src/pipeline.cpp                  | 12 ++++++++++--
+ 3 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/include/vscan_internal/locate.hpp b/include/vscan_internal/locate.hpp
+index 49ad48c..28b7e2e 100644
+--- a/include/vscan_internal/locate.hpp
++++ b/include/vscan_internal/locate.hpp
+@@ -73,5 +73,27 @@ struct CodeRegion {
+ std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions = 4,
+                                         int tileSize = 32, int downscale = 4,
+                                         float energyRatio = 0.20f);
++/*
++ * [각도 정밀화] 영역 안에서 **원본 해상도로** 구조텐서를 다시 재서
++ * 기울기를 돌려준다. 방향성이 약하면 CodeRegion::kAngleUnknown.
++ *
++ * 왜 필요한가. findCodeRegions()의 angleDeg는 4배 축소본에서 나온 값인데,
++ * 축소가 각도를 **축(0도) 쪽으로 끌어당긴다**. 박스 다운샘플이 고주파를
++ * 깎는 방식이 x/y 축에 정렬돼 있어서 생기는 앨리어싱이다. 실측(PDF417,
++ * 각도를 (-45,45]로 접은 참값 대비):
++ *
++ *   참값    -5    -10    -20    -25    -30    -35    30(60도)   15(75도)
++ *   4배   -4.6   -8.5  -17.2  -21.9  -26.9  -33.2      25.8       11.2
++ *   2배   -4.7   -9.4  -18.9  -23.9  -28.5  -34.4      28.3       13.6
++ *   1배   -4.9   -9.8  -19.6  -24.6  -29.1  -34.9      28.9       14.3
++ *
++ * 4배에서 오차가 최대 4.2도인데 원본에서는 0.7도다. PDF417은 되돌린 뒤
++ * 읽히는 각도 창이 8도 남짓이라, 3~4도 오차면 창을 벗어난다 — 실제로
++ * 25/30도가 정확히 그렇게 실패했다.
++ *
++ * 비용은 영역 크기에 비례한다. 영역은 보통 프레임의 1~20%이고, 회전을
++ * 시도하는 프레임(다른 게 전부 실패한 프레임)에서만 부른다.
++ */
++float refineRegionAngle(const GrayView& image, const Rect& bbox);
+ 
+ } // namespace vscan
+diff --git a/src/locate.cpp b/src/locate.cpp
+index 0716f52..7975d1a 100644
+--- a/src/locate.cpp
++++ b/src/locate.cpp
+@@ -168,4 +168,35 @@ std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions, i
+     return out;
+ }
+ 
++float refineRegionAngle(const GrayView& image, const Rect& bbox) {
++    const int x0 = std::max(0, bbox.x0), y0 = std::max(0, bbox.y0);
++    const int x1 = std::min(image.width, bbox.x1), y1 = std::min(image.height, bbox.y1);
++    const int w = x1 - x0, h = y1 - y0;
++    if (w < 8 || h < 8) return CodeRegion::kAngleUnknown;
++
++    const int stride = image.stride > 0 ? image.stride : image.width;
++    double jxx = 0, jyy = 0, jxy = 0;
++    for (int y = y0 + 1; y < y1 - 1; ++y) {
++        const uint8_t* __restrict r0 = image.pixels + static_cast<size_t>(y - 1) * stride;
++        const uint8_t* __restrict r1 = image.pixels + static_cast<size_t>(y) * stride;
++        const uint8_t* __restrict r2 = image.pixels + static_cast<size_t>(y + 1) * stride;
++        for (int x = x0 + 1; x < x1 - 1; ++x) {
++            const double gx = (r0[x + 1] + 2 * r1[x + 1] + r2[x + 1]) -
++                              (r0[x - 1] + 2 * r1[x - 1] + r2[x - 1]);
++            const double gy = (r2[x - 1] + 2 * r2[x] + r2[x + 1]) -
++                              (r0[x - 1] + 2 * r0[x] + r0[x + 1]);
++            jxx += gx * gx;
++            jyy += gy * gy;
++            jxy += gx * gy;
++        }
++    }
++    const double denom = jxx - jyy;
++    const double coh = std::sqrt(denom * denom + 4.0 * jxy * jxy) / (jxx + jyy + 1e-6);
++    if (coh < 0.25) return CodeRegion::kAngleUnknown;
++    double theta = 0.5 * std::atan2(2.0 * jxy, denom) * 180.0 / 3.14159265358979323846;
++    while (theta > 45.0) theta -= 90.0;
++    while (theta <= -45.0) theta += 90.0;
++    return static_cast<float>(theta);
++}
++
+ } // namespace vscan
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 2759fe9..ed2bcce 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -394,8 +394,16 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+             std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
+                         image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
+ 
++        // [각도 정밀화] findCodeRegions()의 추정각은 4배 축소본에서 나온
++        // 값이라 축 쪽으로 3~4도 끌려 있다. PDF417은 되돌린 뒤 읽히는
++        // 각도 창이 8도 남짓이라 그 오차면 창을 벗어난다(25/30도 실패).
++        // 여기서 영역 안만 원본 해상도로 다시 재면 오차가 0.7도로 줄어든다.
++        // 회전할 영역(최대 2개)에만 드는 비용이다.
++        float useAngle = refineRegionAngle(image, regions[i].bbox);
++        if (useAngle >= CodeRegion::kAngleUnknown) useAngle = regions[i].angleDeg;
++
+         GrayImage rotated;
+-        rotateAroundPoint(GrayView(crop), -regions[i].angleDeg,
++        rotateAroundPoint(GrayView(crop), -useAngle,
+                           static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
+         Pipeline roiPipe(roiCfg);
+         auto rotHits = roiPipe.processViewCore(GrayView(rotated));
+@@ -407,7 +415,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+             // 위치를 뭉개서 대표점 하나로 주면 안 되는 이유: dedup()이
+             // 넓이 기반이라 4점이 한 점으로 겹치면 넓이가 0이 되어
+             // 중복 판정이 통째로 무력화된다(실측: 중복 반환 2건).
+-            const float rad = regions[i].angleDeg * 3.14159265358979323846f / 180.0f;
++            const float rad = useAngle * 3.14159265358979323846f / 180.0f;
+             const float cc = std::cos(rad), ss = std::sin(rad);
+             const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
+             for (auto& r : rotHits)
+-- 
+2.43.0
+

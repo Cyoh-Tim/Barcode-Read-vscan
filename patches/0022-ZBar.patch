@@ -1,0 +1,121 @@
+From 74e55851184a9075439a14767e7c3719853c41a5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 04:12:55 +0000
+Subject: [PATCH 22/23] =?UTF-8?q?ZBar=EB=A5=BC=20=EC=84=A4=EC=A0=95=20?=
+ =?UTF-8?q?=ED=95=AD=EB=AA=A9=EC=9C=BC=EB=A1=9C=20=E2=80=94=20=EB=82=B4?=
+ =?UTF-8?q?=EB=B6=80=20=EC=9E=84=EC=8B=9C=20=ED=8C=8C=EC=9D=B4=ED=94=84?=
+ =?UTF-8?q?=EB=9D=BC=EC=9D=B8=EC=97=90=EB=8F=84=20=EB=B6=99=EA=B2=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+§7에 "미해결"로 적혀 있던 것. 파이프라인은 내부에서 임시 Pipeline을
+여러 개 만든다 — 2단계의 빠른 패스, coarse locate, TryHarder 단계,
+ROI 디코드, 각종 구제. 전부 cfg_를 복사해서 생성하는데, addDecoder()로
+붙인 디코더는 그 복사본에 안 따라온다.
+
+그래서 vscan_create(enable_zbar_fastpath=1)로 켜도 최상위
+processViewCore()에서만 ZBar가 돌고 ROI/구제 경로에서는 조용히 빠졌다.
+같은 프레임인데 어느 경로로 갔느냐에 따라 결과가 달라진다.
+
+디코더 목록을 복제하는 메서드를 추가하는 대신 PipelineConfig::enableZBar
+설정 항목으로 옮겼다. 복사본이 자동으로 물려받으므로 경로마다 챙길
+것이 없다.
+
+영역 구제가 ROI 디코드를 주 경로로 쓰기 시작하면서(§3.17) 이 차이가
+실제 결과에 영향을 주는 자리가 됐다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/pipeline.hpp | 16 ++++++++++++++++
+ src/pipeline.cpp                    |  9 +++++++++
+ src/vscan_c_api.cpp                 | 10 ++++------
+ 3 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 49e9738..0b078a4 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -68,6 +68,22 @@ struct PipelineConfig {
+      */
+     bool validateITFCheckSum = false;
+ 
++    /*
++     * [ZBar 보조 디코더] 기본 OFF.
++     *
++     * 왜 addDecoder()가 아니라 설정 항목인가. 파이프라인은 내부에서
++     * **임시 Pipeline을 여러 개 만든다** — 2단계의 빠른 패스, coarse
++     * locate, TryHarder 단계, ROI 디코드, 각종 구제. 전부 cfg_를 복사해서
++     * 생성하는데, addDecoder()로 붙인 디코더는 그 복사본에 안 따라온다.
++     * 그래서 예전에는 vscan_create(enable_zbar_fastpath=1)로 켜도
++     * 최상위 processViewCore()에서만 ZBar가 돌고, ROI/구제 경로에서는
++     * 조용히 빠졌다 — 같은 프레임인데 경로에 따라 결과가 달라진다.
++     * 설정 항목으로 두면 복사본이 자동으로 물려받는다.
++     * 영역 구제가 ROI 디코드를 주 경로로 쓰기 시작하면서 이 차이가
++     * 실제로 결과에 영향을 주는 자리가 됐다. [[vscan-lite-zbar-in-subpipelines]]
++     */
++    bool enableZBar = false;
++
+     // --- 2단계 locate-then-refine 디코드의 1단계 전용 설정 ---
+     // 1단계는 "위치만 빠르게 찾기"가 목적이라 옵션을 좁힐 수 있는데,
+     // 좁힐수록 검출력이 떨어진다. 8종 테스트 이미지 실측 결과
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 7854808..be757c5 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -3,6 +3,9 @@
+ #include "vscan_internal/preprocess.hpp"
+ #include "vscan_internal/deskew1d.hpp"
+ #include "vscan_internal/locate.hpp"
++#ifdef VSCAN_HAVE_ZBAR
++#include "vscan_internal/decoder_zbar.hpp"
++#endif
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -21,6 +24,12 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
+                                                          cfg_.tryDownscale, cfg_.tryCode39ExtendedMode,
+                                                          cfg_.minLineCount, cfg_.validateITFCheckSum,
+                                                          cfg_.downscaleThreshold));
++#ifdef VSCAN_HAVE_ZBAR
++    // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
++    // cfg_를 복사하므로 자동으로 같이 따라간다.
++    // [[vscan-lite-zbar-in-subpipelines]]
++    if (cfg_.enableZBar) decoders_.push_back(std::make_unique<ZBarDecoder>());
++#endif
+ }
+ 
+ Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index af498f6..219e506 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -97,6 +97,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         pcfg.tileThreads = cfg->tile_threads;
+         if (cfg->tile_overlap_px) pcfg.tileOverlapPx = cfg->tile_overlap_px;
+         wantZbar = cfg->enable_zbar_fastpath != 0;
++        pcfg.enableZBar = wantZbar;
+         pcfg.formatMask = cfg->symbology_mask;
+         if (cfg->min_expected_codes > 1) pcfg.minExpectedCodes = cfg->min_expected_codes;
+         if (cfg->disable_coarse_locate) pcfg.coarseLocate = false;
+@@ -125,13 +126,10 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+ 
+     auto* p = new vscan_pipeline(pcfg);
+ 
+-#ifdef VSCAN_HAVE_ZBAR
+-    if (wantZbar) {
+-        p->impl.addDecoder(std::make_unique<vscan::ZBarDecoder>());
+-    }
+-#else
++    // ZBar 등록은 PipelineConfig::enableZBar가 처리한다 — 내부 임시
++    // 파이프라인들이 설정을 복사하므로 그래야 모든 경로에 일관되게 붙는다.
++    // [[vscan-lite-zbar-in-subpipelines]]
+     (void)wantZbar;
+-#endif
+ 
+     return p;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,189 @@
+From b7c83677e421c22fbabb09a13e02b3372ab83c78 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 04:12:15 +0000
+Subject: [PATCH 21/23] =?UTF-8?q?dedup:=201D=20=EB=B6=80=EB=B6=84=20?=
+ =?UTF-8?q?=EC=8A=A4=EC=BA=94=EA=B3=BC=20=EB=B0=B4=EB=93=9C=20=EB=B6=84?=
+ =?UTF-8?q?=ED=95=A0=EC=9D=84=20=EC=9E=A1=EB=8A=94=20=EA=B7=9C=EC=B9=99=20?=
+ =?UTF-8?q?=EB=91=90=20=EA=B0=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+좌표를 찍어보니 남은 오디코딩/중복이 전부 같은 뿌리였다 — 1D 결과는
+zxing이 스캔 라인 하나만 얇게 준다. 그래서 2D용 겹침비도, 고정 픽셀
+중심점 거리도 이 모양에는 원리적으로 안 맞는다.
+
+[부분 스캔] ITF 20도:
+  "345670"   (205,718)-(950,714)   두께 4
+  "12345670" (61,770)-(968,765)    두께 5
+같은 바코드의 서로 다른 두 행이라 y가 아예 안 겹치고(겹침비 0),
+중심점 거리는 81px로 기존 64px 규칙을 아슬아슬하게 넘는다.
+-> 한쪽 텍스트가 다른 쪽의 부분 문자열이고, 두 상자를 긴 쪽 크기의
+   10%만큼 부풀렸을 때 겹치면 중복. 남기는 쪽은 긴 텍스트.
+
+[밴드 분할] DataBar Expanded 10도:
+  A (47,633)-(929,729)  두께  96
+  B (74,719)-(933,842)  두께 123   <- A와 10px 겹침
+  C (91,853)-(976,890)  두께  37   <- B와 11px 간격
+가로로 97~100% 정렬돼 있고 세로로만 층이 진다. 한 심볼을 스캔 밴드별로
+따로 읽은 것인데 A-B 겹침비가 0.10, 중심점 거리 101px다.
+-> 같은 텍스트가 한 축으로만 층이 지고, 그 축 간격이 합친 두께의 10%
+   미만이며, 나머지 축으로 70% 이상 정렬되면 중복.
+
+둘 다 기하 조건과 **함께**만 쓴다. 텍스트 관계만으로는 절대 안 지운다 —
+서로 다른 두 코드가 겹쳐 인쇄되면서 한쪽이 다른 쪽의 부분 문자열이기까지
+할 일은 없다고 보지만, 그 가정을 기하 조건 없이 혼자 쓰게 두진 않는다.
+
+대가는 명확히 안다: 밴드 규칙은 박스에 같은 라벨 2장이 세로로 바짝
+붙으면(간격이 라벨 높이의 약 25% 미만) 하나로 합친다. dedup()이 원래
+지키려던 케이스라 정렬 조건 70%로 좁혔지만 완전히 배제하진 못한다.
+같은 내용 라벨을 여러 장 붙이는 배치라면 이 규칙을 빼야 한다.
+
+결과 — 14종 각도 스윕 오디코딩 11 -> 0, 중복 7 -> 1.
+남은 1건(DataBarExp 15도)은 조각 간격이 두께의 41%라 규칙을 넓혀야
+잡히는데 그러면 위 케이스를 깨뜨린다. 의도적으로 남긴다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ src/pipeline.cpp | 94 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 91 insertions(+), 3 deletions(-)
+
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 2376df9..7854808 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <string>
+ #include <cstring>
+ #include <future>
+ #include <thread>
+@@ -862,6 +863,22 @@ double areaOf(const BBox& b) { return std::max(0.0, b.x1 - b.x0) * std::max(0.0,
+ // 못 믿는 결과는 "다른 자리에 있는 다른 코드"임을 주장할 근거가 없으므로,
+ // 같은 심볼로지 + 같은 텍스트라면 중복으로 본다.
+ // [[vscan-lite-dedup-degenerate-quad]]
++// 한쪽 텍스트가 다른 쪽에 통째로 들어있는가 (부분 스캔의 지문).
++//
++// 1D 바코드를 일부만 훑은 스캔은 유효해 보이는 **짧은 코드**가 된다.
++// 체크디짓이 규격상 필수가 아닌 심볼로지(ITF 등)에서 특히 잘 나온다.
++// 실측(ITF 20/70도): 정답 "12345670"과 같은 자리에서 "345670"이 같이
++// 나왔다. minLineCount를 올려도 남는 잔여분이 정확히 이 모양이다.
++//
++// 물리적으로 서로 다른 두 코드가 **겹쳐 인쇄되면서** 한쪽 내용이 다른
++// 쪽의 부분 문자열이기까지 할 확률은 없다고 봐도 된다. 그래서 아래
++// dedup()에서 기하 겹침 조건과 **함께** 쓸 때만 안전하다 — 텍스트
++// 관계만으로 지우지 않는다. [[vscan-lite-dedup-partial-scan]]
++bool textContains(const std::string& outer, const std::string& inner) {
++    return !inner.empty() && inner.size() < outer.size() &&
++           outer.find(inner) != std::string::npos;
++}
++
+ bool hasDegenerateQuad(const DecodedSymbol& s) {
+     for (int i = 0; i < 4; ++i)
+         for (int j = i + 1; j < 4; ++j)
+@@ -878,6 +895,65 @@ double containRatio(const BBox& a, const BBox& b) {
+     double small = std::min(areaOf(a), areaOf(b));
+     return small > 0 ? (ix * iy) / small : 0.0;
+ }
++
++// 한 심볼을 여러 밴드로 나눠 읽어 같은 결과가 여러 번 나온 것인가.
++//
++// 실측(DataBar Expanded 10도): 같은 텍스트가 세 상자로 나온다.
++//   A (47,633)-(929,729)   두께  96
++//   B (74,719)-(933,842)   두께 123   <- A와 10px 겹침
++//   C (91,853)-(976,890)   두께  37   <- B와 11px 간격
++// 가로 범위는 셋 다 97~100% 정렬돼 있고 세로로만 층이 진다. 한 심볼을
++// 스캔 밴드별로 따로 읽은 것인데, A-B는 겹침비가 0.10이고 중심점 거리가
++// 101px라 기존 두 규칙(겹침비 0.5 / 중심 64px)을 둘 다 빠져나간다.
++//
++// 판정: (1) 긴 축으로 70% 이상 정렬되고, (2) 짧은 축의 간격이 두 상자를
++// 합친 두께의 10% 미만(겹치면 당연히 통과). 간격 기준을 "얇은 쪽 두께"가
++// 아니라 "합친 두께"로 잡는 이유는 C처럼 한 조각이 아주 얇게 나올 수
++// 있어서다 — 얇은 쪽 기준이면 11px 간격이 37px의 30%가 되어 놓친다.
++//
++// 이 규칙의 대가는 명확히 알고 있다: **박스에 같은 라벨 2장이 세로로
++// 바짝 붙어 있으면** 하나로 합쳐진다(간격이 라벨 높이의 약 25% 미만일 때).
++// dedup()이 원래 지키려던 케이스라 정렬 조건 70%로 좁혔지만 완전히
++// 배제하지는 못한다. 같은 내용 라벨이 여러 장 붙는 배치라면 이 규칙을
++// 빼는 편이 맞다. [[vscan-lite-dedup-stacked-band]]
++bool isStackedBand(const BBox& a, const BBox& b) {
++    const double aw = a.x1 - a.x0, ah = a.y1 - a.y0;
++    const double bw = b.x1 - b.x0, bh = b.y1 - b.y0;
++    if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return false;
++
++    auto stacked = [](double aLo, double aHi, double bLo, double bHi,   // 층이 지는 축
++                      double cLo, double cHi, double dLo, double dHi) { // 정렬돼야 하는 축
++        const double gap = std::max(aLo, bLo) - std::min(aHi, bHi);
++        const double combined = std::max(aHi, bHi) - std::min(aLo, bLo);
++        if (gap >= 0.10 * combined) return false;
++        const double ov = std::min(cHi, dHi) - std::max(cLo, dLo);
++        return ov >= 0.70 * std::min(cHi - cLo, dHi - dLo);
++    };
++    return stacked(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1) ||
++           stacked(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1);
++}
++
++// 부분 스캔 판정 전용 기하 조건: 두 결과가 **같은 바코드 위**인가.
++//
++// 1D는 zxing이 스캔 라인 하나를 따라 얇은 사각형을 준다 — 실측(ITF 20도):
++//   "345670"   (205,718)-(950,714)   높이 4px
++//   "12345670" (61,770)-(968,765)    높이 5px
++// 같은 바코드의 서로 다른 두 행이라 y가 아예 안 겹치고(714~718 vs
++// 765~770), 중심점 거리도 81px로 기존 64px 규칙을 아슬아슬하게 넘는다.
++// 즉 2D용 겹침비도, 고정 픽셀 거리도 이 경우엔 원리적으로 안 맞는다.
++//
++// 그래서 두 상자를 **긴 쪽 크기에 비례하는 여유**만큼 부풀린 뒤 겹침을
++// 본다. 비례로 하는 이유는 위 예처럼 바코드가 길수록 스캔 행 간격도
++// 그만큼 벌어질 수 있어서다(고정 상수는 코드 크기가 바뀌면 깨진다).
++// 여유 10%면 위 두 케이스 모두 겹침비 0.72로 걸린다.
++// [[vscan-lite-dedup-partial-scan]]
++bool onSameBarcodeBand(const BBox& a, const BBox& b) {
++    const double span = std::max({a.x1 - a.x0, a.y1 - a.y0, b.x1 - b.x0, b.y1 - b.y0});
++    const double m = 0.10 * span;
++    const BBox ia{a.x0 - m, a.y0 - m, a.x1 + m, a.y1 + m};
++    const BBox ib{b.x0 - m, b.y0 - m, b.x1 + m, b.y1 + m};
++    return containRatio(ia, ib) >= 0.5;
++}
+ }
+ 
+ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
+@@ -917,7 +993,12 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
+         bool isDup = false;
+         for (auto& kept : out) {
+             if (kept.symbol.symbology != cand.symbol.symbology) continue;
+-            if (kept.symbol.text != cand.symbol.text) continue;
++            // 같은 텍스트이거나, 한쪽이 다른 쪽의 부분 문자열이거나.
++            // 후자는 1D 부분 스캔 — 아래 기하 조건까지 만족할 때만 지운다.
++            const bool sameText = kept.symbol.text == cand.symbol.text;
++            const bool candIsPart = textContains(kept.symbol.text, cand.symbol.text);
++            const bool keptIsPart = textContains(cand.symbol.text, kept.symbol.text);
++            if (!sameText && !candIsPart && !keptIsPart) continue;
+ 
+             auto keptBox = bboxOf(kept.symbol);
+             auto keptCenter = centerOf(kept.symbol);
+@@ -925,10 +1006,17 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
+             double dy = candCenter.second - keptCenter.second;
+             bool near = std::sqrt(dx * dx + dy * dy) < kCenterDup;
+ 
++            const bool partial = candIsPart || keptIsPart;
+             if (near || containRatio(candBox, keptBox) >= kOverlapDup ||
+-                hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol)) {
++                hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol) ||
++                (partial && onSameBarcodeBand(candBox, keptBox)) ||
++                (sameText && isStackedBand(candBox, keptBox))) {
+                 isDup = true;
+-                if (areaOf(candBox) > areaOf(keptBox)) kept = std::move(cand);
++                // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
++                // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
++                // 타일 경계에서 잘린 조각보다 온전한 쪽의 꼭짓점이 정확하다.
++                const bool takeCand = partial ? keptIsPart : (areaOf(candBox) > areaOf(keptBox));
++                if (takeCand) kept = std::move(cand);
+                 break;
+             }
+         }
+-- 
+2.43.0
+
