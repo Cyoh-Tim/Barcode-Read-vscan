@@ -927,16 +927,27 @@ std::vector<PipelineResult> Pipeline::decodeRegionsParallel(const GrayView& imag
     auto decodeCrop = [&](Pipeline& pipe, const GrayImage& packed) {
         auto hits = pipe.processViewCore(GrayView(packed));
         if (!hits.empty()) return hits;
-        const int f = regionCfg.smallRoiUpscale;
-        if (f < 2 || packed.width > regionCfg.smallRoiMaxPx || packed.height > regionCfg.smallRoiMaxPx)
+        const int f0 = regionCfg.smallRoiUpscale;
+        if (f0 < 2 || packed.width > regionCfg.smallRoiMaxPx || packed.height > regionCfg.smallRoiMaxPx)
             return hits;
-        GrayImage big;
-        upscaleSharpen(GrayView(packed), f, big);
-        if (big.pixels.empty()) return hits;
-        auto up = pipe.processViewCore(GrayView(big));
-        for (auto& r : up)
-            for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
-        return up;
+        // [배율 단계화] 먼저 싼 배율로, 안 되면 한 번 더 크게.
+        // 실측(실물 해상도 차트, 파인더가 찾은 11곳): 3배는 3곳,
+        // 6배는 6곳이다. 배율을 올리면 흐릿한 모듈 경계가 더 많은 픽셀에
+        // 걸쳐 표현돼서 언샤프가 되살릴 여지가 생긴다. 대신 픽셀 수가
+        // 배율 제곱으로 늘어 6배는 3배의 4배 비용이라, 3배로 되는
+        // 코드까지 6배를 물릴 이유는 없다.
+        for (int f : {f0, f0 * 2}) {
+            if (budgetExceeded()) break;
+            GrayImage big;
+            upscaleSharpen(GrayView(packed), f, big, regionCfg.smallRoiSharpen);
+            if (big.pixels.empty()) continue;
+            auto up = pipe.processViewCore(GrayView(big));
+            if (up.empty()) continue;
+            for (auto& r : up)
+                for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
+            return up;
+        }
+        return hits;
     };
 
     std::vector<std::vector<PipelineResult>> parts(crops.size());

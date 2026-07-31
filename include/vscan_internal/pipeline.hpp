@@ -101,6 +101,12 @@ struct PipelineConfig {
      */
     int smallRoiMaxPx = 320;
     int smallRoiUpscale = 0;
+    /*
+     * 언샤프 세기(%). 150이 일반적인 값인데 이 용도에서는 200이 낫다 —
+     * 실측(실물 해상도 차트, 6배 확대): 150에서 2곳, 200에서 6곳,
+     * 280에서 4곳. 너무 세면 노이즈까지 세워 오히려 떨어진다.
+     */
+    int smallRoiSharpen = 200;
 
     // --- 2단계 locate-then-refine 디코드의 1단계 전용 설정 ---
     // 1단계는 "위치만 빠르게 찾기"가 목적이라 옵션을 좁힐 수 있는데,
