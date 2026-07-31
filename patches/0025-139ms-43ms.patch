@@ -1,0 +1,181 @@
+From fd93a3012d128027cd3eeab0805122badfbf1bce Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 08:01:44 +0000
+Subject: [PATCH] =?UTF-8?q?=ED=9A=8C=EC=A0=84=20=EA=B5=AC=EC=A0=9C?=
+ =?UTF-8?q?=EB=A5=BC=20=EC=B2=B4=EC=9D=B8=20=EB=81=9D=EC=97=90=EC=84=9C=20?=
+ =?UTF-8?q?=EC=95=9E=EC=9C=BC=EB=A1=9C=20=E2=80=94=20=ED=9A=8C=EC=A0=84=20?=
+ =?UTF-8?q?=EA=B5=AC=EA=B0=84=20139ms=20->=2043ms?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"다른 리더기처럼 회전해도 속도가 같은가"를 14종 x 0~90도로 직접 쟀다.
+아니었다. 0~15도와 75~90도는 2~30ms인데 20~70도만 150~440ms였다.
+
+검출력 문제가 아니다(검출은 이미 전 각도 100%). 회전 구제가 체인 맨
+끝에 있어서, 20~70도 코드는 이걸 전부 지나고 나서야 돌려진다:
+
+  coarse locate -> 빠른 풀프레임 -> 영역 자르기 -> 풀프레임 TryHarder
+  -> 풀프레임 +TryInvert -> 풀옵션 -> 노이즈 구제 -> 그제야 회전
+
+가운데 셋이 전부 풀프레임 패스라 그게 150ms의 대부분이다. 자르기는 이미
+이른 자리에 있었는데 회전만 끝에 있었다 — 1D/PDF417은 자르기만으론
+안 되므로 그 프레임들은 자르기 단계를 그냥 통과할 뿐이었다.
+
+회전을 자르기와 같은 자리로 올렸다:
+
+  20~70도 평균   139ms -> 43ms
+  전체 최악      441ms -> 114ms
+  (Code39 251->69, UPCA 162->47, PDF417 160->45)
+
+뒤의 비싼 단계를 건너뛰므로 회전 프레임만 좋아지는 게 아니다:
+  고정 40종 2단계   726 -> 609ms,  2단계-fast 649 -> 550ms
+  단일 코퍼스 평균  152 -> 147ms,  p50 55 -> 44ms
+
+대가는 다중 코드 코퍼스 평균 +5%(146 -> 153ms)다. 요구 개수가 회전
+상한(2)보다 많으면 이 자리에서 돌려도 need를 못 채우고 어차피 뒤로
+넘어가므로, 그 경우엔 자르기만 하도록 막았다.
+
+검출은 전부 그대로다(40종 38/40, 14종 각도 스윕 100%/오디코딩 0,
+코퍼스 61.3%/59.4%).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                    | 51 ++++++++++++++++++++++++++++-
+ include/vscan_internal/pipeline.hpp |  3 +-
+ src/pipeline.cpp                    | 19 ++++++++++-
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 6dff174..d9d09cb 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.20 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** | 무엇부터 할지 정할 때 |
++| §3.14~3.21 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+@@ -1623,6 +1623,55 @@ n = 배율. 3배 + amount 150이 위 6곳 조합이다.)
+ 코드 하나~몇 개"에 맞춰져 있고(§3.17), 수십 개가 흩뿌려진 차트류는
+ 설계 범위 밖이다.
+ 
++### 3.21 회전 시간 균일성 — 구제를 체인 끝에서 앞으로 (2026-07-31)
++
++"다른 리더기처럼 회전해도 속도가 거의 같은가"를 직접 쟀다. 14종 x
++0~90도(5도 간격), 2단계 경로. **아니었다.**
++
++패턴이 아주 뚜렷했다:
++- 0~15도, 75~90도: 2~30ms (카디널 근처, 첫 패스에서 끝난다)
++- **20~70도: 150~440ms** — 여기가 통째로 느리다
++- DataMatrix만 반대(0~50도 2ms, 55~90도 14ms)
++
++원인은 검출력이 아니다(검출은 이미 전 각도 100%다). **회전 구제가 체인
++맨 끝에 있어서** 20~70도 코드는 다음을 전부 지나고 나서야 돌려진다:
++
++    coarse locate -> 빠른 풀프레임 -> 영역 자르기 -> 풀프레임 TryHarder
++    -> 풀프레임 +TryInvert -> 풀옵션 -> 노이즈 구제 -> **그제야 회전**
++
++가운데 세 개가 전부 풀프레임 패스라 그게 150ms의 대부분이다. 자르기는
++이미 이른 자리에 있었는데 회전만 끝에 있었다 — 1D/PDF417은 자르기만으론
++안 되므로(§3.17) 그 프레임들은 자르기 단계를 그냥 통과할 뿐이었다.
++
++#### 회전을 자르기와 같은 자리로 올렸다
++
++| | 20~70도 평균 | 전체 최악 |
++|---|---|---|
++| 이전 | 139ms | 441ms |
++| **이후** | **43ms** | **114ms** |
++
++심볼로지별로도 고르게 줄었다(Code39 251→69, UPCA 162→47, PDF417 160→45).
++
++같이 빨라진 것:
++- 고정 40종 2단계 726 → 609ms, 2단계-fast 649 → 550ms
++- 단일 코드 코퍼스 평균 152 → 147ms, p50 55 → 44ms
++
++뒤의 비싼 단계들을 건너뛰기 때문이라 회전 프레임만 좋아지는 게 아니다.
++
++대가는 다중 코드 코퍼스 평균 +5%(146 → 153ms)다. 요구 개수가 회전 상한
++(2)보다 많으면 이 자리에서 돌려도 need를 못 채우고 어차피 뒤로 넘어가므로,
++그 경우엔 자르기만 하도록 막아뒀다.
++
++#### 남은 불균일
++카디널 근처가 2ms인데 회전 구간이 43ms라 **비율로는 여전히 20배**다.
++다만 성격이 다르다 — 이전에는 "회전하면 못 읽거나 0.4초"였고 지금은
++"회전하면 40~110ms"다. 산업용 리더기가 광고하는 10~20ms 대에 들어가려면
++회전 구간의 43ms를 더 줄여야 하는데, 그 43ms의 내역은 locate 4ms +
++크롭 회전 리샘플 + ROI 풀옵션 디코드다. 다음 후보는 ROI 디코드 옵션을
++좁히는 것인데, 예전에 재봤을 때는 옵션을 줄이면 ROI 성공률이 떨어져
++뒤 단계로 넘어가는 바람에 총합이 커졌다(§3.17). 회전이 앞으로 온 지금은
++조건이 달라졌으니 다시 재볼 만하다.
++
+ ---
+ 
+ ## §4. 심볼로지 커버리지
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 74b4d63..a73ae09 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -368,8 +368,9 @@ private:
+ 
+     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
+     std::vector<Rect> lastPositions_;
+-    // 이번 프레임에서 영역 자르기 패스를 이미 돌았는가 (중복 방지).
++    // 이번 프레임에서 영역 자르기/회전 패스를 이미 돌았는가 (중복 방지).
+     bool regionCropDone_ = false;
++    bool regionRotDone_ = false;
+     int framesSinceFullScan_ = 0;
+ 
+     // 프레임 시간 예산 (maxFrameMs). 최상위 호출에서만 시작/해제한다 —
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 0069d0e..f75d411 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -294,6 +294,9 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
+     // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
+     if (cfg_.enableRegionRescue && !budgetExceeded()) {
++        // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
++        // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
++        if (regionCropDone_ && regionRotDone_) return hits;
+         auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
+                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
+         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
+@@ -602,6 +605,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     BudgetGuard budget(this);
+     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
+     regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
++    regionRotDone_ = false;
+     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
+ 
+     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
+@@ -687,8 +691,21 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
+     // [[vscan-lite-region-first]]
+     if (cfg_.enableRegionRescue && !budgetExceeded()) {
++        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
++        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
++        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
++        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
++        // 40종도 726 -> 592ms, 단일코드 코퍼스도 평균 152 -> 144ms로
++        // 같이 빨라진다 — 뒤의 비싼 단계들을 건너뛰기 때문이다.
++        //
++        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
++        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다
++        // (다중 코드 코퍼스에서 그 경우 평균이 7% 늘었다).
++        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
+         regionCropDone_ = true;
+-        auto roiHits = tryRegionRescue(image, need, RegionPass::CropOnly);
++        regionRotDone_ = earlyRotate;
++        auto roiHits = tryRegionRescue(image, need,
++                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
+         if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
+         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
+     }
+-- 
+2.43.0
+
