@@ -1,0 +1,290 @@
+From 71ffd12f70740463ff920831b06219b398deed3d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 09:57:08 +0000
+Subject: [PATCH] =?UTF-8?q?ROI=20=EA=B2=BD=EB=A1=9C=EC=97=90=20=EC=9E=91?=
+ =?UTF-8?q?=EC=9D=80=20=EC=BD=94=EB=93=9C=20=EA=B5=AC=EC=A0=9C=20=E2=80=94?=
+ =?UTF-8?q?=20=EC=9C=84=EC=B9=98=EB=A5=BC=20=EC=95=8C=EB=A0=A4=EC=A3=BC?=
+ =?UTF-8?q?=EB=A9=B4=20=EB=AA=A8=EB=93=88=202px=EB=8F=84=20=EC=9D=BD?=
+ =?UTF-8?q?=EB=8A=94=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+사용자가 준 실물 해상도 차트(3.1MP, QR 21x21모듈이 약 45px = 모듈 2.1px)는
+좌표를 정확히 알려줘도 안 읽혔다. 원본 크기로 디코드하기 때문이다.
+
+  vscan_process_gray() 풀프레임        0개 / 140~160ms
+  ROI 24곳 지정, 확대 없음             0개 / 9ms
+  ROI 24곳 지정 + 확대·언샤프          3개 / 90ms
+
+모듈이 2px 안팎이면 인쇄/광학 흐림이 모듈 경계를 뭉개서 이진화가 어느
+쪽으로도 안 떨어진다. 확대만으로는 흐림도 같이 커질 뿐이라(24곳 중 3곳),
+확대한 뒤 고주파를 되살려야 한다(9곳). 배율보다 샤프닝 유무가 결정적이다.
+
+decodeRegionsParallel()에 "원본 크기로 빈손 + ROI가 작으면 3배 확대 +
+언샤프로 한 번 더"를 붙였다. 여기 두는 이유는 이 함수를 쓰는 경로가
+vscan_process_gray_rois()와 추적 모드 — "어디 있는지는 안다, 작아서
+안 읽힐 뿐"인 상황 그 자체라서다.
+
+자동 탐지 경로에서는 기본 꺼짐이다. 켜봤더니 영역이 타일 128px + 여백이라
+임계 아래로 자주 들어와서, 작지도 않은 코드에 확대를 걸며 코퍼스 평균이
+7~9% 늘었다(검출은 그대로). 켜는 자리를 processViewROIs() 안으로 좁혔고,
+교차 측정으로 기본 경로 비용이 변하지 않음을 확인했다(단일 159.4 vs
+159.0 / 157.3 vs 155.2, 다중 160.4 vs 162.1 / 161.3 vs 162.1).
+
+사람이 코드 중심에 맞춰 자른 상한(6곳)에 3곳으로 못 미치는 것은 ROI를
+타일 좌표에서 만들어 코드가 창 가운데에 안 오기 때문이다. 밀집 소형
+코드 탐지기는 여전히 별도 과제로 남는다(§3.20).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      | 28 +++++++++++++--
+ include/vscan_internal/pipeline.hpp   | 18 ++++++++++
+ include/vscan_internal/preprocess.hpp | 21 +++++++++++
+ src/pipeline.cpp                      | 44 +++++++++++++++++++++--
+ src/preprocess.cpp                    | 52 +++++++++++++++++++++++++++
+ 5 files changed, 157 insertions(+), 6 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index bfc402d..f3bc1bf 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -1615,13 +1615,35 @@ EAN/UPC 계열만 두 배가 필요하다.
+ 
+ 즉 전처리는 맞았는데 **"어디를 자를지"가 이 밀도에서 안 맞는다.** 이걸
+ 제대로 하려면 QR 파인더 패턴 전용 탐지기 같은 별도 작업이 필요하고,
+-그건 이 항목의 범위를 넘는다. 측정만 남기고 코드는 넣지 않았다.
+-(재현: `upscaleSharpen`은 쌍선형 정수배 확대 + `out = up + 1.5*(up - blur^n(up))`,
++그건 이 항목의 범위를 넘는다. 자동 탐지 경로에는 넣지 않았다.
++(`upscaleSharpen`은 쌍선형 정수배 확대 + `out = up + 1.5*(up - blur^n(up))`,
+ n = 배율. 3배 + amount 150이 위 6곳 조합이다.)
+ 
++#### 이후: 위치를 알려주면 읽는다 (ROI 경로에 확대+언샤프 추가)
++탐지가 막힌 것이지 전처리가 틀린 게 아니었으므로, **위치를 외부에서
++주는 경로**에는 이걸 넣는 게 맞다. `vscan_process_gray_rois()`가 쓰는
++`decodeRegionsParallel()`에 "원본 크기로 빈손 + ROI가 작으면 3배 확대 +
++언샤프로 한 번 더"를 붙였다.
++
++| 차트를 읽는 방법 | 결과 |
++|---|---|
++| `vscan_process_gray()` 풀프레임 | 0개 / 140~160ms |
++| ROI 24곳 지정, 확대 없음 | **0개** / 9ms |
++| **ROI 24곳 지정 + 확대·언샤프** | **3개** / 90ms |
++
++자동 탐지 경로에서는 **기본 꺼짐**이다(`smallRoiUpscale = 0`). 켜봤더니
++영역이 타일 128px + 여백이라 임계 아래로 자주 들어와서, 작지도 않은
++코드에 확대를 걸며 코퍼스 평균이 7~9% 늘었다(검출은 그대로). 켜는 자리를
++`processViewROIs()` 안으로 좁혔고, 교차 측정으로 기본 경로 비용이
++변하지 않는 것을 확인했다.
++
++사람이 코드 중심에 맞춰 자른 상한(6곳)에 3곳으로 못 미치는 것은 ROI를
++타일 좌표에서 만들어 코드가 창 가운데에 안 오기 때문이다.
++
+ **남은 항목**: 밀집된 소형 코드용 탐지기. 지금 로케이터는 "큰 프레임 속
+ 코드 하나~몇 개"에 맞춰져 있고(§3.17), 수십 개가 흩뿌려진 차트류는
+-설계 범위 밖이다.
++설계 범위 밖이다. 상위 검출기(NPU 등)가 위치를 주는 구성이라면 위의
++ROI 경로로 이미 읽을 수 있다.
+ 
+ ### 3.21 회전 시간 균일성 — 구제를 체인 끝에서 앞으로 (2026-07-31)
+ 
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index a73ae09..999a3b8 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -84,6 +84,24 @@ struct PipelineConfig {
+      */
+     bool enableZBar = false;
+ 
++    /*
++     * [작은 ROI 구제] ROI 디코드가 빈손이고 ROI가 이 크기(px) 이하면
++     * 확대 + 언샤프로 한 번 더 시도한다. 0 또는 1이면 끔.
++     *
++     * 모듈이 2px 안팎인 코드는 인쇄/광학 흐림이 모듈 경계를 뭉개서
++     * 이진화가 어느 쪽으로도 안 떨어진다. 실측(실물 3.1MP 해상도 차트,
++     * QR 21x21모듈이 약 45px): 좌표를 정확히 줘도 원본 크기로는 24곳 중
++     * 0곳인데, 3배 확대 + 언샤프면 6곳이 읽힌다.
++     *
++     * **기본은 꺼짐(0)**. processViewROIs()가 자기 호출에 한해 켠다 —
++     * 거기는 "어디에 있는지는 안다, 작아서 안 읽힐 뿐"인 상황 그 자체다.
++     * 자동 탐지 경로(영역 구제)에서도 켜봤더니 영역이 타일 128px + 여백이라
++     * 이 임계 아래로 자주 들어와서, 작지도 않은 코드에 확대를 걸며 코퍼스
++     * 평균이 7~9% 늘었다(검출은 그대로). 그래서 켜는 자리를 좁혔다.
++     */
++    int smallRoiMaxPx = 320;
++    int smallRoiUpscale = 0;
++
+     // --- 2단계 locate-then-refine 디코드의 1단계 전용 설정 ---
+     // 1단계는 "위치만 빠르게 찾기"가 목적이라 옵션을 좁힐 수 있는데,
+     // 좁힐수록 검출력이 떨어진다. 8종 테스트 이미지 실측 결과
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 7a621d4..cc1b751 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -114,6 +114,27 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+  */
+ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24);
+ 
++/*
++ * 정수배 확대(쌍선형) + 언샤프 마스킹.
++ *
++ * 용도는 **작은 코드 구제**다. 모듈이 2px 안팎이면 인쇄/광학 흐림이
++ * 모듈 경계를 뭉개서 이진화가 어느 쪽으로도 안 떨어진다. 확대만으로는
++ * 흐림도 같이 커질 뿐이라, 확대한 뒤 고주파를 되살려야 한다.
++ *
++ * 실측(실물 카메라 해상도 차트, 3.1MP 2000x1500, QR 21x21모듈이 약
++ * 45px = 모듈 2.1px, 사본이라 흐림이 심함) — 코드 주변을 잘라놓고:
++ *   원본 크기 그대로   24곳 중  0곳
++ *   확대만(2/3/4/6배)  24곳 중  3곳
++ *   확대 + 언샤프      24곳 중  9곳 (배율별 최선)
++ *   3배 + 언샤프 고정  24곳 중  6곳
++ * 성공 조합의 거의 전부에 언샤프가 들어 있었다 — 배율보다 샤프닝 유무가
++ * 결정적이었다.
++ *
++ * amount는 고주파를 더하는 세기(100 = 원본 + (원본-블러) 1.0배).
++ * [[vscan-lite-small-code-upscale]]
++ */
++void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount = 150);
++
+ 
+ } // namespace vscan
+ 
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 46a0899..1d05465 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -802,6 +802,11 @@ std::vector<PipelineResult> Pipeline::processViewROIs(const GrayView& image, con
+     // 보고, processViewTwoStage처럼 "무조건 풀옵션"으로 덮어쓰지 않는다.
+     PipelineConfig regionCfg = cfg_;
+     regionCfg.tileThreads = 1; // 작은 crop이라 추가 타일링 불필요
++    // 작은 ROI 구제를 여기서만 켠다 — 호출자가 위치를 알려준 상황이라
++    // "작아서 안 읽히는" 코드에 확대를 걸 근거가 분명하다. 자동 탐지
++    // 경로는 그 근거가 없어서 기본 꺼짐이다.
++    // [[vscan-lite-small-code-upscale]]
++    if (regionCfg.smallRoiUpscale <= 1) regionCfg.smallRoiUpscale = 3;
+ 
+     return decodeRegionsParallel(image, rects, padPx, regionCfg);
+ }
+@@ -901,19 +906,52 @@ std::vector<PipelineResult> Pipeline::decodeRegionsParallel(const GrayView& imag
+     // 워커 3개가 각자 1코어를 쓰는 구조에서 ROI마다 스레드를 추가로 만들면
+     // 3코어에 워커3 x ROI수 만큼의 스레드가 올라가 서로 경쟁한다(과다구독).
+     // 이 경우 순차 처리가 더 빠르다.
++    // [작은 ROI 구제] 원본 크기로 빈손이면 확대 + 언샤프로 한 번 더.
++    // 모듈이 2px 안팎이면 인쇄/광학 흐림이 모듈 경계를 뭉개서 이진화가
++    // 어느 쪽으로도 안 떨어진다. 확대만으로는 흐림도 같이 커질 뿐이라
++    // 확대한 뒤 고주파를 되살려야 한다.
++    //
++    // 실측(실물 3.1MP 해상도 차트, QR 21x21모듈이 약 45px = 모듈 2.1px):
++    // 좌표를 정확히 알려줘도 원본 크기로는 24곳 중 0곳, 3배 확대 +
++    // 언샤프를 붙이면 6곳이 읽힌다.
++    //
++    // 여기(ROI 디코드 공통 경로)에 두는 이유: 외부에서 위치를 주는
++    // vscan_process_gray_rois()와 추적 모드가 이 함수를 쓰는데, 그 경로는
++    // "어디에 있는지는 안다, 작아서 안 읽힐 뿐"인 상황 그 자체다.
++    // 자동 탐지 경로에서는 영역이 보통 타일 크기(128px+여백)를 넘어서
++    // 이 분기에 잘 안 걸린다 — 밀집 소형 코드는 탐지 자체가 막히는데
++    // 그건 별도 문제다(§3.20).
++    //
++    // 비용: ROI 디코드가 빈손일 때만, 그것도 작은 ROI에만 든다.
++    // [[vscan-lite-small-code-upscale]]
++    auto decodeCrop = [&](Pipeline& pipe, const GrayImage& packed) {
++        auto hits = pipe.processViewCore(GrayView(packed));
++        if (!hits.empty()) return hits;
++        const int f = regionCfg.smallRoiUpscale;
++        if (f < 2 || packed.width > regionCfg.smallRoiMaxPx || packed.height > regionCfg.smallRoiMaxPx)
++            return hits;
++        GrayImage big;
++        upscaleSharpen(GrayView(packed), f, big);
++        if (big.pixels.empty()) return hits;
++        auto up = pipe.processViewCore(GrayView(big));
++        for (auto& r : up)
++            for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
++        return up;
++    };
++
+     std::vector<std::vector<PipelineResult>> parts(crops.size());
+     if (regionCfg.tileThreads == 1 || crops.size() <= 1) {
+         Pipeline refiner(regionCfg);   // crop 전체가 같은 설정이라 한 번만 만든다
+         for (size_t i = 0; i < crops.size(); ++i) {
+-            parts[i] = refiner.processViewCore(GrayView(crops[i].packed));
++            parts[i] = decodeCrop(refiner, crops[i].packed);
+         }
+     } else {
+         std::vector<std::future<std::vector<PipelineResult>>> futures;
+         futures.reserve(crops.size());
+         for (auto& c : crops) {
+-            futures.push_back(std::async(std::launch::async, [regionCfg, &c]() {
++            futures.push_back(std::async(std::launch::async, [regionCfg, &c, &decodeCrop]() {
+                 Pipeline refiner(regionCfg);
+-                return refiner.processViewCore(GrayView(c.packed));
++                return decodeCrop(refiner, c.packed);
+             }));
+         }
+         for (size_t i = 0; i < futures.size(); ++i) parts[i] = futures[i].get();
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 5069893..1a031d7 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -369,6 +369,58 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     return true;
+ }
+ 
++void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount) {
++    const int W = src.width, H = src.height;
++    if (W <= 1 || H <= 1 || factor < 2) return;
++    const int stride = src.stride > 0 ? src.stride : W;
++    const int dw = W * factor, dh = H * factor;
++
++    // 1) 쌍선형 확대. 최근접으로 키우면 계단이 그대로 남아 아래 언샤프가
++    //    그 계단을 강조해버린다(모듈 경계가 아니라 픽셀 경계를 세운다).
++    GrayImage up;
++    up.width = dw;
++    up.height = dh;
++    up.pixels.resize(static_cast<size_t>(dw) * dh);
++    const float inv = 1.0f / static_cast<float>(factor);
++    for (int y = 0; y < dh; ++y) {
++        const float sy = (static_cast<float>(y) + 0.5f) * inv - 0.5f;
++        int iy = static_cast<int>(sy < 0 ? 0 : sy);
++        if (iy > H - 2) iy = H - 2;
++        const float fy = sy - static_cast<float>(iy);
++        const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(iy) * stride;
++        const uint8_t* __restrict r1 = r0 + stride;
++        uint8_t* __restrict o = up.pixels.data() + static_cast<size_t>(y) * dw;
++        for (int x = 0; x < dw; ++x) {
++            const float sx = (static_cast<float>(x) + 0.5f) * inv - 0.5f;
++            int ix = static_cast<int>(sx < 0 ? 0 : sx);
++            if (ix > W - 2) ix = W - 2;
++            const float fx = sx - static_cast<float>(ix);
++            const float top = r0[ix] + (r0[ix + 1] - r0[ix]) * fx;
++            const float bot = r1[ix] + (r1[ix + 1] - r1[ix]) * fx;
++            o[x] = static_cast<uint8_t>(top + (bot - top) * fy + 0.5f);
++        }
++    }
++
++    // 2) 언샤프: out = up + amount% * (up - blur(up)).
++    //    블러를 factor번 겹쳐 반경을 확대 배율에 맞춘다 — 원본 1픽셀이
++    //    확대본에서 factor픽셀이 되므로 그 스케일의 고주파를 되살려야 한다.
++    GrayImage blurred = up;
++    for (int i = 0; i < factor; ++i) {
++        GrayImage tmp;
++        boxBlur3x3(GrayView(blurred), tmp);
++        blurred = std::move(tmp);
++    }
++
++    out.width = dw;
++    out.height = dh;
++    out.pixels.resize(static_cast<size_t>(dw) * dh);
++    for (size_t i = 0; i < out.pixels.size(); ++i) {
++        const int base = up.pixels[i];
++        const int v = base + (base - blurred.pixels[i]) * amount / 100;
++        out.pixels[i] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
++    }
++}
++
+ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
+     const int W = src.width, H = src.height;
+     if (W < 64 || H < 64) return false;
+-- 
+2.43.0
+
