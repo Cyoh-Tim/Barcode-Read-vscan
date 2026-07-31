@@ -18,6 +18,7 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
     decoders_.push_back(std::make_unique<ZXingDecoder>(cfg_.formatMask, cfg_.tryRotate, cfg_.tryInvert,
                                                          cfg_.tryHarder, cfg_.binarizer,
                                                          cfg_.tryDownscale, cfg_.tryCode39ExtendedMode,
+                                                         cfg_.minLineCount, cfg_.validateITFCheckSum,
                                                          cfg_.downscaleThreshold));
 }
 

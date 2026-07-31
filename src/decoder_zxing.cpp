@@ -88,6 +88,9 @@ std::vector<DecodedSymbol> ZXingDecoder::decode(const GrayView& image) {
     options.setDownscaleThreshold(downscaleThreshold_);
     // CODE39 Full ASCII (벤치마킹 대상 스펙 포함 항목). zxing 기본은 OFF.
     options.setTryCode39ExtendedMode(tryCode39ExtendedMode_);
+    // [부분 디코딩 대책] 헤더의 minLineCount_ 주석 참고.
+    options.setMinLineCount(static_cast<uint8_t>(minLineCount_));
+    options.setValidateITFCheckSum(validateITFCheckSum_);
     // 주의: setMaxNumberOfSymbols()는 절대 쓰지 말 것. 조기 종료로 빨라지지만
     // 프레임 안의 코드를 개수 제한만큼만 반환해서 다중 코드 동시 판독
     // (벤치마킹 대상 리더기의 핵심 기능)을 깨뜨린다 — 실측: 6개 있는 이미지에서 2로
