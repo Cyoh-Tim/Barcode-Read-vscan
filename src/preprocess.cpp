@@ -369,4 +369,55 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     return true;
 }
 
+bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
+    const int W = src.width, H = src.height;
+    if (W < 64 || H < 64) return false;
+    const int stride = src.stride > 0 ? src.stride : W;
+
+    // 2픽셀 건너뛰며 훑는다 — 경계를 픽셀 단위로 정확히 잡을 필요가 없다
+    // (어차피 여백을 덧붙인다). 표본이 1/4이라 비용도 1/4다.
+    const int step = 2;
+    int lo = 255, hi = 0;
+    for (int y = 0; y < H; y += step) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < W; x += step) {
+            const int v = row[x];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+    }
+    if (hi - lo < 24) return false;   // 명암이 없으면 자를 근거도 없다
+    const int thresh = lo + (hi - lo) * 2 / 5;
+
+    int x0 = W, x1 = -1, y0 = H, y1 = -1;
+    for (int y = 0; y < H; y += step) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < W; x += step) {
+            if (row[x] > thresh) continue;
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+        }
+    }
+    if (x1 < x0 || y1 < y0) return false;
+
+    x0 = std::max(0, x0 - marginPx);
+    y0 = std::max(0, y0 - marginPx);
+    x1 = std::min(W - 1, x1 + marginPx);
+    y1 = std::min(H - 1, y1 + marginPx);
+    const int tw = x1 - x0 + 1, th = y1 - y0 + 1;
+    if (tw < 32 || th < 32) return false;
+    // 줄어드는 게 얼마 없으면 복사 비용만 낸다.
+    if (static_cast<double>(tw) * th > 0.75 * static_cast<double>(W) * H) return false;
+
+    out.width = tw;
+    out.height = th;
+    out.pixels.resize(static_cast<size_t>(tw) * th);
+    for (int y = 0; y < th; ++y)
+        std::memcpy(out.pixels.data() + static_cast<size_t>(y) * tw,
+                    src.pixels + static_cast<size_t>(y0 + y) * stride + x0, tw);
+    return true;
+}
+
 } // namespace vscan

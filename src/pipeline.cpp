@@ -475,6 +475,28 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         GrayImage rotated;
         rotateAroundPoint(GrayView(crop), -useAngle,
                           static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
+
+        // [되돌린 뒤 다시 좁힌다] 기울어진 코드를 담으려면 크롭이 대각선
+        // 길이만큼 커야 하는데, 되돌리고 나면 코드가 축에 정렬돼서 그
+        // 상자의 20% 남짓만 차지한다. 나머지는 회전으로 생긴 흰 여백이라
+        // 디코더가 훑을 이유가 없다. 실측(Code128 모듈 8px, 25/40/70도):
+        // 회전본 1184x1088에서 실제 코드는 882x320이고, 그만큼만 잘라
+        // 디코드하면 16.8 -> 9.8ms다(검출 동일). 이 단계가 회전 구제
+        // 시간의 지배항이라 효과가 그대로 총합에 남는다.
+        //
+        // 좌표 보정을 위해 잘라낸 원점을 기억해둔다.
+        int tightX = 0, tightY = 0;
+        GrayImage tight;
+        if (tightenToContent(GrayView(rotated), tight)) {
+            // tightenToContent()는 오프셋을 돌려주지 않으므로 폭/높이 차이로
+            // 되짚는다 — 여백이 상하좌우 대칭이 아닐 수 있어 정확하지 않다.
+            // 회전 좌표는 어차피 근사(아래 역회전도 크롭 중심 기준)이므로
+            // 중심이 유지되는 이 근사로 충분하다.
+            tightX = (rotated.width - tight.width) / 2;
+            tightY = (rotated.height - tight.height) / 2;
+            rotated = std::move(tight);
+        }
+
         Pipeline roiPipe(roiCfg);
         auto rotHits = roiPipe.processViewCore(GrayView(rotated));
         if (!rotHits.empty()) {
@@ -490,8 +512,8 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
             const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
             for (auto& r : rotHits)
                 for (auto& pt : r.symbol.position) {
-                    const float dx = static_cast<float>(pt.first) - px;
-                    const float dy = static_cast<float>(pt.second) - py;
+                    const float dx = static_cast<float>(pt.first + tightX) - px;
+                    const float dy = static_cast<float>(pt.second + tightY) - py;
                     pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
                     pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
                 }

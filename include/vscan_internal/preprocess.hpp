@@ -94,6 +94,26 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
  */
 bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
 
+/*
+ * 내용이 실제로 들어있는 범위를 찾아 그만큼만 잘라낸다(여백 marginPx).
+ * 잘라낼 게 없으면(내용이 거의 전체) false.
+ *
+ * 용도는 **회전 구제 뒤 재크롭**이다. 기울어진 코드를 담으려면 크롭이
+ * 대각선 길이만큼 커야 하는데, 되돌리고 나면 코드는 축에 정렬돼서
+ * 그 상자의 20% 남짓만 차지한다. 나머지는 회전으로 생긴 흰 여백이라
+ * 디코더가 훑을 이유가 없다.
+ *
+ * 실측(Code128 모듈 8px, 회전 25/40/70도): 회전본 1184x1088에서 실제
+ * 코드는 882x320(면적의 22%)이었고, 그만큼만 잘라 풀옵션으로 디코드하면
+ * 16.8 -> 9.8ms다(검출은 동일).
+ *
+ * 임계값은 이미지 자신의 명암 범위에서 잡는다 — 노출이 프레임마다
+ * 다르므로 고정 상수를 쓸 수 없다. 회전으로 생긴 여백은 흰색(255)이라
+ * 자연스럽게 배경 쪽으로 떨어진다.
+ * [[vscan-lite-retight-after-rotate]]
+ */
+bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24);
+
 
 } // namespace vscan
 
