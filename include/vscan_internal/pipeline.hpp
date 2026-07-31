@@ -85,6 +85,26 @@ struct PipelineConfig {
     bool enableZBar = false;
 
     /*
+     * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
+     * 때만 돈다.
+     *
+     * 에너지 로케이터가 원리적으로 못 잡는 "작은 QR이 여럿 흩뿌려진
+     * 프레임"을 위한 것이다 — 파인더 패턴(1:1:3:1:1)으로 QR 자체를 찾는다.
+     * 실측(실물 3.1MP 해상도 차트, QR 21x21모듈이 45px = 모듈 2.2px):
+     * 자동 경로 검출 0 -> 3곳. 후보 5곳을 오탐 없이 찾는다.
+     *
+     * 기본을 끄는 이유는 비용이다. 전체 행을 훑어야 해서 2048x1536 기준
+     * 프레임당 7.6~16ms이고, **실패한 프레임마다** 든다. 난수 코퍼스에서
+     * 평균이 150 -> 186ms(+24%)로 올라 회귀 게이트를 넘었다.
+     * 얻는 것이 "밀집 소형 QR"이라는 특정 상황에 한정되므로, 그 상황을
+     * 아는 쪽에서 켜는 게 맞다.
+     *
+     * 켤 만한 배치: 해상도/한계 시험 차트, 작은 라벨이 여러 개 붙는 팔레트,
+     * 상위 검출기가 없는 상태에서 화면상 코드가 50px 안팎으로 작게 잡히는 경우.
+     */
+    bool enableQrFinderRescue = false;
+
+    /*
      * [작은 ROI 구제] ROI 디코드가 빈손이고 ROI가 이 크기(px) 이하면
      * 확대 + 언샤프로 한 번 더 시도한다. 0 또는 1이면 끔.
      *
@@ -455,6 +475,10 @@ private:
     enum class RegionPass { CropOnly, RotateOnly, Both };
     std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
                                                  RegionPass pass = RegionPass::Both);
+
+    // [QR 파인더 구제] 파인더 패턴으로 작은 QR을 직접 찾아 ROI 디코드로
+    // 넘긴다. [[vscan-lite-qr-finder-locate]]
+    std::vector<PipelineResult> tryQrFinderRescue(const GrayView& image, int need);
 
 
     std::vector<PipelineResult> tryDeskewRescue1D(const GrayView& image, int need);

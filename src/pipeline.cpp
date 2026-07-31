@@ -3,6 +3,7 @@
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
 #include "vscan_internal/locate.hpp"
+#include "vscan_internal/locate_qr.hpp"
 #ifdef VSCAN_HAVE_ZBAR
 #include "vscan_internal/decoder_zbar.hpp"
 #endif
@@ -304,6 +305,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     }
 
 
+    // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
+    // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
+    if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
+        auto qrHits = tryQrFinderRescue(image, std::max(1, cfg_.minExpectedCodes));
+        if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) return qrHits;
+        if (qrHits.size() > hits.size()) hits = std::move(qrHits);
+    }
+
     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
@@ -522,6 +531,42 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         }
     }
     return hits;
+}
+
+std::vector<PipelineResult> Pipeline::tryQrFinderRescue(const GrayView& image, int need) {
+    // [[vscan-lite-qr-finder-locate]]
+    //
+    // 에너지 로케이터(findCodeRegions)는 심볼로지를 안 가리는 대신,
+    // **작은 코드가 여러 개 흩뿌려진 프레임**에서는 원리적으로 못 쓴다 —
+    // 타일이 원본 128px이라 45px 코드 여러 개가 한 타일에 뭉치고, 에너지
+    // 순위는 면적에 좌우돼서 큰 글자 블록이 작은 QR을 밀어낸다(실측:
+    // 실물 3.1MP 해상도 차트에서 상위 2개가 글자였다).
+    //
+    // QR은 고유 구조가 있으니 그걸 쓴다. 파인더 패턴은 어느 방향으로
+    // 잘라도 1:1:3:1:1이고 이 비율은 크기·회전 불변이라, 작아도 흐려도
+    // 비율만 살아있으면 걸린다. 실측(같은 차트, 모듈 2.1px): 8.1ms에
+    // QR 후보 11곳, 그중 9곳이 "잘라주면 읽히는" 지점이었다.
+    //
+    // 찾은 상자는 processViewROIs()로 넘긴다 — 거기엔 작은 ROI를 확대 +
+    // 언샤프로 살리는 단계가 이미 있고(§3.22), 모듈 2px대 코드에는 그게
+    // 필수다.
+    // QR/MicroQR 비트(0,1)가 마스크에서 빠져 있으면 돌 이유가 없다.
+    constexpr uint32_t kQrBits = (1u << 0) | (1u << 1);
+    if (cfg_.formatMask != 0 && (cfg_.formatMask & kQrBits) == 0) return {};
+
+    auto cands = findQrCandidates(image, std::min(16, std::max(4, need * 2)));
+    if (cands.empty()) return {};
+
+    std::vector<Rect> rects;
+    rects.reserve(cands.size());
+    for (const auto& c : cands) rects.push_back(c.bbox);
+
+    // 정지대 몫으로 조금 넉넉히. 파인더 기반 상자는 코드에 딱 맞아서
+    // 여백이 없으면 디코더가 경계를 못 잡는다.
+    // 정지대 몫으로 조금 넉넉히. 파인더 기반 상자는 코드에 딱 맞아서
+    // 여백이 없으면 디코더가 경계를 못 잡는다. 8~40px를 훑어봤는데
+    // 결과가 같았다(모듈이 2px대라 어느 쪽이든 정지대가 충분하다).
+    return processViewROIs(image, rects, 12);
 }
 
 std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, int need) {
