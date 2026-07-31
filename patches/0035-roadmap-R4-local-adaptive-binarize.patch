@@ -1,0 +1,596 @@
+From d7c570d042e354fbd9735fabe451aa255fb14e87 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 15:38:59 +0000
+Subject: [PATCH] =?UTF-8?q?=EB=A1=9C=EB=93=9C=EB=A7=B5=20R4:=20=EB=8C=80?=
+ =?UTF-8?q?=EB=B9=84=200.15=20=EB=B2=BD=EC=9D=84=200.05=EB=A1=9C=20?=
+ =?UTF-8?q?=E2=80=94=20=EC=9D=B4=EC=A7=84=ED=99=94=EB=A5=BC=20=EC=9A=B0?=
+ =?UTF-8?q?=EB=A6=AC=EA=B0=80=20=ED=95=9C=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+14종이 전부 똑같이 대비 0.15에서 끊겼다. 한 점에서 일치한다는 건
+원인이 심볼로지가 아니라 공통 단계에 있다는 뜻이었고, 실제로
+zxing HybridBinarizer의 MIN_DYNAMIC_RANGE(8x8 블록 명암 폭 24 이하면
+"구조 없음"으로 처리)였다. 모듈 8px에서는 코드 영역 8x8 블록의 34%가
+그 조건에 걸린다 — 정보는 32px 규모에 있는데 판정은 8px 규모에서 한다.
+
+계조를 손보는 길은 둘 다 막혔다(헤더에 실측과 함께 기록):
+ - 블록별 min/max 펴기는 팽창이 종이 배경을 끌어와 코드 대비를 다시
+   눌렀다(QR 밝은 모듈 141 -> 69, 어두운 모듈 115 -> 3, 둘 다 검정).
+ - 평균 기준 증폭은 1D만 살리고 2D는 gain x block 24조합 전부 실패.
+
+그래서 판정을 직접 한다: localAdaptiveBinarize()가 국소 임계로
+이진화한다. 임계 규칙 두 가지(국소 평균 / 국소 중간값)가 서로 다른
+심볼로지를 살려서 둘 다 돌리고, 구조 마스크를 닫힘으로 만들어
+정지대가 소금후추로 깨지는 것을 막고, 이진화 뒤 tightenToContent()로
+다시 좁힌다(1184x832는 실패, 1019x377은 8.8ms에 성공).
+
+비용은 저대비 ROI에만 든다 — 조건 없이 돌리면 코퍼스 p95가 21% 늘고
+중복이 3 -> 4가 됐다.
+
+결과: Code128/EAN13/EAN8/UPCA/QR/DataMatrix/DataBarExp가 0.15 -> 0.05,
+Code39/DataBar가 0.15 -> 0.10. 곁들여 PDF417 노이즈 축이 5/13 -> 11/13.
+게이트는 검출 59.4 -> 59.7%, 중복 3 -> 1, 오디코딩 2 유지.
+
+PROJECT_NOTES §3.25
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      | 145 ++++++++++++++++++++-
+ include/vscan_internal/preprocess.hpp |  84 +++++++++++-
+ src/pipeline.cpp                      |  56 +++++++-
+ src/preprocess.cpp                    | 177 +++++++++++++++++++++++++-
+ 4 files changed, 454 insertions(+), 8 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 49c800e..9f2f27c 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.24 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** | 무엇부터 할지 정할 때 |
++| §3.14~3.25 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+@@ -2107,6 +2107,149 @@ coarse 2.2 + 풀프레임 fast 패스 9.6 + 영역 locate 2.4 = **14.2ms가 고
+ 
+ ---
+ 
++### 3.25 R4 완료: 대비 0.15 벽을 0.05로 (2026-07-31)
++
++#### 벽의 정체는 대비가 아니라 이진화의 안전장치였다
++
++대비 축을 재보면 14종이 **전부 똑같이 0.15에서 끊긴다**. 심볼로지마다
++다른 값에서 끊겨야 자연스러운데 한 점에서 일치한다는 건, 원인이
++심볼로지가 아니라 공통 단계에 있다는 뜻이다.
++
++zxing의 LocalAverage(HybridBinarizer)를 읽어보니 답이 있었다:
++
++```
++static constexpr int MIN_DYNAMIC_RANGE = 24;
++...
++if (max - min <= MIN_DYNAMIC_RANGE) {
++    // 국소 분산이 낮으면 "밝은 픽셀만 또는 어두운 픽셀만 있는 블록"으로
++    // 가정한다. 노이즈에서 데이터를 만들어내지 않기 위한 것이다.
++    average = min / 2;
++```
++
++8x8 블록의 명암 폭이 24 이하면 "구조 없음"으로 처리한다. 모듈이 8px면
++8x8 블록이 통째로 한 모듈 안에 들어가는 일이 흔한데, 그 블록의 폭은
++노이즈뿐이다. 실측(Code128 module 8, 대비 0.10):
++
++| | 8x8 블록 | 32x32 블록 |
++|---|---|---|
++| 코드 영역 명암 폭 중앙값 | 32 | 42 |
++| **24 미만 비율** | **34%** | 3% |
++
++**정보는 32px 규모에 있는데 판정은 8px 규모에서 한다.**
++
++#### 왜 기존 ROI 스트레칭(§3.19)으로 안 됐나
++
++그건 ROI 하나에 LUT 하나를 쓰는 전역 변환이다. 영역 크롭 1184x832의
++퍼센타일은 lo 108 / hi 220인데, 정작 코드는 그 안에서 110(바)~140(공백)만
++쓴다. span 112 중 코드 몫이 30뿐이라 0~255로 펴봐야 코드는 4~68에 머문다.
++
++#### 틀린 길 둘 — 반복하지 말 것
++
++**(1) 블록별 (min,max)를 0~255로 펴기.** 한 모듈 안에 통째로 들어간
++블록을 구제하려고 min/max를 3x3 팽창시켰더니, 코드 가장자리 블록의 max가
++**종이 배경**을 끌어와 코드 자신의 대비가 다시 눌렸다. 실측(QR module 8,
++대비 0.10): 종이 210 / 밝은 모듈 141 / 어두운 모듈 115인데 hi=210으로
++펴니 밝은 모듈 69, 어두운 모듈 3 — **둘 다 검정**이 됐다. 전역
++스트레칭의 실패가 블록 규모에서 그대로 반복된 것이다.
++
++**(2) 평균 기준 증폭** `out = mean + (v-mean)*gain`. 1D는 살아났지만
++(Code128/EAN13 대비 0.10 통과) 2D는 gain 3~10 x block 24~64의 24조합이
++전부 실패했다. 계조를 키워도 zxing의 8x8 판정을 통과시키지 못했다.
++
++#### 통한 길 — 판정을 우리가 한다
++
++계조를 손보는 대신 **이진화를 직접 한다**. 같은 이미지를 국소 임계로
++갈랐더니 QR이 1.9ms에 읽혔다 — 정보는 처음부터 남아 있었고 막힌 것은
++이진화 단계였다. `[[vscan-lite-roi-local-binarize]]`
++
++세 가지가 다 필요했다.
++
++**임계 규칙 둘.** 국소 평균과 국소 중간값이 서로 다른 심볼로지를 살린다:
++
++| 심볼로지 | 평균만 | 중간값만 | 둘 다 |
++|---|---|---|---|
++| Code128 | 8/8 | 6/8 | **8/8** |
++| EAN13 | 8/8 | 6/8 | **8/8** |
++| DataMatrix | 8/8 | 6/8 | **8/8** |
++| UPCA | 8/8 | 6/8 | **8/8** |
++| QR | 6/8 | 8/8 | **8/8** |
++
++평균은 굵은 요소가 속이 빈다 — 창이 통째로 바 안에 들어가면 평균이 바
++자신의 밝기가 되어 임계가 그 위아래로 흔들린다(ITF 굵은 바가 윤곽선만
++남은 속 빈 막대가 됐다). 중간값은 그 자리를 확실히 검정으로 만들지만,
++라벨 종이 가장자리처럼 밝기가 한 번 꺾이는 자리에서 코드 쪽으로 값이
++새어 QR의 밝은 모듈까지 검게 만든다. 구제 자리이므로 둘 다 돌린다.
++
++**구조 마스크(닫힘).** 균일한 종이를 임계로 가르면 노이즈가 반반 갈려서
++없던 무늬가 생긴다. 실제로 DataMatrix 정지대가 통째로 검게 칠해져
++L-파인더 탐지가 죽었다. 팽창만 하면 이번엔 코드 바깥 한 블록 띠에
++소금후추가 생겨 QR 정지대가 깨진다 — 침식을 이어 붙여야 안쪽 구멍만
++메워지고 경계는 제자리로 돌아온다.
++
++**이진화 뒤 재크롭.** 영역 상자는 타일 격자(원본 128px) 단위라 코드보다
++헐렁하다. 이진화 뒤에는 코드가 진짜 흑백이 되고 배경은 흰색으로 밀려
++있어서 `tightenToContent()`가 코드만 정확히 집어낸다. 이 차이가 결정적
++이다: 같은 이미지가 1184x832에서는 안 읽히고 1019x377로 좁히면 8.8ms에
++읽힌다.
++
++블록 크기는 24가 기본값이다(평균 창은 그 절반 반경). 모듈보다는 커야
++임계가 밝은/어두운 요소 사이에 놓이고, 너무 크면 창에 종이 배경이 섞인다:
++
++| block | 24 | 32 | 48 | 64 |
++|---|---|---|---|---|
++| Code128 | O | O | O | X |
++| QR | O | O | X | X |
++| DataMatrix | O | X | X | X |
++
++#### 비용 — 저대비일 때만 돌린다
++
++처음엔 조건 없이 돌렸다가 코퍼스 p95가 21% 늘고 중복이 3 -> 4가 됐다.
++국소 이진화는 어디까지나 대비 도구이므로, ROI가 이미 계조를 200 이상
++쓰고 있으면(=`stretchContrast()`가 false를 돌려주는 경우) 실패 원인이
++대비가 아니라서 돌 이유가 없다. 그 검사를 넣으니 p95 증가가 12%로
++줄고 중복이 1로 돌아왔다. 대신 코퍼스 검출이 61.7 -> 59.7%로 내려간다 —
++중복 증가는 정확성 문제라 이쪽을 택했다.
++
++#### 결과 (대비 0.05~0.40, 8단, module 8)
++
++| 심볼로지 | 이전 | 이후 | 끊기는 대비 |
++|---|---|---|---|
++| Code128 | 6/8 | **8/8** | 0.15 -> **0.05** |
++| EAN13 | 6/8 | **8/8** | 0.15 -> **0.05** |
++| EAN8 | 6/8 | **8/8** | 0.15 -> **0.05** |
++| UPCA | 6/8 | **8/8** | 0.15 -> **0.05** |
++| QR | 6/8 | **8/8** | 0.15 -> **0.05** |
++| DataMatrix | 6/8 | **8/8** | 0.15 -> **0.05** |
++| DataBar Expanded | 6/8 | **8/8** | 0.15 -> **0.05** |
++| Code39 | 6/8 | **7/8** | 0.15 -> **0.10** |
++| DataBar | 6/8 | **7/8** | 0.15 -> **0.10** |
++| ITF / PDF417 / UPCE / Code93 / Codabar | 6/8 | 6/8 | 0.15 (변화 없음) |
++
++곁들여 **PDF417 노이즈 축이 5/13 -> 11/13**으로 뛰었다. 노이즈가 심하면
++국소 명암 폭이 줄어 같은 벽에 부딪히는데, 이 단계가 블러를 먼저 먹이고
++이진화하므로 같이 열린 것이다. 나머지 축(각도/모듈/블러)은 8종 x 3축
++전부 변화 없음.
++
++| 게이트 지표 | 이전 | 이후 |
++|---|---|---|
++| 14종 x 19각도 | 100% / 오디코딩 0 | 유지 |
++| 고정 40종 | 38/38/38 | 유지 |
++| 코퍼스 검출 | 59.4% | **59.7%** |
++| 코퍼스 오디코딩 / 중복 | 2 / 3 | 2 / **1** |
++| 코퍼스 평균(기준 작업량 대비) | 116.7 | 115.4 |
++| 코퍼스 p95(기준 작업량 대비) | 301.4 | 336.7 (+12%) |
++
++#### 남은 다섯 종
++
++ITF/PDF417/UPCE/Code93/Codabar는 0.15 그대로다. ITF는 원인을 봤다 —
++굵은 요소가 평균 임계에서 속이 비고, 중간값 임계에서는 라벨 경계가
++샌다. 두 규칙의 약점이 정확히 ITF에서 겹친다. 굵은 요소를 위해서는
++임계 창이 요소보다 커야 하고 라벨 경계를 피하려면 작아야 하는데, 이
++둘을 한 창으로 만족시킬 수 없다. 요소 폭을 먼저 추정해서 창을 거기에
++맞추는 것이 다음 방향이다.
++
++---
++
+ ## §4. 심볼로지 커버리지
+ 
+ ### 비교 대상 리더기 공식 스펙 (제조사 문서 확인)
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index cc1b751..b53768b 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -94,6 +94,85 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
+  */
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+ 
++/*
++ * [국소 적응 이진화 — 초저대비 전용]
++ *
++ * 국소 임계보다 어두우면 검정, 아니면 흰색. 단 "구조가 있는 자리"에서만
++ * 그렇게 하고, 나머지는 통째로 흰색으로 민다.
++ *
++ * 왜 stretchContrast()로 부족한가. 그건 ROI 하나에 LUT 하나를 쓰는
++ * **전역** 변환이라, ROI 안에서 밝기 차가 크면 코드가 쓰는 계조 구간이
++ * 그 차이에 눌린다. 실측(Code128 module 8, 대비 0.10, 2048x1536):
++ * 영역 크롭 1184x832의 퍼센타일이 lo 108 / hi 220이었는데, 정작 코드는
++ * 그 안에서 110(바)~140(공백)만 쓴다. span 112 중 코드 몫이 30뿐이라,
++ * 0~255로 펴봐야 코드는 4~68에 머문다.
++ *
++ * 그러면 왜 그게 안 읽히나. zxing의 LocalAverage(HybridBinarizer)는
++ * 8x8 블록의 (최대-최소)가 **24 이하면 "구조 없는 균일 블록"으로 보고**
++ * 평균 대신 min/2를 흑점으로 쓴다 — 노이즈에서 데이터를 만들어내지
++ * 않으려는 안전장치다(HybridBinarizer.cpp MIN_DYNAMIC_RANGE). 모듈이
++ * 8px면 8x8 블록이 통째로 한 모듈 안에 들어가는 일이 흔한데, 그 블록의
++ * 범위는 노이즈뿐이다. 실측(대비 0.10): 코드 영역 8x8 블록의 34%가
++ * 24 미만이었다(32x32 블록으로 보면 3%뿐 — 정보는 32px 규모에 있는데
++ * 판정은 8px 규모에서 한다).
++ *
++ * [계조를 손보려던 시도 둘 — 반복하지 말 것]
++ *  1. 블록별 (min,max)를 0~255로 펴기. 한 모듈 안에 통째로 들어간 블록을
++ *     구제하려고 min/max를 3x3 팽창시켰더니, 코드 가장자리 블록의 max가
++ *     **종이 배경**을 끌어와서 코드 자신의 대비가 다시 눌렸다. 실측
++ *     (QR module 8, 대비 0.10): 종이 210 / 밝은 모듈 141 / 어두운 모듈
++ *     115인데 hi=210으로 펴니 밝은 모듈 69, 어두운 모듈 3 — **둘 다
++ *     검정**이 됐다. 전역 스트레칭의 실패가 블록 규모에서 반복된 것이다.
++ *  2. 평균 기준 증폭(out = mean + (v-mean)*gain). 1D는 살아났지만
++ *     (Code128/EAN13 대비 0.10 통과) 2D는 gain 3~10 x block 24~64
++ *     24조합이 전부 실패했다. 대비를 키워도 zxing의 8x8 판정을 통과시키지
++ *     못했다.
++ *
++ * 그래서 계조를 손보는 대신 **판정을 우리가 한다**. 같은 이미지를 국소
++ * 임계로 직접 이진화했더니 QR이 1.9ms에 읽혔다 — 정보는 처음부터
++ * 남아 있었고 막힌 것은 이진화 단계였다.
++ *
++ * [임계 규칙 둘 — 둘 다 필요하다] midpoint 인자로 고른다.
++ *   false: 국소 **평균**(반경 block/2 박스). 
++ *   true : 국소 **중간값**((min+max)/2, 구조 블록에서만 가져옴).
++ * 서로 다른 심볼로지를 살린다. 실측(대비 0.05~0.40 8단, module 8):
++ *
++ *   심볼로지    평균만  중간값만  둘 다
++ *   Code128      8/8     6/8     8/8
++ *   EAN13        8/8     6/8     8/8
++ *   DataMatrix   8/8     6/8     8/8
++ *   UPCA         8/8     6/8     8/8
++ *   QR           6/8     8/8     8/8
++ *   EAN8         8/8     8/8     8/8
++ *
++ * 왜 갈리는가. 평균은 굵은 요소가 속이 빈다 — 창이 통째로 바 안에
++ * 들어가면 평균이 바 자신의 밝기가 되어 임계가 그 위아래로 흔들린다
++ * (ITF 굵은 바가 윤곽선만 남았다). 중간값은 그 자리를 확실히 검정으로
++ * 만들지만, 라벨 종이 가장자리처럼 밝기가 한 번 꺾이는 자리에서
++ * 코드 쪽으로 값이 새어 QR의 밝은 모듈까지 검게 만든다.
++ * 여기는 다른 게 다 실패한 뒤의 구제 자리이므로 호출부가 둘 다 돌린다.
++ *
++ * [구조 마스크가 반드시 필요하다] 균일한 종이를 임계로 가르면 노이즈가
++ * 반반 갈려서 없던 무늬가 생긴다. 실제로 그렇게 만들었더니 DataMatrix의
++ * 정지대가 통째로 검게 칠해져 L-파인더 탐지가 죽었다. 마스크는
++ * 닫힘(팽창 후 침식)으로 만든다 — 팽창만 하면 코드 바깥 한 블록 띠에
++ * 소금후추가 생겨 QR 정지대가 깨진다.
++ *
++ * block: 국소 통계의 격자 크기(원본 픽셀). 평균 창은 이 값의 절반
++ *   반경이다. 모듈보다는 커야 하고(그래야 임계가 밝은/어두운 요소의
++ *   사이에 놓인다), 너무 크면 창 안에 종이 배경이 섞여 임계가 어긋난다.
++ *   실측(대비 0.10, module 8):
++ *     block   24  32  48  64
++ *     Code128  O   O   O   X
++ *     QR       O   O   X   X
++ *     DM       O   X   X   X
++ *   셋 다 통과하는 24가 기본값이다.
++ * minRange: 블록 명암 폭이 이 미만이면 "구조 없음"으로 본다.
++ * [[vscan-lite-roi-local-binarize]]
++ */
++bool localAdaptiveBinarize(const GrayView& src, GrayImage& out, bool midpoint,
++                           int block = 24, int minRange = 16);
++
+ /*
+  * 내용이 실제로 들어있는 범위를 찾아 그만큼만 잘라낸다(여백 marginPx).
+  * 잘라낼 게 없으면(내용이 거의 전체) false.
+@@ -112,7 +191,10 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+  * 자연스럽게 배경 쪽으로 떨어진다.
+  * [[vscan-lite-retight-after-rotate]]
+  */
+-bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24);
++// offX/offY를 주면 잘라낸 원점을 돌려준다(원본 좌표 -> 결과 좌표 보정용).
++// 여백은 상하좌우가 대칭이 아닐 수 있으므로 폭/높이 차이로 되짚으면 틀린다.
++bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24,
++                      int* offX = nullptr, int* offY = nullptr);
+ 
+ /*
+  * 정수배 확대(쌍선형) + 언샤프 마스킹.
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 831e5fc..7da45af 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -449,12 +449,12 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                     std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
+                                 image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
+ 
+-                GrayImage boosted;
+-                if (!stretchContrast(GrayView(crop), boosted)) continue;
+-
+                 Pipeline roiPipe(roiCfg);
+-                auto sHits = roiPipe.processViewCore(GrayView(boosted));
+-                if (sHits.empty()) {
++                std::vector<PipelineResult> sHits;
++                GrayImage boosted;
++                if (stretchContrast(GrayView(crop), boosted))
++                    sHits = roiPipe.processViewCore(GrayView(boosted));
++                if (sHits.empty() && !boosted.pixels.empty()) {
+                     // [편 다음엔 한 번 뭉갠다] 스트레칭은 신호와 **노이즈를
+                     // 같이** 증폭한다. 대비가 낮을수록 이득이 커지므로
+                     // 양자화/센서 노이즈도 그만큼 커져서, 편 직후에는
+@@ -466,6 +466,52 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                     boxBlur3x3(GrayView(boosted), smoothed);
+                     sHits = roiPipe.processViewCore(GrayView(smoothed));
+                 }
++                // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
++                // ROI가 이미 계조를 200 이상 쓰고 있으면(stretchContrast가
++                // false를 돌려준 경우) 실패 원인이 대비가 아니므로 돌 이유가
++                // 없다 — 코퍼스 300장에서 이 검사 없이 돌리면 p95가 21%
++                // 늘었는데 그 대부분이 대비와 무관한 프레임이었다.
++                if (sHits.empty() && !boosted.pixels.empty()) {
++                    // [그래도 안 되면 국소 정규화] 위 두 시도는 ROI 하나에
++                    // LUT 하나를 쓰는 전역 변환이라, ROI 안에서 밝기 차가
++                    // 크면 코드가 쓰는 계조 구간이 그 차이에 눌린다.
++                    // 실측(Code128 module 8, 대비 0.10): 크롭의 퍼센타일이
++                    // 108~220인데 코드는 그 안에서 110~140만 쓴다 — 펴봐야
++                    // 코드는 4~68에 머물고, zxing의 8x8 블록 중 34%가
++                    // "범위 24 미만 = 구조 없음"으로 빠진다.
++                    // localAdaptiveBinarize()는 그 판정을 우회한다 —
++                    // 국소 평균으로 우리가 직접 이진화한다.
++                    // [[vscan-lite-roi-local-binarize]]
++                    // [임계 규칙 두 가지를 다 본다] 국소 평균과 국소
++                    // 중간값은 서로 다른 심볼로지를 살린다 — 실측(대비
++                    // 0.05~0.40 스윕, 8단): 평균은 Code128/EAN13/DM/UPCA를
++                    // 0.05까지 열지만 QR은 못 열고, 중간값은 QR/EAN8/
++                    // DataBarExp를 열지만 앞의 넷을 도로 닫는다. 여기는
++                    // 다른 게 다 실패한 뒤의 구제 자리이므로 둘 다 돌린다.
++                    GrayImage localized;
++                    for (bool mid : {false, true}) {
++                    if (!sHits.empty() || budgetExceeded()) break;
++                    if (localAdaptiveBinarize(GrayView(crop), localized, mid)) {
++                        // [편 다음엔 다시 좁힌다] 영역 상자는 타일 격자(원본
++                        // 128px) 단위라 코드보다 헐렁하다. 실측(대비 0.10):
++                        // 영역 크롭이 1184x832인데 코드는 1019x377이다.
++                        // 국소 정규화 뒤에는 코드가 진짜 흑백이 되고 배경은
++                        // 손대지 않은 채 남으므로, 여기서 tightenToContent()가
++                        // 정확히 코드만 집어낸다 — 그리고 그 차이가 결정적이다:
++                        // 같은 이미지가 1184x832에서는 안 읽히고 1019x377로
++                        // 좁히면 8.8ms에 읽힌다.
++                        int tx = 0, ty = 0;
++                        GrayImage tight;
++                        const bool tightened =
++                            tightenToContent(GrayView(localized), tight, 24, &tx, &ty);
++                        sHits = roiPipe.processViewCore(
++                            GrayView(tightened ? tight : localized));
++                        if (tightened)
++                            for (auto& r : sHits)
++                                for (auto& pt : r.symbol.position) { pt.first += tx; pt.second += ty; }
++                    }
++                    }
++                }
+                 for (auto& r : sHits)
+                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
+                 stretched.insert(stretched.end(), sHits.begin(), sHits.end());
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index f82eddb..dbefd7f 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -1,4 +1,5 @@
+ #include "vscan_internal/preprocess.hpp"
++#include <algorithm>
+ #include <cmath>
+ #include <cstring>
+ #include <vector>
+@@ -369,6 +370,178 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     return true;
+ }
+ 
++bool localAdaptiveBinarize(const GrayView& src, GrayImage& out, bool midpoint, int block,
++                           int minRange) {
++    const int W = src.width, H = src.height;
++    if (W < block * 2 || H < block * 2 || block < 8 || minRange < 1) return false;
++
++    // 1) 노이즈를 먼저 죽인다. 임계 판정이 픽셀 하나하나에 걸리므로
++    //    노이즈가 그대로면 결과가 소금후추가 된다. 노이즈는 상관거리가
++    //    1px이라 3x3 평균에서 시그마가 1/3로 줄지만, 모듈 몇 px짜리
++    //    신호는 거의 그대로 남는다.
++    GrayImage blurred;
++    boxBlur3x3(src, blurred);
++    const uint8_t* __restrict bp = blurred.pixels.data();
++
++    // 2) 블록별 min/max와 "구조 있음" 판정. 통계용이라 2픽셀씩 건너뛰어도
++    //    값이 거의 같고 비용은 1/4이다.
++    const int bx = (W + block - 1) / block, by = (H + block - 1) / block;
++    const size_t nb = static_cast<size_t>(bx) * by;
++    std::vector<uint8_t> bmin(nb, 255), bmax(nb, 0), hit(nb, 0);
++    for (int gy = 0; gy < by; ++gy) {
++        const int y0 = gy * block, y1 = std::min(H, y0 + block);
++        for (int gx = 0; gx < bx; ++gx) {
++            const int x0 = gx * block, x1 = std::min(W, x0 + block);
++            int mn = 255, mx = 0;
++            for (int y = y0; y < y1; y += 2) {
++                const uint8_t* __restrict row = bp + static_cast<size_t>(y) * W;
++                for (int x = x0; x < x1; x += 2) {
++                    const int v = row[x];
++                    if (v < mn) mn = v;
++                    if (v > mx) mx = v;
++                }
++            }
++            const size_t k = static_cast<size_t>(gy) * bx + gx;
++            bmin[k] = static_cast<uint8_t>(mn);
++            bmax[k] = static_cast<uint8_t>(mx);
++            hit[k] = (mx - mn >= minRange) ? 1 : 0;
++        }
++    }
++
++    // 3) [임계는 국소 (min+max)/2] 국소 **평균**을 쓰면 굵은 요소가 속이
++    //    빈다. 창(반경 block/2)이 통째로 바 안에 들어가면 평균이 바 자신의
++    //    밝기가 되어 임계가 그 위아래로 흔들리기 때문이다 — 실측(ITF
++    //    module 8, 대비 0.10): 굵은 바가 전부 윤곽선만 남은 속 빈 막대가
++    //    됐다. 밝은/어두운 요소의 중간값을 쓰면 그 자리는 확실히 검정이 된다.
++    //
++    //    그 중간값을 "구조가 있는 블록"에서만 가져오는 것이 핵심이다.
++    //    블록이 굵은 요소 안에 통째로 들어가면 자기 min/max는 그 요소
++    //    하나뿐이라 쓸 수 없으므로, 이웃의 구조 블록에서 빌린다. 반대로
++    //    구조 블록은 **자기 값을 그대로 쓴다** — 이웃에서 빌리게 하면
++    //    라벨 종이 가장자리 블록의 max(=밝은 종이)가 코드 쪽으로 새어들어와
++    //    코드의 밝은 모듈까지 검게 만든다(그 실패는 헤더 주석 참고).
++    std::vector<uint8_t> elo(nb, 0), ehi(nb, 0), valid(nb, 0);
++    for (int gy = 0; gy < by; ++gy)
++        for (int gx = 0; gx < bx; ++gx) {
++            const size_t k = static_cast<size_t>(gy) * bx + gx;
++            if (hit[k]) { elo[k] = bmin[k]; ehi[k] = bmax[k]; valid[k] = 1; continue; }
++            int mn = 255, mx = 0; bool any = false;
++            for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
++                for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2) {
++                    const size_t k2 = static_cast<size_t>(j2) * bx + i2;
++                    if (!hit[k2]) continue;
++                    mn = std::min(mn, static_cast<int>(bmin[k2]));
++                    mx = std::max(mx, static_cast<int>(bmax[k2]));
++                    any = true;
++                }
++            if (any) { elo[k] = static_cast<uint8_t>(mn); ehi[k] = static_cast<uint8_t>(mx); valid[k] = 1; }
++        }
++
++    // 4) [구조 마스크 — 닫힘] 균일한 종이를 임계로 가르면 노이즈가 반반
++    //    갈려서 없던 무늬가 생긴다. 실제로 그렇게 만들었더니 DataMatrix
++    //    정지대가 통째로 검게 칠해져 L-파인더 탐지가 죽었다. 그래서 구조
++    //    블록 주변만 이진화하고 나머지는 흰색으로 민다.
++    //    팽창만 하면 마스크가 코드 바깥으로 한 블록씩 번져 그 띠에 소금후추가
++    //    생기므로(실측: QR 정지대가 깨져 탐지 실패), 침식을 이어 붙여
++    //    안쪽 구멍만 메우고 경계는 제자리로 되돌린다.
++    std::vector<uint8_t> mask(nb, 0);
++    for (int gy = 0; gy < by; ++gy)
++        for (int gx = 0; gx < bx; ++gx) {
++            int v = 0;
++            for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
++                for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2)
++                    v |= hit[static_cast<size_t>(j2) * bx + i2];
++            mask[static_cast<size_t>(gy) * bx + gx] = static_cast<uint8_t>(v);
++        }
++    {
++        std::vector<uint8_t> eroded(nb, 0);
++        for (int gy = 0; gy < by; ++gy)
++            for (int gx = 0; gx < bx; ++gx) {
++                int v = 1;
++                for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
++                    for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2)
++                        v &= mask[static_cast<size_t>(j2) * bx + i2];
++                eroded[static_cast<size_t>(gy) * bx + gx] = static_cast<uint8_t>(v);
++            }
++        mask.swap(eroded);
++    }
++    {
++        int mx = 0;
++        for (uint8_t v : mask) mx = std::max(mx, static_cast<int>(v));
++        if (!mx) return false;
++    }
++
++    // [평균 임계용 적분영상] midpoint=false일 때만 만든다.
++    // 블록 평균을 쌍선형 보간해서 대신 쓰려고 해봤지만 안 된다 — 24px
++    // 블록 평균의 보간은 사실상 48px 삼각커널이라 반경 12px 박스 평균과
++    // 다르고, 실측에서 Code128 8/8 -> 6/8, CODE39 7/8 -> 5/8로 무너졌다.
++    std::vector<uint32_t> integral;
++    const int r = block / 2;
++    if (!midpoint) {
++        integral.assign(static_cast<size_t>(W + 1) * (H + 1), 0);
++        for (int y = 0; y < H; ++y) {
++            uint32_t rowSum = 0;
++            const uint8_t* __restrict in = bp + static_cast<size_t>(y) * W;
++            uint32_t* __restrict cur = integral.data() + static_cast<size_t>(y + 1) * (W + 1);
++            const uint32_t* __restrict prev = integral.data() + static_cast<size_t>(y) * (W + 1);
++            for (int x = 0; x < W; ++x) { rowSum += in[x]; cur[x + 1] = prev[x + 1] + rowSum; }
++        }
++    }
++
++    // 5) 픽셀마다 블록 중심 기준 쌍선형으로 임계를 보간해서 가른다.
++    //    블록 단위로 딱딱 끊으면 그 경계가 그대로 가짜 엣지가 된다.
++    out.width = W;
++    out.height = H;
++    out.pixels.resize(static_cast<size_t>(W) * H);
++    const float half = static_cast<float>(block) * 0.5f;
++    for (int y = 0; y < H; ++y) {
++        const int iy0 = std::max(0, y - r), iy1 = std::min(H - 1, y + r);
++        const uint32_t* __restrict itop = midpoint ? nullptr : integral.data() + static_cast<size_t>(iy0) * (W + 1);
++        const uint32_t* __restrict ibot = midpoint ? nullptr : integral.data() + static_cast<size_t>(iy1 + 1) * (W + 1);
++
++        const float fy = (static_cast<float>(y) - half) / static_cast<float>(block);
++        int gy0 = static_cast<int>(std::floor(fy));
++        float wy = fy - static_cast<float>(gy0);
++        if (gy0 < 0) { gy0 = 0; wy = 0.0f; }
++        if (gy0 >= by - 1) { gy0 = by - 1; wy = 0.0f; }
++        const int gy1 = std::min(by - 1, gy0 + 1);
++
++        const uint8_t* __restrict in = bp + static_cast<size_t>(y) * W;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
++        for (int x = 0; x < W; ++x) {
++            const float fx = (static_cast<float>(x) - half) / static_cast<float>(block);
++            int gx0 = static_cast<int>(std::floor(fx));
++            float wx = fx - static_cast<float>(gx0);
++            if (gx0 < 0) { gx0 = 0; wx = 0.0f; }
++            if (gx0 >= bx - 1) { gx0 = bx - 1; wx = 0.0f; }
++            const int gx1 = std::min(bx - 1, gx0 + 1);
++
++            const size_t k00 = static_cast<size_t>(gy0) * bx + gx0, k01 = static_cast<size_t>(gy0) * bx + gx1;
++            const size_t k10 = static_cast<size_t>(gy1) * bx + gx0, k11 = static_cast<size_t>(gy1) * bx + gx1;
++
++            const float m = (mask[k00] * (1 - wx) + mask[k01] * wx) * (1 - wy) +
++                            (mask[k10] * (1 - wx) + mask[k11] * wx) * wy;
++            if (m < 0.5f || !valid[k00] || !valid[k01] || !valid[k10] || !valid[k11]) { o[x] = 255; continue; }
++
++            float thresh;
++            if (midpoint) {
++                const float lo = (elo[k00] * (1 - wx) + elo[k01] * wx) * (1 - wy) +
++                                 (elo[k10] * (1 - wx) + elo[k11] * wx) * wy;
++                const float hi = (ehi[k00] * (1 - wx) + ehi[k01] * wx) * (1 - wy) +
++                                 (ehi[k10] * (1 - wx) + ehi[k11] * wx) * wy;
++                thresh = (lo + hi) * 0.5f;
++            } else {
++                const int ix0 = std::max(0, x - r), ix1 = std::min(W - 1, x + r);
++                const uint32_t sum = ibot[ix1 + 1] - ibot[ix0] - itop[ix1 + 1] + itop[ix0];
++                const int area = (iy1 - iy0 + 1) * (ix1 - ix0 + 1);
++                thresh = static_cast<float>(sum / static_cast<uint32_t>(area)) - 2.0f;
++            }
++            o[x] = (static_cast<float>(in[x]) < thresh) ? 0 : 255;
++        }
++    }
++    return true;
++}
++
+ void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount) {
+     const int W = src.width, H = src.height;
+     if (W <= 1 || H <= 1 || factor < 2) return;
+@@ -484,7 +657,7 @@ void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount)
+     }
+ }
+ 
+-bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
++bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx, int* offX, int* offY) {
+     const int W = src.width, H = src.height;
+     if (W < 64 || H < 64) return false;
+     const int stride = src.stride > 0 ? src.stride : W;
+@@ -526,6 +699,8 @@ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
+     // 줄어드는 게 얼마 없으면 복사 비용만 낸다.
+     if (static_cast<double>(tw) * th > 0.75 * static_cast<double>(W) * H) return false;
+ 
++    if (offX) *offX = x0;
++    if (offY) *offY = y0;
+     out.width = tw;
+     out.height = th;
+     out.pixels.resize(static_cast<size_t>(tw) * th);
+-- 
+2.43.0
+
