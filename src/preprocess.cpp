@@ -1,4 +1,5 @@
 #include "vscan_internal/preprocess.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -369,6 +370,178 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     return true;
 }
 
+bool localAdaptiveBinarize(const GrayView& src, GrayImage& out, bool midpoint, int block,
+                           int minRange) {
+    const int W = src.width, H = src.height;
+    if (W < block * 2 || H < block * 2 || block < 8 || minRange < 1) return false;
+
+    // 1) 노이즈를 먼저 죽인다. 임계 판정이 픽셀 하나하나에 걸리므로
+    //    노이즈가 그대로면 결과가 소금후추가 된다. 노이즈는 상관거리가
+    //    1px이라 3x3 평균에서 시그마가 1/3로 줄지만, 모듈 몇 px짜리
+    //    신호는 거의 그대로 남는다.
+    GrayImage blurred;
+    boxBlur3x3(src, blurred);
+    const uint8_t* __restrict bp = blurred.pixels.data();
+
+    // 2) 블록별 min/max와 "구조 있음" 판정. 통계용이라 2픽셀씩 건너뛰어도
+    //    값이 거의 같고 비용은 1/4이다.
+    const int bx = (W + block - 1) / block, by = (H + block - 1) / block;
+    const size_t nb = static_cast<size_t>(bx) * by;
+    std::vector<uint8_t> bmin(nb, 255), bmax(nb, 0), hit(nb, 0);
+    for (int gy = 0; gy < by; ++gy) {
+        const int y0 = gy * block, y1 = std::min(H, y0 + block);
+        for (int gx = 0; gx < bx; ++gx) {
+            const int x0 = gx * block, x1 = std::min(W, x0 + block);
+            int mn = 255, mx = 0;
+            for (int y = y0; y < y1; y += 2) {
+                const uint8_t* __restrict row = bp + static_cast<size_t>(y) * W;
+                for (int x = x0; x < x1; x += 2) {
+                    const int v = row[x];
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                }
+            }
+            const size_t k = static_cast<size_t>(gy) * bx + gx;
+            bmin[k] = static_cast<uint8_t>(mn);
+            bmax[k] = static_cast<uint8_t>(mx);
+            hit[k] = (mx - mn >= minRange) ? 1 : 0;
+        }
+    }
+
+    // 3) [임계는 국소 (min+max)/2] 국소 **평균**을 쓰면 굵은 요소가 속이
+    //    빈다. 창(반경 block/2)이 통째로 바 안에 들어가면 평균이 바 자신의
+    //    밝기가 되어 임계가 그 위아래로 흔들리기 때문이다 — 실측(ITF
+    //    module 8, 대비 0.10): 굵은 바가 전부 윤곽선만 남은 속 빈 막대가
+    //    됐다. 밝은/어두운 요소의 중간값을 쓰면 그 자리는 확실히 검정이 된다.
+    //
+    //    그 중간값을 "구조가 있는 블록"에서만 가져오는 것이 핵심이다.
+    //    블록이 굵은 요소 안에 통째로 들어가면 자기 min/max는 그 요소
+    //    하나뿐이라 쓸 수 없으므로, 이웃의 구조 블록에서 빌린다. 반대로
+    //    구조 블록은 **자기 값을 그대로 쓴다** — 이웃에서 빌리게 하면
+    //    라벨 종이 가장자리 블록의 max(=밝은 종이)가 코드 쪽으로 새어들어와
+    //    코드의 밝은 모듈까지 검게 만든다(그 실패는 헤더 주석 참고).
+    std::vector<uint8_t> elo(nb, 0), ehi(nb, 0), valid(nb, 0);
+    for (int gy = 0; gy < by; ++gy)
+        for (int gx = 0; gx < bx; ++gx) {
+            const size_t k = static_cast<size_t>(gy) * bx + gx;
+            if (hit[k]) { elo[k] = bmin[k]; ehi[k] = bmax[k]; valid[k] = 1; continue; }
+            int mn = 255, mx = 0; bool any = false;
+            for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
+                for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2) {
+                    const size_t k2 = static_cast<size_t>(j2) * bx + i2;
+                    if (!hit[k2]) continue;
+                    mn = std::min(mn, static_cast<int>(bmin[k2]));
+                    mx = std::max(mx, static_cast<int>(bmax[k2]));
+                    any = true;
+                }
+            if (any) { elo[k] = static_cast<uint8_t>(mn); ehi[k] = static_cast<uint8_t>(mx); valid[k] = 1; }
+        }
+
+    // 4) [구조 마스크 — 닫힘] 균일한 종이를 임계로 가르면 노이즈가 반반
+    //    갈려서 없던 무늬가 생긴다. 실제로 그렇게 만들었더니 DataMatrix
+    //    정지대가 통째로 검게 칠해져 L-파인더 탐지가 죽었다. 그래서 구조
+    //    블록 주변만 이진화하고 나머지는 흰색으로 민다.
+    //    팽창만 하면 마스크가 코드 바깥으로 한 블록씩 번져 그 띠에 소금후추가
+    //    생기므로(실측: QR 정지대가 깨져 탐지 실패), 침식을 이어 붙여
+    //    안쪽 구멍만 메우고 경계는 제자리로 되돌린다.
+    std::vector<uint8_t> mask(nb, 0);
+    for (int gy = 0; gy < by; ++gy)
+        for (int gx = 0; gx < bx; ++gx) {
+            int v = 0;
+            for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
+                for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2)
+                    v |= hit[static_cast<size_t>(j2) * bx + i2];
+            mask[static_cast<size_t>(gy) * bx + gx] = static_cast<uint8_t>(v);
+        }
+    {
+        std::vector<uint8_t> eroded(nb, 0);
+        for (int gy = 0; gy < by; ++gy)
+            for (int gx = 0; gx < bx; ++gx) {
+                int v = 1;
+                for (int j2 = std::max(0, gy - 1); j2 <= std::min(by - 1, gy + 1); ++j2)
+                    for (int i2 = std::max(0, gx - 1); i2 <= std::min(bx - 1, gx + 1); ++i2)
+                        v &= mask[static_cast<size_t>(j2) * bx + i2];
+                eroded[static_cast<size_t>(gy) * bx + gx] = static_cast<uint8_t>(v);
+            }
+        mask.swap(eroded);
+    }
+    {
+        int mx = 0;
+        for (uint8_t v : mask) mx = std::max(mx, static_cast<int>(v));
+        if (!mx) return false;
+    }
+
+    // [평균 임계용 적분영상] midpoint=false일 때만 만든다.
+    // 블록 평균을 쌍선형 보간해서 대신 쓰려고 해봤지만 안 된다 — 24px
+    // 블록 평균의 보간은 사실상 48px 삼각커널이라 반경 12px 박스 평균과
+    // 다르고, 실측에서 Code128 8/8 -> 6/8, CODE39 7/8 -> 5/8로 무너졌다.
+    std::vector<uint32_t> integral;
+    const int r = block / 2;
+    if (!midpoint) {
+        integral.assign(static_cast<size_t>(W + 1) * (H + 1), 0);
+        for (int y = 0; y < H; ++y) {
+            uint32_t rowSum = 0;
+            const uint8_t* __restrict in = bp + static_cast<size_t>(y) * W;
+            uint32_t* __restrict cur = integral.data() + static_cast<size_t>(y + 1) * (W + 1);
+            const uint32_t* __restrict prev = integral.data() + static_cast<size_t>(y) * (W + 1);
+            for (int x = 0; x < W; ++x) { rowSum += in[x]; cur[x + 1] = prev[x + 1] + rowSum; }
+        }
+    }
+
+    // 5) 픽셀마다 블록 중심 기준 쌍선형으로 임계를 보간해서 가른다.
+    //    블록 단위로 딱딱 끊으면 그 경계가 그대로 가짜 엣지가 된다.
+    out.width = W;
+    out.height = H;
+    out.pixels.resize(static_cast<size_t>(W) * H);
+    const float half = static_cast<float>(block) * 0.5f;
+    for (int y = 0; y < H; ++y) {
+        const int iy0 = std::max(0, y - r), iy1 = std::min(H - 1, y + r);
+        const uint32_t* __restrict itop = midpoint ? nullptr : integral.data() + static_cast<size_t>(iy0) * (W + 1);
+        const uint32_t* __restrict ibot = midpoint ? nullptr : integral.data() + static_cast<size_t>(iy1 + 1) * (W + 1);
+
+        const float fy = (static_cast<float>(y) - half) / static_cast<float>(block);
+        int gy0 = static_cast<int>(std::floor(fy));
+        float wy = fy - static_cast<float>(gy0);
+        if (gy0 < 0) { gy0 = 0; wy = 0.0f; }
+        if (gy0 >= by - 1) { gy0 = by - 1; wy = 0.0f; }
+        const int gy1 = std::min(by - 1, gy0 + 1);
+
+        const uint8_t* __restrict in = bp + static_cast<size_t>(y) * W;
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) {
+            const float fx = (static_cast<float>(x) - half) / static_cast<float>(block);
+            int gx0 = static_cast<int>(std::floor(fx));
+            float wx = fx - static_cast<float>(gx0);
+            if (gx0 < 0) { gx0 = 0; wx = 0.0f; }
+            if (gx0 >= bx - 1) { gx0 = bx - 1; wx = 0.0f; }
+            const int gx1 = std::min(bx - 1, gx0 + 1);
+
+            const size_t k00 = static_cast<size_t>(gy0) * bx + gx0, k01 = static_cast<size_t>(gy0) * bx + gx1;
+            const size_t k10 = static_cast<size_t>(gy1) * bx + gx0, k11 = static_cast<size_t>(gy1) * bx + gx1;
+
+            const float m = (mask[k00] * (1 - wx) + mask[k01] * wx) * (1 - wy) +
+                            (mask[k10] * (1 - wx) + mask[k11] * wx) * wy;
+            if (m < 0.5f || !valid[k00] || !valid[k01] || !valid[k10] || !valid[k11]) { o[x] = 255; continue; }
+
+            float thresh;
+            if (midpoint) {
+                const float lo = (elo[k00] * (1 - wx) + elo[k01] * wx) * (1 - wy) +
+                                 (elo[k10] * (1 - wx) + elo[k11] * wx) * wy;
+                const float hi = (ehi[k00] * (1 - wx) + ehi[k01] * wx) * (1 - wy) +
+                                 (ehi[k10] * (1 - wx) + ehi[k11] * wx) * wy;
+                thresh = (lo + hi) * 0.5f;
+            } else {
+                const int ix0 = std::max(0, x - r), ix1 = std::min(W - 1, x + r);
+                const uint32_t sum = ibot[ix1 + 1] - ibot[ix0] - itop[ix1 + 1] + itop[ix0];
+                const int area = (iy1 - iy0 + 1) * (ix1 - ix0 + 1);
+                thresh = static_cast<float>(sum / static_cast<uint32_t>(area)) - 2.0f;
+            }
+            o[x] = (static_cast<float>(in[x]) < thresh) ? 0 : 255;
+        }
+    }
+    return true;
+}
+
 void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount) {
     const int W = src.width, H = src.height;
     if (W <= 1 || H <= 1 || factor < 2) return;
@@ -484,7 +657,7 @@ void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount)
     }
 }
 
-bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
+bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx, int* offX, int* offY) {
     const int W = src.width, H = src.height;
     if (W < 64 || H < 64) return false;
     const int stride = src.stride > 0 ? src.stride : W;
@@ -526,6 +699,8 @@ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
     // 줄어드는 게 얼마 없으면 복사 비용만 낸다.
     if (static_cast<double>(tw) * th > 0.75 * static_cast<double>(W) * H) return false;
 
+    if (offX) *offX = x0;
+    if (offY) *offY = y0;
     out.width = tw;
     out.height = th;
     out.pixels.resize(static_cast<size_t>(tw) * th);

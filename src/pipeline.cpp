@@ -449,12 +449,12 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
                                 image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
 
-                GrayImage boosted;
-                if (!stretchContrast(GrayView(crop), boosted)) continue;
-
                 Pipeline roiPipe(roiCfg);
-                auto sHits = roiPipe.processViewCore(GrayView(boosted));
-                if (sHits.empty()) {
+                std::vector<PipelineResult> sHits;
+                GrayImage boosted;
+                if (stretchContrast(GrayView(crop), boosted))
+                    sHits = roiPipe.processViewCore(GrayView(boosted));
+                if (sHits.empty() && !boosted.pixels.empty()) {
                     // [편 다음엔 한 번 뭉갠다] 스트레칭은 신호와 **노이즈를
                     // 같이** 증폭한다. 대비가 낮을수록 이득이 커지므로
                     // 양자화/센서 노이즈도 그만큼 커져서, 편 직후에는
@@ -465,6 +465,52 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     GrayImage smoothed;
                     boxBlur3x3(GrayView(boosted), smoothed);
                     sHits = roiPipe.processViewCore(GrayView(smoothed));
+                }
+                // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
+                // ROI가 이미 계조를 200 이상 쓰고 있으면(stretchContrast가
+                // false를 돌려준 경우) 실패 원인이 대비가 아니므로 돌 이유가
+                // 없다 — 코퍼스 300장에서 이 검사 없이 돌리면 p95가 21%
+                // 늘었는데 그 대부분이 대비와 무관한 프레임이었다.
+                if (sHits.empty() && !boosted.pixels.empty()) {
+                    // [그래도 안 되면 국소 정규화] 위 두 시도는 ROI 하나에
+                    // LUT 하나를 쓰는 전역 변환이라, ROI 안에서 밝기 차가
+                    // 크면 코드가 쓰는 계조 구간이 그 차이에 눌린다.
+                    // 실측(Code128 module 8, 대비 0.10): 크롭의 퍼센타일이
+                    // 108~220인데 코드는 그 안에서 110~140만 쓴다 — 펴봐야
+                    // 코드는 4~68에 머물고, zxing의 8x8 블록 중 34%가
+                    // "범위 24 미만 = 구조 없음"으로 빠진다.
+                    // localAdaptiveBinarize()는 그 판정을 우회한다 —
+                    // 국소 평균으로 우리가 직접 이진화한다.
+                    // [[vscan-lite-roi-local-binarize]]
+                    // [임계 규칙 두 가지를 다 본다] 국소 평균과 국소
+                    // 중간값은 서로 다른 심볼로지를 살린다 — 실측(대비
+                    // 0.05~0.40 스윕, 8단): 평균은 Code128/EAN13/DM/UPCA를
+                    // 0.05까지 열지만 QR은 못 열고, 중간값은 QR/EAN8/
+                    // DataBarExp를 열지만 앞의 넷을 도로 닫는다. 여기는
+                    // 다른 게 다 실패한 뒤의 구제 자리이므로 둘 다 돌린다.
+                    GrayImage localized;
+                    for (bool mid : {false, true}) {
+                    if (!sHits.empty() || budgetExceeded()) break;
+                    if (localAdaptiveBinarize(GrayView(crop), localized, mid)) {
+                        // [편 다음엔 다시 좁힌다] 영역 상자는 타일 격자(원본
+                        // 128px) 단위라 코드보다 헐렁하다. 실측(대비 0.10):
+                        // 영역 크롭이 1184x832인데 코드는 1019x377이다.
+                        // 국소 정규화 뒤에는 코드가 진짜 흑백이 되고 배경은
+                        // 손대지 않은 채 남으므로, 여기서 tightenToContent()가
+                        // 정확히 코드만 집어낸다 — 그리고 그 차이가 결정적이다:
+                        // 같은 이미지가 1184x832에서는 안 읽히고 1019x377로
+                        // 좁히면 8.8ms에 읽힌다.
+                        int tx = 0, ty = 0;
+                        GrayImage tight;
+                        const bool tightened =
+                            tightenToContent(GrayView(localized), tight, 24, &tx, &ty);
+                        sHits = roiPipe.processViewCore(
+                            GrayView(tightened ? tight : localized));
+                        if (tightened)
+                            for (auto& r : sHits)
+                                for (auto& pt : r.symbol.position) { pt.first += tx; pt.second += ty; }
+                    }
+                    }
                 }
                 for (auto& r : sHits)
                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
