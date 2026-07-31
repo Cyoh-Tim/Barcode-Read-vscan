@@ -1,0 +1,346 @@
+From 88aff1a026e1149a2e4904ff532d179cdc45258e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 22:38:47 +0000
+Subject: [PATCH] =?UTF-8?q?N5:=20=EC=A0=81=EC=9D=91=ED=98=95=20=EB=B0=B0?=
+ =?UTF-8?q?=EC=B9=98=20=ED=94=84=EB=A1=9C=ED=8C=8C=EC=9D=BC=20=E2=80=94=20?=
+ =?UTF-8?q?=EA=B4=80=EC=B0=B0=EB=90=9C=20=EC=8B=AC=EB=B3=BC=EB=A1=9C?=
+ =?UTF-8?q?=EC=A7=80=EB=A1=9C=20=EB=A7=88=EC=8A=A4=ED=81=AC=EB=A5=BC=20?=
+ =?UTF-8?q?=EC=8A=A4=EC=8A=A4=EB=A1=9C=20=EC=A2=81=ED=9E=8C=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+symbology_mask를 좁히면 zxing 포맷 탐색 비용이 준다(§3.3: QR 단독 지정 시
+약 2.5배). 문제는 배치마다 손으로 정해야 해서 대부분 기본값(전체)으로
+쓴다는 것이었다.
+
+enable_adaptive_profile=1 이면 파이프라인이 스스로 관찰한다:
+- 연속 N프레임(기본 10) 동안 나온 심볼로지 집합이 안 바뀌면 그 집합으로 좁힘
+- 좁힌 상태에서 빈손인 프레임이 나오면 즉시 전체 마스크로 되돌려 그 프레임을
+  다시 본다 -> 새 심볼로지가 들어와도 놓치지 않는다
+- 상태는 파이프라인 인스턴스별이라 워커 구조와 그대로 맞는다
+- 기본은 꺼짐(opt-in). 마스크를 이미 손으로 지정했다면 켤 이유가 없다
+
+실측 (파이프라인 재사용 = 실제 워커 조건, reps=2):
+| 배치 | 이전 | 이후 |
+|------|------|------|
+| 양호·QR 단일 (575개) | 91.7% / 4.29ms | 91.7% / 4.02ms |
+| 악조건·QR 단일 (306개) | 47.7% / 52.70ms | **51.3%** / 52.51ms |
+| 악조건·CODE128 단일 (360개) | 30.8% / 76.99ms | **31.9%** / 72.15ms |
+| 양호·혼합 심볼로지 (592개) | 56.8% / 17.72ms | 57.1% / 18.77ms |
+
+§3.3의 2.5배는 재현되지 않는다. 지금 파이프라인의 비용은 포맷 탐색이
+아니라 폴백/구제 단계가 지배하기 때문이다(§3.11) — 속도 이득은 0~6%.
+대신 **검출률이 올라간다**(악조건 단일 심볼로지에서 +1.1~3.6%p): 후보
+포맷이 줄면 TryHarder가 맞는 포맷에 시도를 몰아주기 때문으로 보인다.
+혼합 심볼로지 배치에서는 좁혀지지 않아 변화가 없다(설계대로).
+
+verify_accuracy에 --adaptive 추가(프레임 간 파이프라인 재사용까지 함께 —
+상태가 쌓여야 의미가 있으므로 실제 워커와 같은 조건에서 재야 한다).
+40종 회귀: 세 경로 모두 37/40 유지(기본이 꺼짐이라 경로 자체가 동일).
+---
+ include/vscan.h                          | 10 +++
+ include/vscan_internal/decoder.hpp       |  3 +
+ include/vscan_internal/decoder_zxing.hpp |  1 +
+ include/vscan_internal/pipeline.hpp      | 28 +++++++++
+ src/pipeline.cpp                         | 80 +++++++++++++++++++++++-
+ src/vscan_c_api.cpp                      |  1 +
+ tools/verify_accuracy.cpp                | 30 ++++++++-
+ 7 files changed, 148 insertions(+), 5 deletions(-)
+
+diff --git a/include/vscan.h b/include/vscan.h
+index efa7df6..ef6374b 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -257,6 +257,16 @@ typedef struct {
+      * 실패한 프레임에서만 도는 비용이다.
+      */
+     int disable_denoise_rescue;
++
++    /*
++     * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
++     * 켜면 파이프라인이 연속 프레임에서 관찰된 심볼로지로 symbology_mask를
++     * 스스로 좁힌다(§3.3: 마스크를 좁히면 약 2.5배). 좁힌 상태에서 못 찾은
++     * 프레임이 나오면 즉시 전체 마스크로 되돌려 다시 보므로, 새 심볼로지가
++     * 들어와도 놓치지 않는다. 상태는 파이프라인 인스턴스별(=워커별)이다.
++     * symbology_mask를 이미 손으로 지정했다면 켤 이유가 없다.
++     */
++    int enable_adaptive_profile;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/decoder.hpp b/include/vscan_internal/decoder.hpp
+index 39e6e65..22f224f 100644
+--- a/include/vscan_internal/decoder.hpp
++++ b/include/vscan_internal/decoder.hpp
+@@ -47,6 +47,9 @@ public:
+     virtual ~IDecoder() = default;
+     virtual std::vector<DecodedSymbol> decode(const GrayView& image) = 0;
+     virtual std::string name() const = 0;
++    // 심볼로지 마스크를 런타임에 바꾼다(적응형 배치 프로파일용).
++    // 마스크 개념이 없는 디코더는 무시하면 된다.
++    virtual void setFormatMask(uint32_t) {}
+ };
+ 
+ } // namespace vscan
+diff --git a/include/vscan_internal/decoder_zxing.hpp b/include/vscan_internal/decoder_zxing.hpp
+index e1e88b5..c5165c8 100644
+--- a/include/vscan_internal/decoder_zxing.hpp
++++ b/include/vscan_internal/decoder_zxing.hpp
+@@ -32,6 +32,7 @@ public:
+           tryCode39ExtendedMode_(tryCode39ExtendedMode), downscaleThreshold_(downscaleThreshold) {}
+ 
+     std::vector<DecodedSymbol> decode(const GrayView& image) override;
++    void setFormatMask(uint32_t mask) override { formatMask_ = mask; }
+     std::string name() const override { return "zxing-cpp"; }
+ 
+ private:
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 1312653..9f0d35e 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -181,6 +181,25 @@ struct PipelineConfig {
+      */
+     int disableDenoiseRescue = 0;
+ 
++    /*
++     * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
++     *
++     * 심볼로지 마스크를 좁히면 zxing의 포맷별 탐색 비용이 그만큼 준다
++     * (§3.3 실측: 전체 포맷 대비 QR 단독 지정 시 약 2.5배). 문제는 배치마다
++     * 손으로 정해줘야 한다는 것 — 대부분의 현장은 그냥 기본값(전체)으로 쓴다.
++     *
++     * 켜면 파이프라인이 스스로 관찰한다: 연속 N프레임 동안 나온 심볼로지가
++     * 같은 집합 안에 머무르면 그 집합으로 마스크를 좁힌다. 좁힌 상태에서
++     * 아무것도 못 찾은 프레임이 나오면 **그 프레임에서 즉시 전체 마스크로
++     * 되돌려 다시 본다** — 새 심볼로지가 들어와도 놓치지 않는다.
++     *
++     * 워커당 파이프라인 인스턴스가 따로이므로 상태도 워커별로 독립이다.
++     */
++    int enableAdaptiveProfile = 0;
++    // 좁히기 전에 관찰할 연속 프레임 수. 너무 작으면 우연히 한 종류만 나온
++     // 구간에서 성급하게 좁힌다.
++    int adaptiveWarmupFrames = 10;
++
+     int disableBlankFrameSkip = 0;
+     // 블록 하나가 "구조가 있다"고 인정받는 최소 명암차(LSB). 노이즈 시그마의
+     // 몇 배로 잡아야 안전하다 — 기본 24는 §3.9에서 측정한 대비 붕괴점
+@@ -277,6 +296,15 @@ private:
+     // 코드가 존재할 만한 국소 명암차가 프레임에 있는가(빈 프레임 조기 종료).
+     bool frameHasStructure(const GrayView& image) const;
+ 
++    // 적응형 배치 프로파일 상태 (enableAdaptiveProfile)
++    uint32_t adaptiveObservedMask_ = 0;   // 관찰된 심볼로지 비트 합
++    uint32_t adaptiveBaseMask_ = 0;       // 원래 설정값(되돌릴 때 씀)
++    int adaptiveStreak_ = 0;              // 관찰 집합이 안 바뀐 연속 프레임 수
++    bool adaptiveNarrowed_ = false;
++    void adaptiveObserve(const std::vector<PipelineResult>& hits);
++    void adaptiveWiden();
++    void applyFormatMask(uint32_t mask);
++
+     // coarse locate 적응형 스킵 상태
+     int coarseMisses_ = 0;      // 연속 실패 횟수
+     int coarseSkipLeft_ = 0;    // 남은 스킵 프레임 수
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 859803e..33cf877 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -34,6 +34,74 @@ bool Pipeline::budgetExceeded() const {
+     return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
+ }
+ 
++namespace {
++// Symbology -> VSCAN_FMT_* 비트. maskToFormats()(decoder_zxing.cpp)의 역방향.
++uint32_t symbologyBit(Symbology s) {
++    switch (s) {
++        case Symbology::QR:                 return 1u << 0;
++        case Symbology::MICRO_QR:           return 1u << 1;
++        case Symbology::DATA_MATRIX:
++        case Symbology::GS1_DATA_MATRIX:    return 1u << 2;
++        case Symbology::PDF417:
++        case Symbology::MICRO_PDF417:       return 1u << 3;
++        case Symbology::CODE39:
++        case Symbology::CODE39_FULL_ASCII:
++        case Symbology::TRIOPTIC_CODE39:    return 1u << 4;
++        case Symbology::CODE93:             return 1u << 5;
++        case Symbology::CODE128:
++        case Symbology::GS1_128:            return 1u << 6;
++        case Symbology::ITF:
++        case Symbology::INDUSTRIAL_2OF5:
++        case Symbology::COOP_2OF5:          return 1u << 7;
++        case Symbology::CODABAR:            return 1u << 8;
++        case Symbology::GS1_DATABAR:        return (1u << 9) | (1u << 10);
++        // EAN/UPC는 zxing이 네 포맷을 한 묶음으로 다룬다 — 하나만 봤다고
++        // 나머지를 끄면 같은 계열에서 놓칠 수 있으므로 통째로 켠다.
++        case Symbology::EAN_UPC:            return (1u << 11) | (1u << 12) | (1u << 13) | (1u << 14);
++        default:                            return 0;
++    }
++}
++}
++
++void Pipeline::applyFormatMask(uint32_t mask) {
++    cfg_.formatMask = mask;                       // 하위 파이프라인이 상속받는다
++    for (auto& d : decoders_) d->setFormatMask(mask);
++}
++
++void Pipeline::adaptiveObserve(const std::vector<PipelineResult>& hits) {
++    if (!cfg_.enableAdaptiveProfile || hits.empty()) return;
++    uint32_t seen = 0;
++    for (const auto& r : hits) seen |= symbologyBit(r.symbol.symbology);
++    if (seen == 0) return;                        // 매핑 없는 심볼로지는 판단 보류
++
++    if (adaptiveNarrowed_) {
++        // 좁힌 상태에서 예상 밖 심볼로지가 나오면(있을 수 없지만 방어적으로)
++        // 즉시 넓힌다.
++        if (seen & ~adaptiveObservedMask_) adaptiveWiden();
++        return;
++    }
++    if (adaptiveObservedMask_ == 0 || seen == adaptiveObservedMask_) {
++        adaptiveObservedMask_ |= seen;
++        ++adaptiveStreak_;
++    } else {
++        // 집합이 바뀌었다 — 합집합으로 갱신하고 관찰을 다시 시작한다.
++        adaptiveObservedMask_ |= seen;
++        adaptiveStreak_ = 1;
++    }
++    if (adaptiveStreak_ >= std::max(1, cfg_.adaptiveWarmupFrames)) {
++        adaptiveBaseMask_ = cfg_.formatMask;
++        applyFormatMask(adaptiveObservedMask_);
++        adaptiveNarrowed_ = true;
++    }
++}
++
++void Pipeline::adaptiveWiden() {
++    if (!adaptiveNarrowed_) return;
++    applyFormatMask(adaptiveBaseMask_);
++    adaptiveNarrowed_ = false;
++    adaptiveStreak_ = 0;
++}
++
+ bool Pipeline::frameHasStructure(const GrayView& image) const {
+     // 축소본에서 블록별 (최대-최소)를 보고, 임계를 넘는 블록이 하나라도
+     // 있으면 true. 코드가 있는 프레임은 보통 첫 몇 블록에서 바로 걸리므로
+@@ -168,7 +236,15 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
+     if (!frameHasStructure(image)) return {};
+     auto hits = processViewCore(image);
+-    if (!hits.empty()) return hits;
++    if (!hits.empty()) { adaptiveObserve(hits); return hits; }
++
++    // 좁힌 마스크로 빈손이면 새 심볼로지일 수 있다 — 전체 마스크로 되돌려
++    // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
++    if (adaptiveNarrowed_) {
++        adaptiveWiden();
++        hits = processViewCore(image);
++        if (!hits.empty()) { adaptiveObserve(hits); return hits; }
++    }
+ 
+     // 여기부터는 구제 단계(DPM/1D 회전)다 — 실패 프레임에서만 도는,
+     // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
+@@ -377,7 +453,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+ 
+     Pipeline fast(fastCfg);
+     auto hits = fast.processViewCore(image);
+-    if ((int)hits.size() >= need) return hits;
++    if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
+     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
+     // "부분 검출이라도 제때"가 "완벽하지만 늦음"보다 나은 배치를 위한 것 —
+     // 기본값(maxFrameMs=0)에서는 이 검사가 전부 무효라 동작이 동일하다.
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index e55c997..babba63 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -106,6 +106,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
+         if (cfg->disable_blank_frame_skip) pcfg.disableBlankFrameSkip = 1;
+         if (cfg->disable_denoise_rescue) pcfg.disableDenoiseRescue = 1;
++        if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+diff --git a/tools/verify_accuracy.cpp b/tools/verify_accuracy.cpp
+index e2d1fa4..e64f781 100644
+--- a/tools/verify_accuracy.cpp
++++ b/tools/verify_accuracy.cpp
+@@ -202,6 +202,8 @@ static void usage(const char* argv0) {
+         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
+         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
+         "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
++        "  --adaptive       적응형 배치 프로파일 켜고 파이프라인을 프레임 간 재사용\n"
++        "                   (실제 워커 구조와 같은 조건. min_expected_codes=0 강제)\n"
+         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
+         "  --stdin          디렉토리 대신 stdin 스트림을 읽는다 (디스크 0). 아래 참고\n"
+         "  --tag-sort n|i   태그표 정렬: name(스윕용) / imgs(기본, 이미지 수)\n"
+@@ -218,7 +220,7 @@ int main(int argc, char** argv) {
+     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
+     int reps = 0, limit = 0, stride = 1, overlap = 500;
+     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
+-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0;
++    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0;
+ 
+     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
+         std::string a = argv[i];
+@@ -242,6 +244,7 @@ int main(int argc, char** argv) {
+         else if (a == "--no-deskew") noDeskew = 1;
+         else if (a == "--no-blank-skip") noBlankSkip = 1;
+         else if (a == "--no-denoise") noDenoise = 1;
++        else if (a == "--adaptive") { adaptive = 1; useMinExp = 0; }
+         else if (a == "--dump-mismatch") dumpMismatch = 1;
+         else if (a == "--stdin") stdinMode = 1;
+         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
+@@ -326,6 +329,26 @@ int main(int argc, char** argv) {
+         printf("\n%s\n", std::string(lineW + 4 + NP * 21, '-').c_str());
+     }
+ 
++    // --adaptive는 프레임 간 상태(관찰된 심볼로지)가 쌓여야 의미가 있으므로
++    // 실제 워커처럼 파이프라인을 재사용한다. 그 외 모드는 기존대로 이미지마다
++    // 새로 만든다(min_expected_codes가 이미지마다 다르기 때문).
++    std::vector<vscan_pipeline_t*> shared(NP, nullptr);
++    if (adaptive) {
++        for (int i = 0; i < NP; ++i) {
++            vscan_config_t c{};
++            c.tile_overlap_px = overlap;
++            c.fast_locate = paths[i].fast;
++            c.enable_dpm_rescue = dpmRescue;
++            c.max_frame_ms = maxFrameMs;
++            c.disable_1d_deskew_rescue = noDeskew;
++            c.disable_blank_frame_skip = noBlankSkip;
++            c.disable_denoise_rescue = noDenoise;
++            c.enable_adaptive_profile = 1;
++            c.min_expected_codes = 0;
++            shared[i] = vscan_create(&c);
++        }
++    }
++
+     Gray g;
+     size_t done = 0, total = files.size();
+ 
+@@ -347,7 +370,7 @@ int main(int argc, char** argv) {
+             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
+             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
+             cfg.min_expected_codes = useMinExp ? expected : 0;
+-            vscan_pipeline_t* p = vscan_create(&cfg);
++            vscan_pipeline_t* p = adaptive ? shared[i] : vscan_create(&cfg);
+ 
+             double best = 1e9;
+             size_t n = 0;
+@@ -407,7 +430,7 @@ int main(int argc, char** argv) {
+                 }
+                 vscan_free_result(r);
+             }
+-            vscan_destroy(p);
++            if (!adaptive) vscan_destroy(p);
+ 
+             bool ok = static_cast<int>(n) >= expected;
+             st[i].add(ok, expected, static_cast<int>(n), textOk, bad, best, dups);
+@@ -516,6 +539,7 @@ int main(int argc, char** argv) {
+         total = done;
+     }
+     if (!verbose) fprintf(stderr, "\r%*s\r", 24, "");
++    for (auto* p : shared) if (p) vscan_destroy(p);
+     if (csv) fclose(csv);
+ 
+     // ---- 요약 (기존 포맷 유지: run-tests.sh가 이 줄을 grep한다)
+-- 
+2.43.0
+

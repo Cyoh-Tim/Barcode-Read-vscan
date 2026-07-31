@@ -1,0 +1,979 @@
+From af30ef6e6e54a5b2e9c658443ad110740b64258d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 20:38:24 +0000
+Subject: [PATCH] =?UTF-8?q?=EB=82=9C=EB=8F=85=20=EC=9D=B4=EB=AF=B8?=
+ =?UTF-8?q?=EC=A7=80=20=EB=B6=84=EB=A6=AC(=ED=8C=90=EB=8F=85=20=EA=B0=80?=
+ =?UTF-8?q?=EB=8A=A5=EC=84=B1=20=EB=B2=84=ED=82=B7)=20+=201=EC=B0=A8=20?=
+ =?UTF-8?q?=EC=B8=A1=EC=A0=95=20=EA=B2=B0=EA=B3=BC=EC=99=80=20=EA=B0=9C?=
+ =?UTF-8?q?=EC=84=A0=20=EB=A1=9C=EB=93=9C=EB=A7=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## 판독 가능성 버킷 — 폴더 분리
+난수로 조건을 뽑으면 물리적으로 아무도 못 읽는 이미지가 반드시 섞인다.
+그걸 포함한 검출률은 "우리 성능 + 물리 한계"의 혼합이라 개선 판단에 못 쓴다.
+생성 레시피의 실제 수치(모듈 픽셀 크기, 대비, 노이즈 시그마, 블러, 노출,
+결손 비율)로 코드마다 판정해 ok / borderline / impossible 로 나누고,
+파일 모드는 하위 폴더로 떨어뜨린다. 스트리밍은 --bucket 으로 거른다.
+verify_accuracy는 상위 폴더를 주면 한 단계 아래까지 훑고 버킷별로 집계한다.
+
+분류 기준은 물리(신호가 남아있는가)뿐이다. "우리가 못 읽는 조건"은 절대
+난독으로 넣지 않는다 — 라이브러리 한계를 난독으로 분류하면, 못 읽는 걸
+못 읽는다고 선언하는 것만으로 성공률이 올라가는 자기기만이 된다.
+임계값은 impossible 버킷의 검출률이 0에 수렴하도록 실측 보정(hard 1.4%).
+
+## 생성기 버그 수정 — 가짜 실패를 만들고 있었다
+1D 심볼을 python-barcode 이미지에서 리샘플해 만들다 보니, 정수배가 아닌
+비율에서 막대 폭 비율이 깨져 module 2.2/3.6/4.0/4.8 같은 특정 값에서만
+검출률이 0%로 튀는 톱니 곡선이 나왔다(코드만 잘라 단독 디코드해도 실패).
+모듈 비트열에서 면적 샘플링으로 직접 렌더하도록 바꿔 곡선이 단조가 됐다.
+그 외: 반전 시 콰이어트존 파괴, 1D 모서리 결손(ECC 없어 무조건 실패),
+1D 종횡비를 셀 폭 기준으로 잡던 것, EAN-13 선행 0의 UPC-A 축약도 수정.
+
+## verify_accuracy
+- 중복 반환(dup)과 오디코딩(misdec)을 분리 집계 — 심각도가 다르다
+- 태그 결합자 '&' (태그 이름 자체에 '+'가 들어가 충돌했다)
+- 버킷별 요약 블록, --tag-sort, --dump-mismatch
+
+## 측정 결과 (PROJECT_NOTES §3.9~3.10, 코드 2,600여 개)
+- 축별 붕괴 지점: 모듈 1.4/1.6px, 블러 σ 2.0/2.6, 노이즈 σ 46/30,
+  대비 0.27/0.30 (QR/Code128). 모듈은 물리 한계에 붙어 있고 대비·노이즈는
+  알고리즘이 훨씬 먼저 포기한다 — 개선 여지가 거기 있다.
+- 전체 디코드 시간의 51%가 "결국 아무것도 못 찾는" 프레임에 쓰인다.
+- two_stage의 이점은 조건부: 깨끗한 프레임 10~18배 빠르지만 악조건 혼합에서는
+  full보다 느리다(130ms vs 89ms). 승격을 끄면 검출률이 30.4%로 붕괴.
+- 1D 회전 사각지대를 정정: 20~25°, 44°, 65~70° (45° 대칭이 원인 힌트)
+- 중복 반환은 단일 코드 프레임에서도 15.5% — 다중 코드 문제가 아니다.
+
+로드맵 7항목을 근거/기대/검증 명령과 함께 §3.10에 정리했다.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md          | 183 +++++++++++++++++++++----
+ README.md                 |  25 +++-
+ tools/generate_corpus.py  | 272 +++++++++++++++++++++++++++++++++-----
+ tools/verify_accuracy.cpp |  60 +++++++--
+ 4 files changed, 473 insertions(+), 67 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 2543b78..19ce509 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -18,7 +18,8 @@
+ | §1 | 프로젝트가 뭔지, 왜 만드는지 | 처음 한 번 |
+ | §2 | 아키텍처 / 파일 구조 / API 3종 | 코드 수정 전 |
+ | §3 | **실측 벤치마크 데이터 전부** | 성능 관련 판단할 때 |
+-| §3.5 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
++| §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
++| §3.9~3.10 | **1차 측정 결과 + 개선 로드맵** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+@@ -820,7 +821,7 @@ A53 환산: §6.5의 7~10배 비율 적용 시 최악의 경우 대략 40~200ms
+ 
+ ---
+ 
+-### 3.5 대량 코퍼스 & 파라미터 스윕 — 40장으로는 안 보이는 것
++### 3.8 대량 코퍼스 & 파라미터 스윕 — 40장으로는 안 보이는 것
+ `tools/generate_corpus.py` (2026-07-30 추가)
+ 
+ #### 왜 필요했나
+@@ -867,6 +868,43 @@ raw 그레이 바이트). **디스크 사용량 0, 장수 상한 없음.** 정
+   속성이지 이미지의 속성이 아니라서, 이미지 단위로 세면 "2px 코드 하나가
+   섞인 이미지"의 큰 코드들까지 `mod-2px` 행에 들어가 축이 뭉개진다
+ 
++#### 판독 가능성 분류 — 이게 없으면 성공률 숫자가 무의미하다
++난수로 조건을 뽑으면 **물리적으로 아무도 못 읽는 이미지**가 반드시 섞인다
++(모듈 1px, 대비가 노이즈보다 작음, 블러 시그마가 모듈보다 큼). 이걸 섞어
++놓고 "검출률 46%"라고 하면 그게 우리 성능인지 물리 한계인지 알 수 없고,
++개선을 해도 숫자가 안 움직여서 판단이 불가능하다.
++
++생성기는 **레시피 수치를 우리가 알고 있으므로** 코드마다 판정한다:
++
++| 버킷 | 뜻 | 실측 검출률 | 어떻게 보나 |
++|---|---|---|---|
++| `ok` | 물리적으로 읽을 수 있다 | mixed 57% | **★ 이 행이 개선 지표** |
++| `borderline` | 리더에 따라 갈리는 경계 | mixed 25% | 참고 |
++| `impossible` | 원래 안 되는 게 맞음(난독) | mixed 7%, hard 1% | 실패가 정상 |
++
++파일 모드는 **버킷별 하위 폴더**(`ok/ borderline/ mixed/ impossible/`)로
++나눠 떨어뜨린다. `verify_accuracy corpus/ok`면 "읽혀야 정상인 것"만 채점된다
++(상위 폴더를 주면 한 단계 아래까지 훑어서 전부 채점 + 버킷별 요약).
++스트리밍은 `--bucket ok`로 거른다.
++
++**선긋기(중요)**: 분류 기준은 **물리(신호가 남아있는가)뿐**이다.
++"우리가 못 읽는 조건"은 절대 impossible에 넣지 않는다. 20~30도 회전한 1D는
++지금 우리가 못 읽지만(§8) 상용 리더는 읽는다 — 이건 `ok`로 분류돼서 실패로
++집계돼야 한다. 그게 개선 대상이기 때문이다. 라이브러리 한계를 난독으로
++분류하기 시작하면, 못 읽는 걸 못 읽는다고 선언하는 것만으로 성공률이
++올라가는 자기기만이 된다.
++
++판정 임계값(전부 실측으로 보정 — `impossible` 행의 검출률이 0%에 가깝도록):
++
++| 축 | impossible | borderline | 근거 |
++|---|---|---|---|
++| 모듈 픽셀 `m` | < 1.3px | < 2.0px | 샘플링 한계 |
++| 대비 대 노이즈 | 진폭 < 1.0×σ_eff | < 2.5×σ_eff | σ_eff = σ/(0.8m) — 디코더가 모듈 면적으로 평균하므로 |
++| 노출 클리핑 | 명암차 < 6 LSB | 어두운쪽>235 | 값이 뭉개지면 복원 불가 |
++| 디포커스 σ_b | > 0.75×m | > 0.45×m | 실측: 0.75m에서 검출률 0% |
++| 모션 길이 | > 5.0×m | > 2.2×m | 방향을 모르므로 넉넉히(막대와 나란하면 손해 없음) |
++| 2D 결손 | > 26% | — | QR ECC-H 한계 30% |
++
+ #### 난이도 실측 (2048×1536, two_stage, 코드 단위 검출률)
+ | 프리셋 | 검출률 | 용도 |
+ |---|---|---|
+@@ -887,6 +925,95 @@ raw 그레이 바이트). **디스크 사용량 0, 장수 상한 없음.** 정
+ 했었고(45도는 통과하는 각도라 "해결됨"으로 보였다), 중복은 검출 판정이
+ `n >= expected`라 개수가 많아지는 쪽으로는 실패로 안 잡혔다.
+ 
++### 3.9 대량 코퍼스 1차 측정 결과 (2026-07-30) `[x86]`
++
++`--bucket ok`(물리적으로 읽을 수 있는 코드)만 집계. 측정 코드 2,600여 개.
++
++#### 축별 붕괴 지점 — 검출률이 50% 아래로 떨어지는 값
++| 축 | QR | Code128 | 물리 한계까지 여유 |
++|---|---|---|---|
++| 모듈 크기 | 1.4px 미만 | 1.6px 미만 | 거의 없음 (샘플링 한계에 붙어 있다) |
++| 디포커스 σ | 2.0 초과 | 2.6 초과 | 중간 — 모듈의 0.5~0.65배에서 붕괴 |
++| 노이즈 σ | 46 초과 | 30 초과 | 1D 쪽에 여유 있음 |
++| 인쇄 대비 | 0.27 미만 | 0.30 미만 | **여유 큼** — 물리 하한은 훨씬 아래 |
++
++모듈 크기는 이미 한계에 붙어 있어 개선 여지가 없다. 반대로 **대비/노이즈는
++알고리즘이 물리 한계보다 훨씬 먼저 포기**하고 있다 — 개선 여지가 여기 있다.
++
++#### 시간이 어디로 가나 (악조건 혼합 300장)
++| 프레임 종류 | 장수 | 총 시간 비중 | 평균 |
++|---|---|---|---|
++| 전부 검출 | 67 | 21%(full) / 14%(2stage) | 56ms |
++| 일부만 검출 | 74 | 28% / 37% | 68ms(full) / 131ms(2stage) |
++| **하나도 못 찾음** | 61 | **51% / 49%** | **150ms(full) / 209ms(2stage)** |
++
++**전체 시간의 절반이 결국 아무것도 못 찾는 프레임에 쓰인다.** 검출률을
++1%도 손해보지 않고 회수할 수 있는 가장 큰 덩어리다.
++
++#### two_stage의 이점은 조건부다 — 그리고 뒤집히면 손해다
++| 시나리오 | full | 2stage | 검출률(full/2stage) |
++|---|---|---|---|
++| 깨끗한 QR 1~8개 (열화 없음) | 19~38ms | **1~2ms** | 100% / 100% |
++| 양호·단일 코드 | 48.6ms (중앙 33) | **30.6ms (중앙 1.8)** | 85.6% / 85.6% |
++| 양호·다중 코드 | 47.4ms | 48.3ms | 78.5% / 78.5% |
++| **악조건 혼합** | **88.8ms** | **129.7ms** ← 역전 | 53.9% / 53.9% |
++| 악조건 혼합, 승격 없음 | 89.6ms | 73.9ms | 53.9% / **30.4%** ← 붕괴 |
++
++§3.2.3의 "two_stage가 7.4배 빠르고 검출률 동일"은 **깨끗한 단일 코드
++프레임에 한해 맞다**(오히려 10~18배까지 난다). 문제는 1단계가 실패할 때다 —
++*1단계 비용 + 프레임 전체 풀스캔*을 둘 다 내므로 악조건에서는 full보다
++느려진다. 승격을 끄면 빨라지지만 검출률이 30.4%로 무너진다(부분 검출 문제,
++§3.2.10). 즉 현재 구조는 **"빠르거나 정확하거나"의 이분법**에 갇혀 있고
++그 경계가 프레임 난이도에 따라 갈린다. 해소 방향은 §3.10 로드맵 3번.
++
++---
++
++### 3.10 개선 로드맵 (2026-07-30, 측정 근거 있음)
++
++판독률과 속도를 **동시에** 올리는 순서. 앞의 둘은 상충하지 않는다 —
++실패 프레임의 시간을 줄이는 것과 실패 자체를 줄이는 것은 같은 방향이다.
++
++| # | 항목 | 종류 | 근거 | 기대 | 난이도/리스크 |
++|---|---|---|---|---|---|
++| 1 | **실패 프레임 조기 종료** | 속도 | 총 시간의 51%가 실패 프레임 | 평균 −30~45%, p95 −50%+ | 중 / 낮음 |
++| 2 | **중복 반환 수정(dedup)** | 정확성 | 단일 코드에서도 15.5% 중복 | 개수 검수 오류 제거 | 낮음 / 낮음 |
++| 3 | **승격을 잔여 영역 ROI로** | 속도 | 부분 검출 74장이 시간의 37% | 131ms → 60~80ms | 중 / 중 |
++| 4 | **1D 회전 사각지대** | 검출률 | 20~25/44/65~70° 실패 | 커버리지 86% → 100% | 중 / 낮음 |
++| 5 | 배치 프로파일 자동 좁힘 | 속도 | §3.3 심볼로지 마스크 2~2.5배 | 정상 프레임 2배 내외 | 중 / 중 |
++| 6 | 저대비·노이즈 임계 밀기 | 검출률 | 물리 한계까지 여유 큼(§3.9) | 임계 20~30% 하향 | 높음 / 중 |
++| 7 | 코퍼스를 CI 게이트에 | 프로세스 | — | 회귀 자동 감지 | 낮음 / 낮음 |
++
++**1. 실패 프레임 조기 종료** — (a) `vscan_config_t.max_frame_ms` 예산을 두고
++폴백 단계 경계마다 확인. 컨베이어는 평균보다 **최악값**이 마감을 결정한다.
++(b) locate 후보 0개 + 프레임 그래디언트 에너지가 임계 미만이면 체인 자체를
++생략. 검증: ok 버킷 검출률 불변 & mean/p95 감소, 40종 37/40 유지.
++
++**2. 중복 반환 수정** — 중심점 64px 고정 대신 바운딩박스 IoU(≥0.5) 또는
++코드 대각선 비례 임계. 심볼로지+텍스트가 이미 같다는 전제라 IoU가 안전하다.
++검증: 코퍼스 `dup` 열 0 수렴.
++
++**3. 승격을 잔여 영역 ROI로** — 지금은 1단계가 기대 개수를 못 채우면
++*프레임 전체*를 다시 푼다(이미 찾은 코드까지 재스캔하는 순수 중복).
++1단계 bbox를 제외한 잔여 영역만 ROI로 넘긴다 — `processViewROIs()` 인프라가
++이미 있다. 주의: 잔여 영역 경계에 걸친 코드를 놓치지 않도록 overlap 필요.
++성공 기준: 악조건 혼합에서 2stage 평균이 full 이하로.
++
++**4. 1D 회전 사각지대** — §8의 대칭 힌트부터 확인. 각도가 아니라 추정 실패일
++가능성이 높다.
++
++**6. 저대비·노이즈** — 로컬 적응 이진화 재검토 + 노이즈 사전 필터(3×3 중앙값)를
++**폴백 단계에만** 적용해 정상 프레임 속도는 건드리지 않는다. 속도 회귀가
++나기 쉬운 영역이라 반드시 1번(조기 종료) 이후에 손댈 것.
++
++**7. CI 게이트** — 40종은 통과/실패 게이트로 두고, 고정 시드 코퍼스 500장의
++검출률·평균·p95를 함께 기록:
++```bash
++python3 tools/generate_corpus.py -n 500 --difficulty mixed --bucket ok --seed 101 --stream \
++  | ./verify_accuracy --stdin --paths 2stage --csv ci.csv    # 디스크 0
++```
++
++---
++
+ ## §4. 심볼로지 커버리지
+ 
+ ### 비교 대상 리더기 공식 스펙 (제조사 문서 확인)
+@@ -1388,7 +1515,7 @@ python3 tools/generate_stress_images.py --outdir ./stress
+ g++ -O3 -std=c++17 -Iinclude tools/verify_accuracy.cpp -lvscan -o verify && ./verify ./stress
+ ```
+ **튜닝(개선 작업)이라면 40종만으로는 부족하다** — 40종은 통과/실패
+-게이트이고, "얼마나 나아졌나"를 재려면 대량 코퍼스/스윕을 쓸 것(§3.5).
++게이트이고, "얼마나 나아졌나"를 재려면 대량 코퍼스/스윕을 쓸 것(§3.8).
+ 디스크 때문에 파일로 떨구지 말고 스트리밍으로:
+ ```bash
+ python3 tools/generate_corpus.py -n 5000 --difficulty mixed --stream \
+@@ -1429,14 +1556,17 @@ verify_accuracy가 이 설정을 자동으로 해준다.
+ ### 🐛 알려진 버그
+ 
+ #### (신규 2026-07-30) 타일 풀스캔이 같은 코드를 중복 반환한다
+-`vscan_process_gray()`(풀스캔)가 **다중 코드 프레임에서 같은 코드를 두 번
+-이상 돌려준다.** 실측(대량 코퍼스 easy, 코드 137개 기준):
++`vscan_process_gray()`(풀스캔)가 **같은 코드를 두 번 이상 돌려준다.**
++다중 코드 프레임만의 문제가 아니다 — **코드가 하나뿐인 프레임에서도 난다.**
+ 
+-| 경로 | 중복 반환 | 비고 |
++| 코퍼스 | 경로 | 중복 반환 |
+ |---|---|---|
+-| `full` | **29 / 137 (21%)** | 반환 개수가 정답 개수를 넘는다(140 > 137) |
+-| `2stage` (풀스캔 승격됨) | 16 / 137 | 승격돼서 풀스캔을 타면 같은 문제 |
+-| `2stage` (승격 없음, `min_expected_codes=0`) | **0** | 타일 풀스캔을 안 타면 0 |
++| 양호·단일 코드 (174개) | `full` | **27 / 174 (15.5%)** — 반환 177 > 정답 174 |
++| 양호·단일 코드 | `2stage` | 0 |
++| 양호·다중 코드 (857개) | `full` | **108 / 857 (12.6%)** |
++| 양호·다중 코드 | `2stage` (승격 포함) | 49 / 857 |
++| 악조건 혼합 (586개) | `full` | 29 / 586 |
++| 아무 코퍼스 | `2stage` (승격 없음, `min_expected_codes=0`) | **0** — 타일 풀스캔을 안 타면 0 |
+ 
+ 원인은 `Pipeline::dedup()`(src/pipeline.cpp:484)의 판정 기준:
+ "같은 심볼로지 + 같은 텍스트 + **중심점 64px 이내**"에서 64px가 **고정
+@@ -1444,10 +1574,11 @@ verify_accuracy가 이 설정을 자동으로 해준다.
+ (400px+ QR) 가로로 길면(1D) 타일별로 보고되는 중심점이 64px보다 멀어져서
+ 중복으로 인식되지 않는다. `tile_overlap_px`를 500 → 80으로 바꿔도 중복 수가
+ 동일해서(23건 → 23건) 겹침 폭 문제는 아니다.
++단일 코드 프레임에서도 나온다는 게 결정적이다 — "여러 코드가 서로
++헷갈린 것"이 아니라 **한 코드가 두 타일에서 각각 잡히는 것**이다.
+ 
+ - **왜 지금까지 안 보였나**: 40종 회귀는 `n >= expected`로 채점한다 —
+-  개수가 **많아지는** 방향은 실패로 안 잡힌다. 게다가 40종에 다중 코드
+-  프레임이 3장뿐이다.
++  개수가 **많아지는** 방향은 실패로 안 잡힌다.
+ - **현장 영향**: 개수를 세는 용도(박스당 라벨 N장 검수)면 그대로 오검수다.
+ - **수정 방향**: 중심점 거리 대신 **바운딩박스 겹침(IoU)** 으로 판정하거나,
+   임계값을 코드 크기에 비례시킨다(예: `max(64, 코드 대각선 × 0.5)`).
+@@ -1459,29 +1590,33 @@ verify_accuracy가 이 설정을 자동으로 해준다.
+   # 출력의 dup 열을 볼 것
+   ```
+ 
+-#### (신규 2026-07-30) 1D 회전 사각지대 — 20~30°, 61~70°
++#### (신규 2026-07-30) 1D 회전 사각지대 — 20~25°, 44°, 65~70°
+ §3.2.17의 5단계 구제로 "1D 회전 해결"로 정리돼 있었으나, 1도 간격 스윕
+-(Code128, module 3px, 2048×1536)을 돌리니 **두 개의 죽은 구간**이 나온다:
++(Code128, module 3px, 2048×1536, 91개 각도)을 돌리니 **두 개의 죽은 밴드**가
++나온다. `full`/`2stage` 양쪽 완전히 동일:
+ 
+ ```
+-0° ─────────────────#### 19°  성공
+-20°────────────────────── 30°  실패 (27°만 예외적으로 성공)
+-31°────────────────────── 60°  성공  (45° 포함 — 40종이 보던 각도)
+-61°────────────────────── 70°  실패
+-71°───────────────────── 90°  성공
++0°  ~ 19°  성공
++20° ~ 25°  실패   <- 밴드 A (6개)
++26° ~ 43°  성공
++44°        실패   (단발)
++45° ~ 64°  성공   (45°는 40종이 보던 각도 — 그래서 "된다"로 보였다)
++65° ~ 70°  실패   <- 밴드 B (6개)
++71° ~ 90°  성공
+ ```
+-`full`/`2stage` 양쪽 동일. 실패 구간은 구제 체인을 다 돌고 실패하므로
+-**시간도 2배**(성공 60~80ms vs 실패 100~170ms) 든다.
++- **강한 힌트**: 두 밴드가 45°를 기준으로 거의 대칭이다(20~25 ↔ 65~70 =
++  90−25 ~ 90−20). 각도 자체의 난이도 문제가 아니라 **구제 단계의 기울기
++  후보 탐색 범위가 대칭 경계에서 비는 것**으로 보인다.
++- **비용**: 실패 각도는 구제 체인을 끝까지 돌고 실패하므로 시간도 2배
++  (성공 평균 76ms vs 실패 평균 139ms).
++- **QR은 거의 무결**: 91개 중 3개(28·33·62°)만 흔들린다.
+ - **왜 지금까지 안 보였나**: 40종의 1D 회전 케이스가 0/8/45/90도 4개뿐인데,
+-  45도와 90도가 **성공하는 각도**라서 "구간 전체가 된다"로 보였다.
++  그 넷이 전부 성공 구간이다.
+ - **재현**:
+   ```bash
+   python3 tools/generate_corpus.py --sweep angle:0:90:1 \
+       --base sym=CODE128,module=3 --stream | ./verify_accuracy --stdin --paths 2stage
+   ```
+-- **다음 단계**: 구제 단계(deskew rescue)가 추정하는 기울기 후보 각도의
+-  분해능/탐색 범위를 이 두 구간에서 확인할 것. 각도 자체보다 "추정 실패"일
+-  가능성이 높다(27°만 성공하는 패턴이 그 신호).
+ 
+ #### `processViewTwoStage()`와 `processViewROIs()`에 ZBar가 안 물린다
+ **`processViewTwoStage()`와 `processViewROIs()`에 ZBar가 안 물린다.**
+diff --git a/README.md b/README.md
+index f35a71d..5bda5f9 100644
+--- a/README.md
++++ b/README.md
+@@ -202,9 +202,32 @@ angle=20                    1 |   0.0%   114.20      <- 여기서 끊긴다
+   같은 코드 중복 반환(`dup`)을 분리해서 센다
+ - **조건 태그별 집계** — 무엇이 느리고 어디서 끊기는지가 축 단위로 보인다
+ 
++**판독 가능성 버킷 (난독 이미지 분리)** — 난수로 조건을 뽑으면 물리적으로
++아무도 못 읽는 이미지(모듈 1px, 대비가 노이즈보다 작음, 블러가 모듈보다 큼)가
++반드시 섞인다. 그걸 포함한 검출률은 "우리 성능 + 물리 한계"의 혼합이라
++개선 판단에 못 쓴다. 그래서 생성기가 코드마다 판정해서 **폴더를 나눈다**:
++
++```
++corpus/ok/           읽을 수 있어야 정상   <- ★ 여기 성공률이 진짜 지표
++corpus/borderline/   리더에 따라 갈리는 경계
++corpus/mixed/        한 프레임에 섞임
++corpus/impossible/   원래 안 되는 게 맞음(난독) — 실패해도 감점 아님
++```
++
++```bash
++./verify_accuracy ./corpus/ok      # 읽혀야 정상인 것만 채점
++./verify_accuracy ./corpus         # 전부 + 버킷별 요약 (한 단계 아래까지 훑는다)
++python3 tools/generate_corpus.py -n 5000 --bucket ok --stream | ./verify_accuracy --stdin
++```
++
++분류 기준은 **물리(신호가 남아있는가)뿐이다.** "우리가 못 읽는 조건"은 절대
++난독에 넣지 않는다 — 20~25도 회전한 1D는 지금 우리가 못 읽지만 상용 리더는
++읽으므로 `ok`로 분류돼 실패로 집계된다. 그게 개선 대상이기 때문이다.
++
+ 대량 코퍼스에는 물리적으로 못 읽는 이미지가 섞이므로 **절대 검출률의
+ 목표치는 의미가 없다.** 항상 같은 `--seed`로 만든 같은 코퍼스에 대해
+-변경 전/후를 비교할 것. (자세한 배경은 PROJECT_NOTES §3.5)
++변경 전/후를 비교할 것. (배경은 PROJECT_NOTES §3.8, 1차 측정 결과와
++개선 로드맵은 §3.9~3.10)
+ 
+ ---
+ 
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index 7694e73..36495d8 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -92,7 +92,6 @@ import time
+ import numpy as np
+ import qrcode
+ import barcode as pybarcode
+-from barcode.writer import ImageWriter
+ from PIL import Image, ImageDraw, ImageFilter, ImageFont
+ 
+ # ----------------------------------------------------------------- 폰트
+@@ -153,6 +152,42 @@ def _qr_img(payload, px, ec):
+     return img.resize((px, px), Image.NEAREST), px / modules
+ 
+ 
++def _bits_to_image(bits, module_px, height_px, quiet=10):
++    """모듈 비트열('1'=검정 막대)을 **면적 샘플링**으로 렌더.
++
++    왜 python-barcode 이미지를 리사이즈하지 않는가:
++    미리 렌더된 2px/모듈 이미지를 정수배가 아닌 비율로 확대하면(NEAREST면
++    열 복제, BILINEAR면 번짐) **막대 폭 비율이 흐트러진다**. 1D 디코딩은 폭
++    비율로 문자를 판별하므로, 눈으로는 멀쩡한 바코드가 아예 안 읽힌다.
++    실측으로 module 2.2 / 3.6 / 4.0 / 4.8 처럼 특정 값에서만 검출률이 0%로
++    떨어지는 톱니 곡선이 나왔고, 코드만 잘라 단독 디코드해도 실패했다 —
++    라이브러리 문제가 아니라 **생성기가 만든 가짜 실패**였다.
++    모듈 폭이 스윕 축인 도구에서 이건 치명적이라, 비트열에서 직접 그린다.
++
++    출력 픽셀 하나가 덮는 모듈 구간의 평균값을 그대로 쓴다(= 카메라가 하는
++    일과 같은 면적 적분). 모듈 폭이 소수여도 경계 위치가 정확하고, 경계
++    픽셀만 중간 밝기가 된다.
++    """
++    pattern = "0" * quiet + bits + "0" * quiet          # 콰이어트존(흰색)
++    n = len(pattern)
++    white = np.array([0.0 if c == "1" else 1.0 for c in pattern], dtype=np.float64)
++    cum = np.concatenate([[0.0], np.cumsum(white)])     # 모듈 단위 적분값
++
++    w = max(60, int(round(n * module_px)))
++    edges = np.arange(w + 1, dtype=np.float64) / module_px   # 픽셀 경계 -> 모듈 좌표
++
++    def integral(t):
++        t = np.clip(t, 0.0, n)
++        i = np.floor(t).astype(np.int64)
++        frac = t - i
++        i_safe = np.clip(i, 0, n - 1)
++        return cum[np.minimum(i, n)] + frac * white[i_safe] * (i < n)
++
++    row = (integral(edges[1:]) - integral(edges[:-1])) * module_px
++    row = np.clip(row * 255.0, 0, 255).astype(np.uint8)
++    return Image.fromarray(np.tile(row, (max(24, int(height_px)), 1)), mode="L")
++
++
+ def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
+     """1D 심볼을 **모듈 폭 고정**으로 렌더 (폭은 데이터 길이에 따라 늘어난다).
+ 
+@@ -162,22 +197,16 @@ def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
+     있다(generate_stress_images.py의 code128() 주석, §3.2.15).
+     실제 인쇄는 모듈 폭을 고정하고 라벨 폭이 넓어진다.
+     """
+-    buf = io.BytesIO()
+-    obj = cls(payload, writer=ImageWriter(), **wopts)
+-    obj.write(buf, options={"module_height": 20, "quiet_zone": 4,
+-                            "font_size": 0, "write_text": False})
+-    raw = Image.open(buf).convert("L")
+-    native_modules = raw.width / 2.0          # ImageWriter 기본 모듈 폭 ≈ 2px
+-    w = max(60, int(round(native_modules * module_px)))
+-    # 높이는 **실제 렌더 폭** 기준으로 잡는다. 셀 폭 기준으로 잡으면 짧은
+-    # 데이터일 때 거의 정사각형인 1D 코드가 나와서 현실과 안 맞는다.
++    obj = cls(payload, **wopts)
++    bits = obj.build()[0]
++    w = int(round((len(bits) + 20) * module_px))
+     h = int(max(24, min(box_h, w * ratio)))
+-    return raw.resize((w, h), Image.NEAREST), obj.get_fullcode()
++    return _bits_to_image(bits, module_px, h), obj.get_fullcode()
+ 
+ 
+ _LINEAR = {
+     "CODE128": (pybarcode.Code128, "CODE_128", {}),
+-    "EAN13":   (pybarcode.EAN13,   "EAN_13",   {"no_checksum": False}),
++    "EAN13":   (pybarcode.EAN13,   "EAN_13",   {}),
+     "CODE39":  (pybarcode.Code39,  "CODE_39",  {"add_checksum": False}),
+     "ITF":     (pybarcode.ITF,     "ITF",      {}),
+ }
+@@ -200,7 +229,7 @@ def _linear_payload(kind, rng, n):
+ 
+ 
+ def make_symbol(kind, rng, box_w, box_h, mod_range):
+-    """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트)를 돌려준다.
++    """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트, 실제 모듈 픽셀크기).
+ 
+     box_w/box_h = 배치 가능한 최대 크기. mod_range = 모듈 픽셀 크기 범위
+     (난이도 프리셋에서 옴) — 이걸 먼저 정하고 거기서 코드 크기가 나온다.
+@@ -230,7 +259,7 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
+             n = max(4, n // 2)                        # 그래도 안 되면 데이터를 줄인다
+         px = max(21, min(px, limit))
+         img, real_mod = _qr_img(payload, px, ec)
+-        return img, "QR_CODE", payload, [_mod_tag(real_mod)]
++        return img, "QR_CODE", payload, [_mod_tag(real_mod)], real_mod
+ 
+     cls, symname, wopts = _LINEAR[kind]
+     n = int(rng.integers(6, 20))
+@@ -250,7 +279,7 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
+             img = img.resize((int(box_w), img.height), Image.NEAREST)
+             break
+         n = max(4, n // 2)                            # 그래도 안 되면 데이터를 줄인다
+-    return img, symname, full, [_mod_tag(mod_px)]
++    return img, symname, full, [_mod_tag(mod_px)], mod_px
+ 
+ 
+ # ============================================================ 코드 단위 열화
+@@ -266,17 +295,20 @@ def _to_dpm(arr, step=5):
+     return dot
+ 
+ 
+-def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
++def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
+     """코드 이미지 자체에 걸리는 열화(대비/반전/DPM/인쇄불량/손상).
+ 
+     프레임 전체가 아니라 코드별로 적용한다 — 한 프레임에 '깨끗한 코드 +
+     망가진 코드'가 섞이는 상황(부분 검출 함정, §3.2.10)이 자연히 생긴다.
+     """
+     a = np.array(img).astype(np.float32)
++    if phys is None:
++        phys = {}
+ 
+     if rng.random() < 0.28 * p_deg:                                   # 저대비
+         ratio = float(np.interp(sev, [0, 1], [0.75, 0.07]))
+         a = 128 + (a - 128) * ratio
++        phys["contrast"] = ratio
+         tags.append("lowcontrast" + ("-strong" if ratio < 0.2 else ""))
+ 
+     if rng.random() < 0.15 * p_deg:                                   # 흑백 반전
+@@ -290,6 +322,7 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
+ 
+     if allow_dpm and rng.random() < 0.10 * p_deg:                     # DPM 도트 각인
+         a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8)).astype(np.float32)
++        phys["dpm"] = 1
+         tags.append("dpm")
+ 
+     if rng.random() < 0.14 * p_deg:                                   # 인쇄 불량(잉크 끊김)
+@@ -313,7 +346,9 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0):
+         if is_2d and rng.random() < 0.4 * sev + 0.1:
+             cut = int(min(w, h) * float(np.interp(sev, [0, 1], [0.10, 0.30])))
+             d.polygon([(w, h), (w - cut, h), (w, h - cut)], fill=200)
++            phys["cut"] = float(np.interp(sev, [0, 1], [0.10, 0.30]))
+         a = np.array(im).astype(np.float32)
++        phys["damaged"] = 1
+         tags.append("damaged")
+ 
+     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+@@ -356,6 +391,123 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
+     return img, ang
+ 
+ 
++# ============================================================ 판독 가능성 분류
++#
++# 왜 이게 필요한가
++# ----------------
++# 난수로 조건을 뽑으면 **물리적으로 아무도 못 읽는 이미지**가 반드시 섞인다
++# (모듈이 1px, 대비가 노이즈보다 작음, 블러 시그마가 모듈보다 큼...).
++# 이걸 섞어놓고 "검출률 46%"라고 하면 그 숫자가 우리 라이브러리 성능인지
++# 물리 한계인지 알 수 없다 — 개선해도 숫자가 안 움직이니 판단이 불가능하다.
++#
++# 그래서 생성 레시피(정확한 수치를 우리가 알고 있다)로 코드마다
++#   ok         : 읽을 수 있어야 정상  <- **여기 성공률이 진짜 지표**
++#   borderline : 리더에 따라 갈리는 경계
++#   impossible : 원래 안 되는 게 맞음(난독). 실패해도 감점 아님
++# 을 매기고, 파일 모드에서는 **폴더까지 나눠서** 떨어뜨린다.
++#
++# 매우 중요한 선긋기
++# ------------------
++# 분류 기준은 **물리(신호가 남아있는가)** 뿐이다. "우리 zxing이 못 읽는
++# 조건"은 절대 impossible로 넣지 않는다. 예를 들어 20~30도 회전한 1D는
++# 현재 우리가 못 읽지만(§8) 상용 리더는 읽는다 — 이건 ok로 분류돼서
++# 실패로 잡혀야 한다. 그게 개선 대상이기 때문이다.
++# 라이브러리 한계를 impossible에 넣기 시작하면, 못 읽는 걸 못 읽는다고
++# 선언하는 것만으로 성공률이 올라가는 자기기만이 된다.
++
++BUCKETS = ("ok", "borderline", "impossible")
++
++
++def classify_code(mod_px, cphys, fphys):
++    """코드 하나의 판독 가능성. (버킷, 사유태그들) 반환.
++
++    판정은 전부 "신호 대 열화" 비교다. 상수의 근거는 각 항목 주석 참고.
++    """
++    reasons = []
++    worst = 0                                   # 0=ok 1=borderline 2=impossible
++
++    def mark(level, reason):
++        nonlocal worst
++        if level > worst:
++            worst = level
++        if level:
++            reasons.append(reason)
++
++    m = float(mod_px)
++    contrast = float(cphys.get("contrast", 1.0))
++    gain = float(fphys.get("gain", 1.0))
++    shadow = float(fphys.get("shadow", 1.0))
++    noise = float(fphys.get("noise", 3.0))
++    blur = float(fphys.get("blur", 0.6))
++    motion = float(fphys.get("motion", 0.0))
++    glare = float(fphys.get("glare", 0.0))
++
++    # 1) 모듈 크기 — 샘플링 한계. 모듈당 1픽셀 미만이면 정보가 사라진다.
++    #    2D 코드는 실무적으로 모듈당 2px는 있어야 안정적으로 읽힌다.
++    if m < 1.3:
++        mark(2, "x-module")
++    elif m < 2.0:
++        mark(1, "b-module")
++
++    # 2) 대비 대 노이즈 — 코드 진폭은 127*contrast, 여기에 노출/그림자가 곱해진다.
++    #    중요: 디코더는 모듈 하나를 m x m 픽셀로 보므로 노이즈가 그만큼
++    #    평균화된다(실효 시그마 ~ sigma/m). 이걸 빼먹으면 "큰 모듈 + 저대비"를
++    #    난독으로 잘못 분류한다 — 실제로는 잘 읽힌다.
++    amp = 127.0 * contrast * gain * shadow
++    noise_eff = noise / max(1.0, 0.8 * m)
++    if amp < 1.0 * noise_eff:
++        mark(2, "x-contrast")
++    elif amp < 2.5 * noise_eff:
++        mark(1, "b-contrast")
++
++    # 3) 노출 클리핑 — 밝은 쪽/어두운 쪽이 같은 값으로 뭉개지면 코드가 사라진다.
++    dark = (128.0 - 127.0 * contrast) * gain * shadow
++    bright = (128.0 + 127.0 * contrast) * gain * shadow + glare
++    if dark > 248.0 or bright < 8.0 or (bright - dark) < 6.0:
++        mark(2, "x-exposure")
++    elif dark > 235.0 or bright < 18.0:
++        mark(1, "b-exposure")
++
++    # 4) 블러 — 가우시안 시그마가 모듈 크기에 육박하면 인접 모듈이 섞인다.
++    #    (실측 보정: sigma > 0.75*module 이면 검출률 0%, > 0.45*module 부터 흔들린다)
++    if blur > 0.75 * m:
++        mark(2, "x-blur")
++    elif blur > 0.45 * m:
++        mark(1, "b-blur")
++
++    # 5) 모션 블러 — 이동 길이가 모듈 크기를 크게 넘으면 막대 구분이 사라진다.
++    #    다만 블러 **방향**이 막대와 나란하면 거의 손해가 없다(1D는 특히).
++    #    방향을 모른 채 판정하므로 임계값을 넉넉히 잡는다(실측: 2.5*m 기준은
++    #    17%가 읽혀서 난독 분류로 부적합했다).
++    if motion > 5.0 * m:
++        mark(2, "x-motion")
++    elif motion > 2.2 * m:
++        mark(1, "b-motion")
++
++    # 6) 물리적 결손 — 2D 모서리 결손이 30%에 가까우면 ECC 한계를 넘는다.
++    #    (QR ECC-H가 복원 가능한 최대가 약 30%, 실무 안전선은 25%)
++    if float(cphys.get("cut", 0.0)) > 0.26:
++        mark(2, "x-damage")
++
++    # 주의: 회전/DPM/콰이어트존 침범/클러터는 여기서 절대 impossible이 아니다.
++    # 물리적으로 정보는 남아있고, 상용 리더가 읽는 조건이다 — 우리가 못 읽으면
++    # 그건 개선 대상(§8)이지 난독이 아니다.
++    return BUCKETS[worst], reasons
++
++
++def image_bucket(code_buckets):
++    """이미지 단위 폴더 분류. 코드가 섞여 있으면 mixed."""
++    if not code_buckets:
++        return "empty"
++    if all(b == "impossible" for b in code_buckets):
++        return "impossible"
++    if all(b == "ok" for b in code_buckets):
++        return "ok"
++    if any(b == "impossible" for b in code_buckets):
++        return "mixed"
++    return "borderline"
++
++
+ # ============================================================ 프레임 배경
+ def background(rng, w, h, style, tags):
+     """배경. 'plain'은 조명 그라디언트 + 센서 노이즈, 나머지는 현장형 클러터.
+@@ -436,13 +588,15 @@ def _cylinder_warp(a, strength):
+     return a[:, x0] * (1 - frac) + a[:, x1] * frac
+ 
+ 
+-def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
++def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes, phys=None):
+     """프레임 전체에 걸리는 열화를 n_degrade개 골라 적용. 반환은 float32 배열.
+ 
+     boxes = 배치된 코드들의 (x, y, w, h). 국소 열화(반사광/오염/콰이어트존
+     침범)는 **코드 위에** 걸려야 의미가 있다 — 빈 배경에 뿌리면 난이도가
+     올라가지 않아서 측정값이 그냥 희석된다.
+     """
++    if phys is None:
++        phys = {}
+     pool = ["defocus", "motion", "noise", "overexp", "underexp",
+             "glare", "shadow", "dirty", "curved", "quietzone"]
+     picks = list(rng.choice(pool, size=min(n_degrade, len(pool)), replace=False)) if n_degrade else []
+@@ -476,6 +630,7 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+     if "defocus" in picks:
+         r = float(np.interp(sev, [0, 1], [1.0, 6.5]))
+         img = img.filter(ImageFilter.GaussianBlur(r))
++        phys["blur"] = r
+         tags.append("defocus" + ("-strong" if r > 3.8 else ""))
+         a = np.array(img).astype(np.float32)
+     else:
+@@ -484,11 +639,13 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+     if "motion" in picks:
+         length = int(np.interp(sev, [0, 1], [7, 27]))
+         a = _motion_blur(a, length, float(rng.uniform(0, 180)))
++        phys["motion"] = float(length)
+         tags.append("motion" + ("-strong" if length > 17 else ""))
+ 
+     if "curved" in picks:
+         s = float(np.interp(sev, [0, 1], [0.15, 0.5]))
+         a = _cylinder_warp(a, s)
++        phys["curve"] = s
+         tags.append("curved")
+ 
+     if "glare" in picks:
+@@ -500,6 +657,7 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+             amp = float(np.interp(sev, [0, 1], [90, 215]))
+             a = a + amp * np.exp(-(((xx - gx) ** 2) / (2 * sx ** 2) +
+                                    ((yy - gy) ** 2) / (2 * sy ** 2)))
++            phys["glare"] = max(phys.get("glare", 0.0), amp)
+         tags.append("glare")
+ 
+     if "shadow" in picks:
+@@ -509,20 +667,24 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes):
+         band = np.array(Image.fromarray((band * 255).astype(np.uint8), mode="L")
+                         .filter(ImageFilter.GaussianBlur(12))).astype(np.float32) / 255.0
+         a = a * band
++        phys["shadow"] = float(np.interp(sev, [0, 1], [0.62, 0.28]))
+         tags.append("shadow")
+ 
+     if "overexp" in picks:
+         g = float(np.interp(sev, [0, 1], [1.15, 1.7]))
+         a = a * g
++        phys["gain"] = g
+         tags.append("overexposed")
+     elif "underexp" in picks:
+         g = float(np.interp(sev, [0, 1], [0.55, 0.15]))
+         a = a * g + rng.normal(0, 4, size=(h, w))
++        phys["gain"] = g
+         tags.append("underexposed" + ("-strong" if g < 0.25 else ""))
+ 
+     if "noise" in picks:
+         s = float(np.interp(sev, [0, 1], [12, 58]))
+         a = a + rng.normal(0, s, size=(h, w))
++        phys["noise"] = s
+         tags.append("noise" + ("-strong" if s > 35 else ""))
+ 
+     return a
+@@ -571,11 +733,13 @@ def build_one(index, cfg):
+             continue
+         kind = str(rng.choice(kinds))
+         try:
+-            sym, symname, text, ctags = make_symbol(kind, rng, avail_w, avail_h, prof["mod"])
++            sym, symname, text, ctags, mod_px = make_symbol(kind, rng, avail_w, avail_h,
++                                                            prof["mod"])
+         except Exception:
+             continue
++        cphys = {}
+         sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
+-                             is_2d=(kind == "QR"), p_deg=prof["p_deg"])
++                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys)
+         sym, ang = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
+                                    p_rot=prof["p_rot"])
+         px = cx0 + margin + int(rng.integers(0, max(1, avail_w - sym.width + 1)))
+@@ -584,22 +748,32 @@ def build_one(index, cfg):
+         tags.extend(ctags)
+         codes.append({"symbology": symname, "text": text, "x": px, "y": py,
+                       "w": sym.width, "h": sym.height, "rot": round(ang, 1),
+-                      "tags": ctags})
++                      "tags": ctags, "module_px": round(mod_px, 2), "phys": cphys})
+ 
+     nd = int(rng.integers(prof["n_degrade"][0], prof["n_degrade"][1] + 1))
+     boxes = [(c["x"], c["y"], c["w"], c["h"]) for c in codes]
+-    a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes)
++    fphys = {}
++    a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes, phys=fphys)
++
++    # 판독 가능성 분류 — 프레임 열화까지 정해진 뒤에야 판정할 수 있다
++    for c in codes:
++        b, reasons = classify_code(c["module_px"], c["phys"], fphys)
++        c["bucket"] = b
++        c["tags"] = c["tags"] + ["dec-" + b] + reasons
++    bucket = image_bucket([c["bucket"] for c in codes])
+ 
+     # 태그 중복 제거(순서 유지) + 심볼로지 태그
+     seen, utags = set(), []
+-    for t in tags + sorted({"sym-" + c["symbology"] for c in codes}) + [f"n{len(codes)}"]:
++    for t in tags + sorted({"sym-" + c["symbology"] for c in codes}) \
++             + [f"n{len(codes)}", "img-" + bucket]:
+         if t not in seen:
+             seen.add(t); utags.append(t)
+ 
+     name = f"c{index:06d}_{len(codes)}"
+     rec = {"file": name + ("." + cfg["format"]), "index": index, "expected": len(codes),
+-           "width": w, "height": h, "severity": round(sev, 3),
+-           "difficulty": cfg["difficulty"], "tags": utags, "codes": codes}
++           "width": w, "height": h, "severity": round(sev, 3), "bucket": bucket,
++           "difficulty": cfg["difficulty"], "tags": utags, "codes": codes,
++           "frame_phys": {k2: round(v, 3) for k2, v in fphys.items()}}
+     return name, np.clip(a, 0, 255).astype(np.uint8), rec
+ 
+ 
+@@ -742,7 +916,9 @@ def build_sweep(index, combo, cfg):
+         if cx0 is None:
+             cx0 = (max(0, px) + sym.width / 2, max(0, py) + sym.height / 2)
+         codes.append({"symbology": symname, "text": text, "x": max(0, px), "y": max(0, py),
+-                      "w": sym.width, "h": sym.height, "rot": float(p["angle"]), "tags": []})
++                      "w": sym.width, "h": sym.height, "rot": float(p["angle"]),
++                      "tags": [], "module_px": round(eff_mod, 2),
++                      "phys": {"contrast": float(p["contrast"])}})
+ 
+     if p["blur"]:
+         img = img.filter(ImageFilter.GaussianBlur(float(p["blur"])))
+@@ -767,15 +943,27 @@ def build_sweep(index, combo, cfg):
+     if p["noise"]:
+         arr = arr + rng.normal(0, float(p["noise"]), size=(h, w))
+ 
++    fphys = {"blur": float(p["blur"]), "motion": float(p["motion"]),
++             "noise": float(p["noise"]), "gain": float(p["bright"]),
++             "shadow": float(p["shadow"]), "glare": float(p["glare"]),
++             "curve": float(p["curve"])}
++    for c in codes:
++        b, reasons = classify_code(c["module_px"], c["phys"], fphys)
++        c["bucket"] = b
++        c["tags"] = c["tags"] + ["dec-" + b] + reasons
++    bucket = image_bucket([c["bucket"] for c in codes])
++
+     tags = [f"{ax}={_fmt_val(v)}" for ax, v in sorted(combo.items())]
+     tags.append("sym-" + codes[0]["symbology"])
++    tags.append("img-" + bucket)
+     name = "sw" + "".join(f"_{ax}-{_fmt_val(v)}" for ax, v in sorted(combo.items())) \
+            + f"_{len(codes)}"
+     params = {k2: _fmt_val(v) for k2, v in p.items()}
+     params["module_effective"] = f"{eff_mod:.2f}"   # 셀에 안 들어가 클램프됐을 수 있다
+     rec = {"file": name + "." + cfg["format"], "index": index, "expected": len(codes),
+            "width": w, "height": h, "severity": 0.0, "difficulty": "sweep",
+-           "tags": tags, "params": params, "codes": codes}
++           "bucket": bucket, "tags": tags, "params": params, "codes": codes,
++           "frame_phys": fphys}
+     return name, np.clip(arr, 0, 255).astype(np.uint8), rec
+ 
+ 
+@@ -830,7 +1018,14 @@ def _build(index):
+ def _work_file(index):
+     try:
+         name, arr, rec = _build(index)
+-        write_image(_CFG["outdir"], name, arr, _CFG["format"])
++        # 버킷별 하위 폴더로 나눠 떨어뜨린다. verify_accuracy는 디렉토리 하나를
++        # 받으므로, 폴더가 나뉘어 있으면 "읽을 수 있어야 하는 것만" 골라
++        # 채점하는 게 그냥 경로 하나 바꾸는 일이 된다.
++        if _CFG["buckets"] and rec["bucket"] not in _CFG["buckets"]:
++            return {"index": index, "skipped": True}
++        sub = os.path.join(_CFG["outdir"], rec["bucket"])
++        os.makedirs(sub, exist_ok=True)
++        write_image(sub, name, arr, _CFG["format"])
+         return rec
+     except Exception as e:                      # 한 장 실패로 전체를 죽이지 않는다
+         return {"index": index, "error": f"{type(e).__name__}: {e}"}
+@@ -840,6 +1035,8 @@ def _work_stream(index):
+     """스트리밍용: 파일을 안 쓰고 (헤더, 원본바이트)를 부모로 돌려준다."""
+     try:
+         name, arr, rec = _build(index)
++        if _CFG["buckets"] and rec["bucket"] not in _CFG["buckets"]:
++            return b"", b"", 0                 # 필터로 걸러진 프레임
+         hdr = "\t".join([STREAM_MAGIC, str(rec["width"]), str(rec["height"]), name,
+                          str(rec["expected"]), ",".join(rec["tags"]),
+                          "|".join(c["text"] for c in rec["codes"]),
+@@ -923,6 +1120,9 @@ def main():
+                          "받는 쪽: ./verify_accuracy --stdin")
+     ap.add_argument("--max-disk-gb", type=float, default=20.0,
+                     help="파일 모드 용량 상한(GB). 예상치가 넘으면 시작하지 않는다")
++    ap.add_argument("--bucket", default="", metavar="ok|borderline|mixed|impossible",
++                    help="이 버킷만 내보낸다(쉼표로 여러 개). 스트리밍에서 "
++                         "'읽을 수 있어야 하는 것'만 채점할 때 --bucket ok")
+     ap.add_argument("--jobs", type=int, default=0, help="0=CPU 수")
+     ap.add_argument("--est", action="store_true", help="생성 없이 개수/용량/시간만 추정")
+     a = ap.parse_args()
+@@ -981,6 +1181,7 @@ def main():
+     cfg = {"seed": a.seed, "width": a.width, "height": a.height, "outdir": a.outdir,
+            "difficulty": a.difficulty, "max_codes": a.max_codes, "format": a.format,
+            "base": base,
++           "buckets": {b.strip() for b in a.bucket.split(",") if b.strip()},
+            "symbologies": [s.strip().upper() for s in a.symbologies.split(",") if s.strip()]}
+ 
+     log = sys.stderr                    # 스트리밍 중에는 stdout이 프레임 전용이다
+@@ -1013,7 +1214,7 @@ def main():
+                         if hdr is None:
+                             errs += 1
+                             print(f"  !! {exp}: {payload.decode()}", file=log)
+-                        else:
++                        elif hdr:
+                             out.write(hdr); out.write(payload)
+                             ncodes += exp
+                         progress(done)
+@@ -1024,7 +1225,7 @@ def main():
+                         if "error" in rec:
+                             errs += 1
+                             print(f"  !! {rec['index']}: {rec['error']}", file=log)
+-                        else:
++                        elif not rec.get("skipped"):
+                             recs.append(rec)
+                         progress(done)
+     else:
+@@ -1034,13 +1235,13 @@ def main():
+                 hdr, payload, exp = _work_stream(ix)
+                 if hdr is None:
+                     errs += 1
+-                else:
++                elif hdr:
+                     out.write(hdr); out.write(payload); ncodes += exp
+             else:
+                 rec = _work_file(ix)
+                 if "error" in rec:
+                     errs += 1
+-                else:
++                elif not rec.get("skipped"):
+                     recs.append(rec)
+             progress(i)
+         if a.stream:
+@@ -1048,8 +1249,15 @@ def main():
+ 
+     if not a.stream:
+         recs.sort(key=lambda r: r["index"])
+-        write_labels(a.outdir, recs)
++        by_bucket = {}
++        for r in recs:
++            by_bucket.setdefault(r["bucket"], []).append(r)
++        for b, rs in by_bucket.items():
++            write_labels(os.path.join(a.outdir, b), rs)
++        write_labels(a.outdir, recs)          # 전체 합본(원하면 통으로 채점)
+         ncodes = sum(r["expected"] for r in recs)
++        print(">> 버킷별: " + ", ".join(
++            f"{b}/ {len(rs)}장" for b, rs in sorted(by_bucket.items())), file=log)
+     n_done = len(idxs) - errs
+     print(f">> 완료: {n_done}장 / 코드 {ncodes}개 / {time.time() - t0:.0f}s"
+           + (f" / 실패 {errs}장" if errs else ""), file=log)
+diff --git a/tools/verify_accuracy.cpp b/tools/verify_accuracy.cpp
+index 06b16fe..b7fd7ff 100644
+--- a/tools/verify_accuracy.cpp
++++ b/tools/verify_accuracy.cpp
+@@ -245,14 +245,22 @@ int main(int argc, char** argv) {
+     bool haveLabels = false;
+     if (!stdinMode) {
+         if (dir.empty()) { fprintf(stderr, "이미지 디렉토리가 필요합니다\n"); return 1; }
++        // 하위 폴더도 한 단계 훑는다. generate_corpus.py가 판독 가능성
++        // 버킷별로(ok/ borderline/ mixed/ impossible/) 나눠 떨어뜨리므로,
++        // 상위 폴더를 주면 전체, 'corpus/ok'를 주면 "읽혀야 정상인 것"만 채점된다.
+         std::vector<std::string> all;
+-        DIR* d = opendir(dir.c_str());
+-        if (!d) { perror("opendir"); return 1; }
+-        for (dirent* e; (e = readdir(d)); ) {
+-            std::string n = e->d_name;
+-            if (n.size() > 4 && n.substr(n.size() - 4) == ".pgm") all.push_back(n);
+-        }
+-        closedir(d);
++        auto scan = [&](const std::string& sub) {
++            DIR* d = opendir((sub.empty() ? dir : dir + "/" + sub).c_str());
++            if (!d) return;
++            for (dirent* e; (e = readdir(d)); ) {
++                std::string n = e->d_name;
++                if (n.size() > 4 && n.substr(n.size() - 4) == ".pgm")
++                    all.push_back(sub.empty() ? n : sub + "/" + n);
++            }
++            closedir(d);
++        };
++        scan("");
++        for (const char* b : {"ok", "borderline", "mixed", "impossible"}) scan(b);
+         std::sort(all.begin(), all.end());
+         for (size_t i = 0; i < all.size(); i += stride) {
+             files.push_back(all[i]);
+@@ -451,11 +459,13 @@ int main(int argc, char** argv) {
+             if (!loadPGM(dir + "/" + fn, g)) { printf("%-*s LOAD FAIL\n", lineW, fn.c_str()); continue; }
+             int expected = 1;
+             const Label* lab = nullptr;
+-            auto it = labels.find(fn);
++            size_t sl = fn.rfind('/');
++            std::string base = (sl == std::string::npos) ? fn : fn.substr(sl + 1);
++            auto it = labels.find(base);
+             if (it != labels.end()) { lab = &it->second; expected = lab->expected; }
+             else {
+-                size_t u = fn.rfind('_');
+-                if (u != std::string::npos) expected = atoi(fn.c_str() + u + 1);
++                size_t u = base.rfind('_');
++                if (u != std::string::npos) expected = atoi(base.c_str() + u + 1);
+             }
+             handle(fn, g, lab, expected);
+         }
+@@ -519,6 +529,36 @@ int main(int argc, char** argv) {
+     }
+     if (!useText && haveLabels) printf("(텍스트 대조 생략)\n");
+ 
++    // ---- 판독 가능성 버킷별: 이게 헤드라인 숫자다
++    // 난수 코퍼스에는 물리적으로 못 읽는 이미지가 섞인다. 그걸 포함한
++    // 전체 검출률은 "우리 성능"이 아니라 "우리 성능 + 물리 한계"의 혼합이다.
++    // dec-ok 행만 보면 개선 여지가 있는 부분의 진짜 성공률이 나온다.
++    {
++        const char* names[3] = {"dec-ok", "dec-borderline", "dec-impossible"};
++        // 라벨은 ASCII — 한글 폭 때문에 열이 어긋난다
++        const char* label[3] = {"ok  (읽혀야 정상)", "borderline (경계)", "impossible (난독)"};
++        bool any = false;
++        for (int b = 0; b < 3; ++b) if (byTag.count(names[b])) any = true;
++        if (any) {
++            printf("\n판독 가능성 버킷별 (코드 단위) — 물리적으로 읽을 수 있는가로 분류\n");
++            printf("%-18s %7s", "bucket", "codes");
++            for (auto& p : paths) printf(" | %-16s", p.name);
++            printf("\n%s\n", std::string(30 + NP * 19, '-').c_str());
++            for (int b = 0; b < 3; ++b) {
++                auto it2 = byTag.find(names[b]);
++                if (it2 == byTag.end()) continue;
++                printf("%-26s %7ld", label[b], it2->second[0].expected);
++                for (int i = 0; i < NP; ++i) {
++                    TagStat& t = it2->second[i];
++                    printf(" | %5.1f%% %8.2f", t.rate(), t.mean());
++                }
++                printf("\n");
++            }
++            printf("★ 개선 지표는 'ok' 행이다. 'impossible'은 실패가 정상이고,\n"
++                   "  100%%에 가까우면 오히려 분류 기준이 느슨하다는 뜻이다.\n");
++        }
++    }
++
+     // ---- 조건 태그별 집계: "무엇이 느리고 무엇을 놓치는가"
+     if (useTags && !byTag.empty()) {
+         printf("\n조건 태그별 (코드 단위 검출률 %% / 이미지당 평균 ms)\n");
+-- 
+2.43.0
+

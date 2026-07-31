@@ -1,0 +1,243 @@
+From 088ca09be77d94d16c1cc12daf5c636705ef57ab Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 22:32:18 +0000
+Subject: [PATCH] =?UTF-8?q?N4:=20=EB=85=B8=EC=9D=B4=EC=A6=88=20=EA=B5=AC?=
+ =?UTF-8?q?=EC=A0=9C=20=EB=8B=A8=EA=B3=84=20=E2=80=94=20=EB=85=B8=EC=9D=B4?=
+ =?UTF-8?q?=EC=A6=88=20=EC=B6=95=20=EB=B6=95=EA=B4=B4=20=EC=9E=84=EA=B3=84?=
+ =?UTF-8?q?=EA=B0=80=20=EC=82=AC=EB=9D=BC=EC=A1=8C=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+축별 붕괴 지점 중 대비·노이즈만 물리 한계까지 여유가 컸다(§3.9). 그중
+노이즈는 원인이 단순했다: 센서 노이즈가 이진화를 무너뜨리는 것뿐인데,
+모듈이 노이즈 상관거리보다 크면 살짝 뭉개는 것만으로 신호가 살아난다.
+
+모든 단계가 실패했을 때 3x3 박스 블러를 먹이고 한 번 더 보는 구제 단계를
+추가했다(DPM/회전 구제보다 먼저 — 필터 1회 + 코어 패스 1회로 가장 싸다).
+preprocess에 boxBlur3x3()을 분리형(가로 3탭 -> 세로 3탭)으로 구현했다.
+
+실측 (모듈 4px, 노이즈 시그마 0~60 스윕, 31점):
+| 심볼로지 | 이전 | 이후 |
+|----------|------|------|
+| QR       | 임계 46 (24/31) | **31/31 전 구간** |
+| Code128  | 임계 30 (16/31) | **31/31 전 구간** |
+
+노이즈 40 단일 프레임 실측: 검출 실패(401ms) -> 성공(23ms). 실패해서 폴백
+체인을 끝까지 도는 대신 첫 패스에서 성공하므로 **더 빨라지는 경우도 많다**.
+
+대비 축도 Code128이 임계 0.30 -> 0.21로 내려갔다(27/33). QR은 변화 없음 —
+대비만 낮고 노이즈가 없으면 블러가 도움이 안 되기 때문이다(당연한 결과).
+
+전체 코퍼스에서는 조건별 이득이 평균에 희석된다(악조건 혼합 ok 버킷:
+검출 49.1% -> 49.5%, 평균 118.9 -> 134.6ms). N1(회전)과 같은 패턴이다 —
+노이즈가 있는 현장에서는 명백한 이득, 아니면 실패 프레임에서만 붙는 비용.
+vscan_config_t.disable_denoise_rescue 로 끌 수 있고, max_frame_ms와 함께
+쓰면 상한도 걸린다.
+
+40종 회귀: 세 경로 모두 37/40 유지.
+verify_accuracy에 --no-denoise 추가.
+---
+ include/vscan.h                       | 10 ++++++++
+ include/vscan_internal/pipeline.hpp   | 15 ++++++++++++
+ include/vscan_internal/preprocess.hpp | 13 ++++++++++
+ src/pipeline.cpp                      | 10 ++++++++
+ src/preprocess.cpp                    | 35 +++++++++++++++++++++++++++
+ src/vscan_c_api.cpp                   |  1 +
+ tools/verify_accuracy.cpp             |  5 +++-
+ 7 files changed, 88 insertions(+), 1 deletion(-)
+
+diff --git a/include/vscan.h b/include/vscan.h
+index 2667d7c..efa7df6 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -247,6 +247,16 @@ typedef struct {
+      * 바로 통과하므로 사실상 비용이 없다.
+      */
+     int disable_blank_frame_skip;
++
++    /*
++     * [노이즈 구제] 0 = 켜짐(기본), 1 = 끔.
++     * 모든 단계가 실패했을 때 3x3 박스 블러를 먹이고 한 번 더 본다.
++     * 노이즈가 심하면 이진화가 무너져 통째로 못 읽는데, 모듈이 노이즈보다
++     * 크면 살짝 뭉개는 것만으로 살아난다(실측: 노이즈 시그마 20~60 구간에서
++     * Code128 23.8% -> 100%, 게다가 평균 441ms -> 22ms로 더 빨라진다).
++     * 실패한 프레임에서만 도는 비용이다.
++     */
++    int disable_denoise_rescue;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index c93627e..1312653 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -166,6 +166,21 @@ struct PipelineConfig {
+      * 비용은 축소본 1회 스캔(~1ms 미만)이고, 코드가 있는 프레임은 첫 블록
+      * 몇 개에서 바로 통과하므로 사실상 공짜다.
+      */
++    /*
++     * [노이즈 구제] 0 = 켜짐(기본), 1 = 끔.
++     *
++     * 모든 단계가 실패했을 때, 3x3 박스 블러를 한 번 먹이고 다시 본다.
++     * 센서 노이즈가 심하면 이진화가 무너져 코드가 통째로 안 읽히는데,
++     * 모듈이 노이즈 상관거리보다 크면 살짝 뭉개는 것만으로 신호가 살아난다.
++     * 실측(모듈 4px, 노이즈 시그마 20~60 스윕): Code128 23.8% -> 100%,
++     * QR 76.2% -> 100%. 게다가 **더 빨라진다** — 실패해서 폴백 체인을
++     * 끝까지 도는 대신 첫 패스에서 성공하기 때문(441ms -> 22ms).
++     *
++     * 실패한 프레임에서만 도는 비용이고, 작은 모듈(2px 이하)은 블러로
++     * 오히려 뭉개지므로 그 경우엔 여기서도 실패한다 — 손해는 한 패스뿐.
++     */
++    int disableDenoiseRescue = 0;
++
+     int disableBlankFrameSkip = 0;
+     // 블록 하나가 "구조가 있다"고 인정받는 최소 명암차(LSB). 노이즈 시그마의
+     // 몇 배로 잡아야 안전하다 — 기본 24는 §3.9에서 측정한 대비 붕괴점
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 847d853..e32feb7 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -52,5 +52,18 @@ void rotateAroundPoint(const GrayView& src, float degrees, float pivotX, float p
+ // 부작용 최소화 우선).
+ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& out);
+ 
++/*
++ * 3x3 박스 블러 (가로/세로 분리형).
++ *
++ * 용도는 하나다: **노이즈 구제 단계**. 센서 노이즈가 심하면 이진화가 무너져
++ * 코드가 통째로 안 읽히는데, 모듈 크기가 노이즈 상관거리보다 크면 살짝만
++ * 뭉개도 신호가 살아난다. 실측(모듈 4px, 노이즈 시그마 20~60 스윕):
++ * Code128 검출 23.8% -> 100%, QR 76.2% -> 100%.
++ *
++ * 분리형이라 픽셀당 덧셈 4회 수준이고, 자동 벡터화가 잘 걸리는 형태로
++ * 썼다(누적 변수 없이 인접 3픽셀 합 — [[vscan-lite-deskew-neon]]과 같은 이유).
++ */
++void boxBlur3x3(const GrayView& src, GrayImage& out);
++
+ } // namespace vscan
+ 
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 70aa914..859803e 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -174,6 +174,16 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
+     if (budgetExceeded()) return hits;
+ 
++    // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
++    // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
++    // 가장 싸고, 실측상 가장 자주 걸린다(§3.14). [[vscan-lite-denoise-rescue]]
++    if (!cfg_.disableDenoiseRescue && !budgetExceeded()) {
++        GrayImage smoothed;
++        boxBlur3x3(image, smoothed);
++        auto dnHits = processViewCore(GrayView(smoothed));
++        if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
++    }
++
+     // [DPM/점각인 구제] processViewCore()가 풀옵션으로도 빈손이면,
+     // DPM(레이저 점각인) 코드일 가능성을 본다. 실물 비교 대상 리더기 대조
+     // 검증까지 완료된 구제책 — §6.4 대화 참고. 위치 탐색이 필요
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 70ec36d..c272f0e 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -1,6 +1,7 @@
+ #include "vscan_internal/preprocess.hpp"
+ #include <cmath>
+ #include <cstring>
++#include <vector>
+ #include <stdexcept>
+ 
+ #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+@@ -257,4 +258,38 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage&
+     for (size_t i = 0; i < out.pixels.size(); ++i) out.pixels[i] = static_cast<uint8_t>(255 - closed[i]);
+ }
+ 
++void boxBlur3x3(const GrayView& src, GrayImage& out) {
++    const int W = src.width, H = src.height;
++    const int stride = src.stride > 0 ? src.stride : W;
++    out.width = W;
++    out.height = H;
++    out.pixels.resize(static_cast<size_t>(W) * H);
++    if (W < 3 || H < 3) {
++        for (int y = 0; y < H; ++y)
++            std::memcpy(out.pixels.data() + static_cast<size_t>(y) * W,
++                        src.pixels + static_cast<size_t>(y) * stride, W);
++        return;
++    }
++
++    // 1패스: 가로 3탭 합 (16비트 중간 버퍼)
++    std::vector<uint16_t> tmp(static_cast<size_t>(W) * H);
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
++        uint16_t* __restrict t = tmp.data() + static_cast<size_t>(y) * W;
++        t[0] = static_cast<uint16_t>(in[0] + in[0] + in[1]);
++        for (int x = 1; x < W - 1; ++x)
++            t[x] = static_cast<uint16_t>(in[x - 1] + in[x] + in[x + 1]);
++        t[W - 1] = static_cast<uint16_t>(in[W - 2] + in[W - 1] + in[W - 1]);
++    }
++    // 2패스: 세로 3탭 합 -> /9
++    for (int y = 0; y < H; ++y) {
++        const uint16_t* __restrict t0 = tmp.data() + static_cast<size_t>(y > 0 ? y - 1 : 0) * W;
++        const uint16_t* __restrict t1 = tmp.data() + static_cast<size_t>(y) * W;
++        const uint16_t* __restrict t2 = tmp.data() + static_cast<size_t>(y < H - 1 ? y + 1 : H - 1) * W;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
++        for (int x = 0; x < W; ++x)
++            o[x] = static_cast<uint8_t>((t0[x] + t1[x] + t2[x]) / 9);
++    }
++}
++
+ } // namespace vscan
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index 0a027d1..e55c997 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -105,6 +105,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->enable_dpm_rescue) pcfg.enableDPMRescue = true;
+         if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
+         if (cfg->disable_blank_frame_skip) pcfg.disableBlankFrameSkip = 1;
++        if (cfg->disable_denoise_rescue) pcfg.disableDenoiseRescue = 1;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+diff --git a/tools/verify_accuracy.cpp b/tools/verify_accuracy.cpp
+index e6c5353..e2d1fa4 100644
+--- a/tools/verify_accuracy.cpp
++++ b/tools/verify_accuracy.cpp
+@@ -201,6 +201,7 @@ static void usage(const char* argv0) {
+         "  --max-frame-ms N 프레임 시간 예산(0=무제한). 폴백 꼬리를 자른다\n"
+         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
+         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
++        "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
+         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
+         "  --stdin          디렉토리 대신 stdin 스트림을 읽는다 (디스크 0). 아래 참고\n"
+         "  --tag-sort n|i   태그표 정렬: name(스윕용) / imgs(기본, 이미지 수)\n"
+@@ -217,7 +218,7 @@ int main(int argc, char** argv) {
+     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
+     int reps = 0, limit = 0, stride = 1, overlap = 500;
+     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
+-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0;
++    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0;
+ 
+     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
+         std::string a = argv[i];
+@@ -240,6 +241,7 @@ int main(int argc, char** argv) {
+         else if (a == "--max-frame-ms") maxFrameMs = atoi(next());
+         else if (a == "--no-deskew") noDeskew = 1;
+         else if (a == "--no-blank-skip") noBlankSkip = 1;
++        else if (a == "--no-denoise") noDenoise = 1;
+         else if (a == "--dump-mismatch") dumpMismatch = 1;
+         else if (a == "--stdin") stdinMode = 1;
+         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
+@@ -340,6 +342,7 @@ int main(int argc, char** argv) {
+             cfg.max_frame_ms = maxFrameMs;
+             cfg.disable_1d_deskew_rescue = noDeskew;
+             cfg.disable_blank_frame_skip = noBlankSkip;
++            cfg.disable_denoise_rescue = noDenoise;
+             // "아이템당 코드 개수를 아는 현장" 사용법: 빠른 경로가 이 개수를
+             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
+             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
+-- 
+2.43.0
+

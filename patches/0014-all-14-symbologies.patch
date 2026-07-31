@@ -1,0 +1,566 @@
+From d91e21c9d6c49b638605ffa39135281d07e81e79 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 23:18:20 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=8B=AC=EB=B3=BC=EB=A1=9C=EC=A7=80=2014?=
+ =?UTF-8?q?=EC=A2=85=20=EC=A0=84=EC=88=98=20=EC=83=9D=EC=84=B1=20+=20?=
+ =?UTF-8?q?=EC=B6=95=EB=B3=84=20=ED=8C=90=EB=8F=85=20=ED=8A=B9=EC=84=B1=20?=
+ =?UTF-8?q?=EC=B8=A1=EC=A0=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+생성기가 5종(QR/Code128/EAN13/Code39/ITF)만 만들었는데 라이브러리가 지원
+선언한 건 14종이다. 나머지를 다 만들고 같은 축으로 쟀다.
+
+생성 경로 통일: 심볼로지마다 인코더가 제각각이라(비트열/PIL 이미지/행렬)
+전부 **모듈 격자로 정규화**한 뒤 면적 샘플링으로 다시 그린다. 그래야
+"모듈 4px"가 심볼로지를 가로질러 같은 뜻이 된다.
+추가 의존성(선택): pdf417gen, ppf-datamatrix, treepoem+ghostscript.
+
+정답 문자열을 디코더 표기에 맞췄다(규격과 다른 자리):
+- Codabar는 시작/정지 문자를 빼고 반환
+- DataBar는 AI 없이 GTIN-14만 (DataBar Expanded는 "(01)..." 그대로)
+- Code93은 C/K 체크문자가 필수인데 BWIPP 기본이 꺼짐 -> 켜야 디코더가 받는다
+14종 전부 깨끗한 조건에서 정답 텍스트까지 왕복 검증 통과(14/14).
+
+측정 결과 (§3.15): 1D 11종은 회전 40~46/46인데
+  DataMatrix 24/46 (48도부터 전부 실패), PDF417 7/46 (정면/직각 부근만)
+저코히런스 후보에 45도 회전을 강제해도 개선이 없어서, 원인은 회전 크롭을
+최근접 이웃으로 리샘플하는 현재 구현이 조밀한 2D를 망가뜨리는 쪽으로 좁혀진다.
+반대로 저대비는 2D가 강하다(DataMatrix 0.11 / PDF417 0.07 vs 1D 0.19~0.31).
+배치 선택 가이드와 로드맵 M1~M4를 §3.15~3.16에 정리했다.
+
+생성기 버그 하나 더: 격자 렌더 전환 중 1D를 "콰이어트존 먼저, 세로 복제
+나중"으로 처리해 막대가 1모듈 높이로 남았다(Code128 각도 91/91 -> 2/91).
+순서를 뒤집어 고쳤고 고친 뒤 91/91 — 44도 잔여 실패까지 사라졌다.
+---
+ PROJECT_NOTES.md         |  75 ++++++++-
+ README.md                |   5 +
+ tools/generate_corpus.py | 348 +++++++++++++++++++++++++++++++--------
+ 3 files changed, 358 insertions(+), 70 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index efd15c7..e1d8a64 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -20,7 +20,8 @@
+ | §3 | **실측 벤치마크 데이터 전부** | 성능 관련 판단할 때 |
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+-| §3.11~3.12 | **2차 측정 결과 + 현재 로드맵** | 무엇부터 할지 정할 때 |
++| §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
++| §3.14~3.16 | N1~N6 결과 + **심볼로지 14종 전수 측정 + 현재 로드맵(M)** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+@@ -1162,6 +1163,78 @@ theta = 0.5 * atan2(2*jxy, jxx - jyy)      // 그래디언트 방향 = 막대에
+ 
+ ---
+ 
++### 3.15 지원 심볼로지 14종 전수 측정 (2026-07-30) `[x86]`
++
++생성기가 QR/Code128/EAN13/Code39/ITF 5종만 만들었는데, 라이브러리가 지원한다고
++선언한 건 14종이다. 나머지를 다 만들어 같은 축으로 쟀다.
++
++#### 생성 경로를 통일했다 — "모듈 격자"
++심볼로지마다 인코더가 제각각이다(비트열 / PIL 이미지 / 행렬). 이미지를 그대로
++리사이즈하면 모듈 폭 비율이 깨진다(§3.8에서 겪은 가짜 실패). 그래서 전부
++**모듈 격자로 정규화**한 뒤 원하는 모듈 픽셀 크기로 면적 샘플링해 다시 그린다.
++그래야 "모듈 4px"가 심볼로지를 가로질러 같은 뜻이 된다 — 비교의 전제다.
++
++추가 의존성(선택): `pdf417gen`, `ppf-datamatrix`, `treepoem`+`ghostscript`.
++없으면 그 심볼로지만 빠지고 나머지는 그대로 돈다.
++
++#### 정답 문자열은 규격이 아니라 **디코더 표기**에 맞춰야 한다
++검증에서 세 군데가 어긋났다. 나중에 또 헷갈릴 자리라 남긴다:
++- **Codabar**: 시작/정지 문자(A~D)를 빼고 반환한다
++- **DataBar**: AI 표기 없이 GTIN-14만 (반면 **DataBar Expanded**는 `(01)…` 그대로)
++- **Code93**: C/K 체크문자가 규격상 필수인데 BWIPP 기본이 꺼짐 — 켜지 않으면
++  디코더가 정당하게 거부한다. 맞추기 전엔 "판독 실패"로 보였다
++
++#### 결과 (모듈 4px 고정, two_stage)
++| 심볼로지 | 회전 0~90° | 최소 모듈 | 블러 σ | 노이즈 σ | 대비 |
++|---|---|---|---|---|---|
++| QR | **46/46** | 1.0px | 2.0 | 한계없음 | 0.23 |
++| Code39 / Code93 / Codabar / DataBar / DataBarExp / UPC-A / UPC-E / EAN-13 | **46/46** | 1.0px | 2.75~5.75 | 한계없음 | 0.19~0.27 |
++| Code128 | 45/46 | 1.0px | 2.75 | 한계없음 | 0.19 |
++| EAN-8 | 44/46 | 1.0px | 2.75 | 한계없음 | 0.27 |
++| ITF | 40/46 | 1.0px | 5.75 | 한계없음 | 0.27 |
++| **DataMatrix** | **24/46** | 1.5px | 1.75 | 한계없음 | **0.11** |
++| **PDF417** | **7/46** | 1.5px | 2.0 | **18** | **0.07** |
++
++#### 핵심: 2D 두 종이 회전에서 무너진다
++- **PDF417 7/46** — 0~2°와 84~90° 부근에서만 읽힌다. 사실상 정면 전용.
++- **DataMatrix 24/46** — 0~46°는 전부 성공, **48°부터 전부 실패**(경계가 칼같다).
++- 반면 1D 11종은 8종이 만점, 나머지도 40~45/46. QR도 46/46.
++
++1D 회전 구제(§3.14 N1)는 2D에 안 걸린다. 다만 **구제를 안 걸어서가 아니다** —
++저코히런스 후보에 45도 회전을 강제로 한 번 더 시도해봐도 DataMatrix 24/46
++그대로, PDF417은 7→8/46이었다. 즉 회전된 크롭을 **최근접 이웃으로 리샘플하는
++현재 구현**(`rotateAroundPoint`)이 조밀한 2D 패턴을 망가뜨리는 쪽이 유력하다.
++1D는 막대가 굵어 영향이 적었을 뿐이다. → 로드맵 M1.
++
++#### 배치 선택 가이드 (측정에서 바로 나오는 것)
++| 조건 | 권장 | 피할 것 |
++|---|---|---|
++| 라벨 방향 고정 안 됨 | QR, Code39/93, Codabar, DataBar | PDF417, DataMatrix, ITF |
++| 인쇄 품질 나쁨(저대비) | DataMatrix(0.11), PDF417(0.07) | EAN/UPC 계열(0.27) |
++| 코드가 작게 잡힘 | QR, 1D 전반(1.0px) | DataMatrix(1.5px) |
++| 초점 흔들림 | UPC-E/ITF/Codabar/DataBar(σ5+) | DataMatrix(σ1.75) |
++| 회전 + 저대비 동시 | **QR** — 두 축 모두 상위인 유일한 심볼로지 | — |
++
++#### 생성기 버그 하나 더 (기록)
++격자 렌더로 바꾸면서 1D를 **콰이어트존 먼저, 세로 복제 나중**으로 처리해
++막대가 1모듈 높이로 남았다. Code128 각도 스윕이 91/91 → 2/91로 무너져서
++발견했다. 순서를 뒤집어 고쳤고, 고친 뒤에는 **91/91**(이전 90/91보다 개선 —
++44° 잔여 실패도 함께 사라졌다). 회귀 게이트에 심볼로지별 회전 성공 수를
++넣어야 이런 걸 자동으로 잡는다 → 로드맵 M4.
++
++---
++
++### 3.16 로드맵 M 시리즈 (심볼로지 전수 측정 기반)
++
++| # | 항목 | 근거 | 기대 |
++|---|---|---|---|
++| M1 | **회전 크롭 리샘플을 쌍선형으로** | DataMatrix 48°벽, PDF417 7/46. 각도 강제 시도로는 개선 없음 | 2D 회전 커버리지 |
++| M2 | 구제 후보 판정을 2D까지 확장 | DataMatrix는 코히런스가 낮아 후보 자체가 안 잡힘 | M1 이후에 |
++| M3 | PDF417 노이즈 한계(σ18) 조사 | 12종이 한계 없는데 PDF417만 끊김. 적층형이라 3x3 블러가 행을 뭉갤 가능성 | 세로 1x3 커널 시험 |
++| M4 | 게이트에 심볼로지 회전 스윕 추가 | 1D 렌더 버그(91/91→2/91)를 눈으로 발견했다 | 자동 감지 |
++
++---
++
+ ## §4. 심볼로지 커버리지
+ 
+ ### 비교 대상 리더기 공식 스펙 (제조사 문서 확인)
+diff --git a/README.md b/README.md
+index 9e4401c..95bc686 100644
+--- a/README.md
++++ b/README.md
+@@ -205,6 +205,11 @@ python3 tools/generate_corpus.py --sweep angle:0:359:1 --sweep noise:0:50:2 --es
+ python3 tools/generate_corpus.py -o ./corpus -n 2000 --max-disk-gb 10
+ ```
+ 
++**심볼로지 14종 전부** 생성한다: QR, DataMatrix, PDF417, Code128, Code39,
++Code93, EAN-13, EAN-8, UPC-A, UPC-E, ITF, Codabar, DataBar, DataBar Expanded.
++(추가 의존성 `pip install pdf417gen ppf-datamatrix treepoem` + `ghostscript` —
++없으면 그 심볼로지만 빠진다. 심볼로지별 판독 특성은 PROJECT_NOTES §3.15)
++
+ 스윕 축: `angle module contrast bright blur motion noise persp curve glare
+ shadow count sym ec` (`--sweep AXIS:START:STOP:STEP` 또는 `AXIS:v1,v2,v3`,
+ 나머지 축은 `--base k=v,k=v`로 고정). 스윕은 **결정적**이다 — 지정한 축
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index 36495d8..5dbd704 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -94,6 +94,20 @@ import qrcode
+ import barcode as pybarcode
+ from PIL import Image, ImageDraw, ImageFilter, ImageFont
+ 
++# 선택 의존성 — 없으면 해당 심볼로지만 빠지고 나머지는 그대로 동작한다.
++try:
++    import treepoem            # BWIPP(+ghostscript): Code93 / DataBar / UPC-E 등
++except Exception:
++    treepoem = None
++try:
++    from ppf.datamatrix import DataMatrix
++except Exception:
++    DataMatrix = None
++try:
++    import pdf417gen
++except Exception:
++    pdf417gen = None
++
+ # ----------------------------------------------------------------- 폰트
+ try:
+     _FNT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+@@ -126,6 +140,69 @@ DIFFICULTY = {
+ 
+ 
+ # ============================================================ 심볼 렌더링
++def _grid_from_image(img):
++    """렌더된 심볼 이미지를 **모듈 격자(불리언 행렬)**로 되돌린다.
++
++    심볼로지마다 인코더가 제각각이다(비트열을 주는 것, PIL 이미지를 주는 것,
++    행렬을 주는 것). 이미지를 그대로 리사이즈하면 모듈 폭 비율이 깨지므로
++    (§3.8의 1D 렌더링 사고), 일단 전부 모듈 격자로 정규화한 다음 우리가
++    원하는 모듈 픽셀 크기로 다시 그린다.
++
++    최소 런 길이 = 모듈 하나의 픽셀 크기라는 성질을 이용한다.
++    """
++    a = np.array(img.convert("L")) < 128          # True = 검정 모듈
++    ys, xs = np.where(a)
++    if len(xs) == 0:
++        raise ValueError("빈 심볼 이미지")
++    a = a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
++
++    def min_run(arr):
++        best = None
++        step = max(1, arr.shape[0] // 9)
++        for r in range(0, arr.shape[0], step):
++            row = arr[r]
++            idx = np.flatnonzero(np.diff(row.astype(np.int8)))
++            if idx.size == 0:
++                continue
++            runs = np.diff(np.concatenate(([-1], idx, [len(row) - 1])))
++            m = int(runs.min())
++            if m > 0:
++                best = m if best is None else min(best, m)
++        return best or 1
++
++    u = max(1, min(min_run(a), min_run(a.T)))     # 모듈은 정사각이라고 본다
++    h = max(1, int(round(a.shape[0] / u)))
++    w = max(1, int(round(a.shape[1] / u)))
++    yi = np.clip(((np.arange(h) + 0.5) * u).astype(int), 0, a.shape[0] - 1)
++    xi = np.clip(((np.arange(w) + 0.5) * u).astype(int), 0, a.shape[1] - 1)
++    return a[np.ix_(yi, xi)]                       # 셀 중심 샘플링
++
++
++def _grid_to_image(grid, module_px, quiet=4, rows=None, quiet_y=None):
++    """모듈 격자를 목표 모듈 픽셀 크기로 렌더 (면적 샘플링).
++
++    rows: 1D용. 한 줄짜리 격자를 이 모듈 수만큼 세로로 복제한 뒤 콰이어트존을
++          붙인다. **복제를 먼저 해야 한다** — 콰이어트존을 먼저 붙이고 늘리면
++          막대가 1모듈 높이로 남아 세로로 잡아늘린 실뭉치가 된다(실측: 1D
++          각도 스윕이 90/91에서 2/91로 무너졌다).
++    quiet_y: 세로 콰이어트존(모듈). 미지정이면 quiet와 같다.
++
++    정수배가 아닌 모듈 폭도 경계 위치가 정확하다 — 8배로 정확히 키운 뒤
++    BOX(면적 평균)로 목표 크기에 맞춘다. 카메라가 하는 일과 같다.
++    """
++    g = np.asarray(grid, dtype=bool)
++    if rows:
++        g = np.repeat(g[:1], max(1, int(rows)), axis=0)
++    qy = quiet if quiet_y is None else quiet_y
++    g = np.pad(g, ((qy, qy), (quiet, quiet)), constant_values=False)
++    H, W = g.shape
++    base = Image.fromarray(np.where(g, 0, 255).astype(np.uint8), mode="L")
++    up = base.resize((W * 8, H * 8), Image.NEAREST)
++    tw = max(8, int(round(W * module_px)))
++    th = max(8, int(round(H * module_px)))
++    return up.resize((tw, th), Image.BOX)
++
++
+ def _mod_tag(mod_px):
+     """모듈 하나가 몇 픽셀인지 — 난이도를 실제로 지배하는 값이라 태그로 남긴다.
+ 
+@@ -207,79 +284,194 @@ def _linear_render(cls, payload, module_px, ratio, box_h, **wopts):
+ _LINEAR = {
+     "CODE128": (pybarcode.Code128, "CODE_128", {}),
+     "EAN13":   (pybarcode.EAN13,   "EAN_13",   {}),
++    "EAN8":    (pybarcode.EAN8,    "EAN_8",    {}),
++    "UPCA":    (pybarcode.UPCA,    "UPC_A",    {}),
+     "CODE39":  (pybarcode.Code39,  "CODE_39",  {"add_checksum": False}),
+     "ITF":     (pybarcode.ITF,     "ITF",      {}),
++    "CODABAR": (pybarcode.CODABAR, "CODABAR",  {}),
++}
++
++# BWIPP(treepoem)로만 만들 수 있는 것들. (BWIPP 타입, vscan 심볼로지 이름)
++_BWIPP = {
++    # (BWIPP 타입, vscan 심볼로지 이름, BWIPP 옵션)
++    # Code93은 C/K 체크문자가 규격상 필수인데 BWIPP 기본이 꺼짐이라,
++    # 켜지 않으면 zxing이 (정당하게) 거부한다 — 실측으로 확인.
++    "CODE93":     ("code93",          "CODE_93",            {"includecheck": True}),
++    "UPCE":       ("upce",            "UPC_E",              {}),
++    "DATABAR":    ("databaromni",     "DATA_BAR",           {}),
++    "DATABAREXP": ("databarexpanded", "DATA_BAR_EXPANDED",  {}),
+ }
+ 
++ALL_SYMBOLOGIES = (["QR", "DATAMATRIX", "PDF417"] + sorted(_LINEAR) + sorted(_BWIPP))
+ 
+-def _linear_payload(kind, rng, n):
+-    if kind == "CODE128":
+-        return "".join(rng.choice(list(ALPHA), size=n))
+-    if kind == "CODE39":
+-        return "".join(rng.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), size=n))
++
++def _payload_for(kind, rng):
++    """심볼로지별 유효 페이로드와 **디코더가 돌려줄 문자열**(정답)을 만든다.
++
++    체크디짓 규칙이 심볼로지마다 다르고, zxing이 돌려주는 표기도 제각각이라
++    (UPC-E는 12자리 UPC-A로 펼쳐서 준다) 여기서 한 번에 맞춘다.
++    """
++    D = lambda n: "".join(str(int(d)) for d in rng.integers(0, 10, size=n))
+     if kind == "EAN13":
+-        # 첫 자리를 0으로 두면 안 된다: 선행 0인 EAN-13은 zxing이 UPC-A(12자리)로
+-        # 돌려주기 때문에 정답 문자열과 형식이 어긋난다(정답이 틀린 게 아니라
+-        # 표기가 다른 것 — 텍스트 대조 지표가 오염된다).
+-        return str(int(rng.integers(1, 10))) + \
+-            "".join(str(int(d)) for d in rng.integers(0, 10, size=11))       # 길이 고정
++        return str(int(rng.integers(1, 10))) + D(11), None      # 선행 0은 UPC-A 축약을 부른다
++    if kind == "EAN8":
++        return D(7), None
++    if kind == "UPCA":
++        return D(11), None
+     if kind == "ITF":
+-        return "".join(str(int(d)) for d in rng.integers(0, 10, size=max(2, (n // 2) * 2)))
++        return D(max(2, int(rng.integers(2, 8)) * 2)), None
++    if kind == "CODABAR":
++        # python-barcode는 시작/정지 문자를 포함해서 넣어야 한다.
++        body = D(int(rng.integers(4, 10)))
++        return "A" + body + "B", None
++    if kind == "CODE39":
++        return "".join(rng.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
++                                  size=int(rng.integers(6, 14)))), None
++    if kind == "CODE93":
++        t = "".join(rng.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
++                               size=int(rng.integers(6, 12))))
++        return t, t
++    if kind == "UPCE":
++        # BWIPP은 체크디짓 포함 8자리를 받는다. 체크디짓은 UPC-A로 펼친 뒤 계산.
++        body = D(6)
++        chk = _gtin_check(_upce_expand("0", body))
++        return "0" + body + str(chk), None
++    if kind == "DATABAR":
++        # BWIPP databaromni는 GS1 AI 표기를 받는다: "(01)" + GTIN-14.
++        # 앞자리를 0으로 채워야(=GTIN-13 이하) 실제 유통 코드와 형태가 맞는다.
++        base = "000" + D(10)
++        return "(01)" + base + str(_gtin_check(base)), None
++    if kind == "DATABAREXP":
++        base = D(13)
++        return "(01)" + base + str(_gtin_check(base)), None
++    if kind == "PDF417":
++        return "VSCAN-" + "".join(rng.choice(list(ALPHA), size=int(rng.integers(6, 24)))), None
++    if kind == "DATAMATRIX":
++        return "VSCAN-" + "".join(rng.choice(list(ALPHA), size=int(rng.integers(6, 24)))), None
++    return "".join(rng.choice(list(ALPHA), size=int(rng.integers(6, 20)))), None
++
++
++def _gtin_check(digits):
++    """GS1 표준 체크디짓 (EAN-8/13, UPC-A, GTIN-14 공통).
++    체크 자리를 뺀 데이터에서 오른쪽부터 3,1,3,1... 가중합."""
++    t = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(digits)))
++    return (10 - t % 10) % 10
++
++
++def _upce_expand(ns, body):
++    """UPC-E 6자리 본문을 UPC-A 11자리(체크 제외)로 펼친다. 마지막 자리 규칙."""
++    d = body
++    x = d[5]
++    if x in "012":
++        return ns + d[0] + d[1] + x + "0000" + d[2] + d[3] + d[4]
++    if x == "3":
++        return ns + d[0] + d[1] + d[2] + "00000" + d[3] + d[4]
++    if x == "4":
++        return ns + d[0] + d[1] + d[2] + d[3] + "00000" + d[4]
++    return ns + d[0] + d[1] + d[2] + d[3] + d[4] + "0000" + x
++
++
++def _grid_for(kind, payload):
++    """심볼로지 -> (모듈 격자, 정답 텍스트, 2D 여부).
++
++    1D는 python-barcode의 비트열(build())을 그대로 쓰고, 나머지는 인코더가
++    주는 행렬이나 렌더 이미지를 _grid_from_image()로 정규화한다.
++    """
++    if kind in _LINEAR:
++        cls, symname, wopts = _LINEAR[kind]
++        obj = cls(payload, **wopts)
++        bits = obj.build()[0]
++        grid = np.array([[c == "1" for c in bits]], dtype=bool)
++        text = obj.get_fullcode()
++        # Codabar는 디코더가 시작/정지 문자를 빼고 준다(실측).
++        if kind == "CODABAR" and len(text) > 2 and text[0].isalpha() and text[-1].isalpha():
++            text = text[1:-1]
++        return grid, symname, text, False
++    if kind == "QR":
++        q = qrcode.QRCode(border=0, box_size=1)
++        q.add_data(payload); q.make(fit=True)
++        return np.array(q.get_matrix(), dtype=bool), "QR_CODE", payload, True
++    if kind == "DATAMATRIX":
++        if DataMatrix is None:
++            raise RuntimeError("ppf-datamatrix 미설치")
++        m = DataMatrix(payload).matrix
++        return np.array(m, dtype=bool), "DATA_MATRIX", payload, True
++    if kind == "PDF417":
++        if pdf417gen is None:
++            raise RuntimeError("pdf417gen 미설치")
++        img = pdf417gen.render_image(pdf417gen.encode(payload, columns=6),
++                                     scale=3, ratio=3, padding=0)
++        return _grid_from_image(img), "PDF417", payload, True
++    if kind in _BWIPP:
++        if treepoem is None:
++            raise RuntimeError("treepoem/ghostscript 미설치")
++        btype, symname, bopts = _BWIPP[kind]
++        img = treepoem.generate_barcode(barcode_type=btype, data=payload, options=dict(bopts))
++        grid = _grid_from_image(img)
++        # 디코더가 돌려주는 표기에 맞춘다(실측으로 확인):
++        #  - Codabar: 시작/정지 문자(A..D)를 빼고 준다
++        #  - DataBar Omnidirectional: AI 표기 없이 GTIN-14만 준다
++        #    (반면 DataBar Expanded는 "(01)..." 형태를 그대로 준다)
++        text = payload
++        if kind == "DATABAR" and text.startswith("(01)"):
++            text = text[4:]
++        is2d = kind not in ("CODE93", "UPCE", "DATABAR", "DATABAREXP")
++        if not is2d:
++            # 1D는 모든 행이 같으므로 대표 행 하나로 접는다 — 이후 렌더에서
++            # 원하는 높이로 늘린다(늘리기는 손실이 없다).
++            grid = grid[grid.shape[0] // 2:grid.shape[0] // 2 + 1]
++        return grid, symname, text, is2d
+     raise ValueError(kind)
+ 
+ 
+ def make_symbol(kind, rng, box_w, box_h, mod_range):
+     """(이미지, 심볼로지 이름, 정답 텍스트, 태그리스트, 실제 모듈 픽셀크기).
+ 
+-    box_w/box_h = 배치 가능한 최대 크기. mod_range = 모듈 픽셀 크기 범위
+-    (난이도 프리셋에서 옴) — 이걸 먼저 정하고 거기서 코드 크기가 나온다.
+-    박스에 안 들어가면 모듈을 줄이고, 그래도 안 되면 데이터를 줄인다.
++    모든 심볼로지가 같은 경로를 탄다: 인코더 -> 모듈 격자 -> 목표 모듈
++    픽셀 크기로 면적 샘플링 렌더. 그래야 "모듈 px"가 심볼로지를 가로질러
++    같은 의미를 갖는다(리포트가 심볼로지를 비교하려면 이게 전제다).
+     """
+     # 로그 균등: 작은 모듈(어려움) 쪽 표본이 선형 균등보다 충분히 나온다
+     mod_px = float(math.exp(rng.uniform(math.log(mod_range[0]), math.log(mod_range[1]))))
+ 
+-    if kind == "QR":
+-        n = int(rng.integers(6, 40))
+-        ec = rng.choice([qrcode.constants.ERROR_CORRECT_L, qrcode.constants.ERROR_CORRECT_M,
+-                         qrcode.constants.ERROR_CORRECT_Q, qrcode.constants.ERROR_CORRECT_H])
+-        limit = int(min(box_w, box_h))
+-        for _ in range(4):
+-            payload = "VSCAN-" + "".join(rng.choice(list(ALPHA), size=n))
+-            q = qrcode.QRCode(border=2, box_size=6, error_correction=ec)
+-            q.add_data(payload); q.make(fit=True)
+-            modules = q.modules_count + 2 * q.border
+-            px = int(round(modules * mod_px))
+-            if px <= limit:
+-                break
+-            if mod_px > mod_range[0]:                 # 먼저 모듈을 줄여본다
+-                mod_px = max(mod_range[0], limit / modules)
+-                px = int(round(modules * mod_px))
+-                if px <= limit:
+-                    break
+-            n = max(4, n // 2)                        # 그래도 안 되면 데이터를 줄인다
+-        px = max(21, min(px, limit))
+-        img, real_mod = _qr_img(payload, px, ec)
+-        return img, "QR_CODE", payload, [_mod_tag(real_mod)], real_mod
+-
+-    cls, symname, wopts = _LINEAR[kind]
+-    n = int(rng.integers(6, 20))
+-    ratio = float(rng.uniform(0.16, 0.45))            # 높이/폭
++    payload, _ = _payload_for(kind, rng)
+     for _ in range(4):
+-        payload = _linear_payload(kind, rng, n)
+-        img, full = _linear_render(cls, payload, mod_px, ratio, box_h, **wopts)
+-        if img.width <= box_w:
+-            break
+-        if mod_px > mod_range[0]:                     # 먼저 모듈을 줄인다
+-            mod_px = max(mod_range[0], mod_px * box_w / img.width)
+-            img, full = _linear_render(cls, payload, mod_px, ratio, box_h, **wopts)
++        try:
++            grid, symname, text, is2d = _grid_for(kind, payload)
++        except Exception:
++            raise
++        gh, gw = grid.shape
++        quiet = 2 if is2d else 10          # 1D는 규격상 10모듈 콰이어트존
++        if is2d:
++            total_w = (gw + 2 * quiet) * mod_px
++            total_h = (gh + 2 * quiet) * mod_px
++            limit = min(box_w, box_h)
++            if max(total_w, total_h) > limit:
++                mod_px = max(mod_range[0], mod_px * limit / max(total_w, total_h))
++            img = _grid_to_image(grid, mod_px, quiet=quiet)
++            if img.width <= box_w and img.height <= box_h:
++                break
++        else:
++            ratio = float(rng.uniform(0.16, 0.45))
++            total_w = (gw + 2 * quiet) * mod_px
++            if total_w > box_w:
++                mod_px = max(mod_range[0], mod_px * box_w / total_w)
++            # 막대 높이를 **모듈 수로** 정한 뒤 렌더한다(복제 -> 콰이어트존 순서).
++            bar_rows = max(4, int(round(total_w * ratio / max(0.5, mod_px))))
++            img = _grid_to_image(grid, mod_px, quiet=quiet, rows=bar_rows, quiet_y=2)
++            if img.height > box_h:
++                bar_rows = max(4, int(bar_rows * box_h / img.height))
++                img = _grid_to_image(grid, mod_px, quiet=quiet, rows=bar_rows, quiet_y=2)
+             if img.width <= box_w:
+                 break
+-        if kind == "EAN13":                           # 길이 고정 심볼은 축소만
+-            mod_px *= box_w / img.width
+-            img = img.resize((int(box_w), img.height), Image.NEAREST)
++        # 안 들어가면 페이로드를 줄여 다시(길이 고정 심볼은 모듈만 줄어든다)
++        if len(payload) > 6 and kind not in ("EAN13", "EAN8", "UPCA", "UPCE", "DATABAR"):
++            payload = payload[:max(4, len(payload) * 2 // 3)]
++        else:
+             break
+-        n = max(4, n // 2)                            # 그래도 안 되면 데이터를 줄인다
+-    return img, symname, full, [_mod_tag(mod_px)], mod_px
++    if img.width > box_w or img.height > box_h:
++        img = img.resize((min(img.width, int(box_w)), min(img.height, int(box_h))), Image.BOX)
++    return img, symname, text, [_mod_tag(mod_px), "sym-" + kind], mod_px
+ 
+ 
+ # ============================================================ 코드 단위 열화
+@@ -799,6 +991,14 @@ SWEEP_HELP = {
+     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
+     "shadow": "그림자 밝기 배율 (1.0=없음)",
+ }
++_SWEEP_PAYLOAD = {
++    "QR": "VSCAN-SWEEP-0001", "DATAMATRIX": "VSCAN-SWEEP-01", "PDF417": "VSCAN-SWEEP-01",
++    "CODE128": "VSCAN-SWEEP-01", "CODE39": "VSCANSWEEP01", "CODE93": "VSCANSWEEP01",
++    "EAN13": "1234567890128", "EAN8": "12345670", "UPCA": "123456789012",
++    "UPCE": "01234565", "ITF": "12345670", "CODABAR": "A12345670B",
++    "DATABAR": "(01)00012345678905", "DATABAREXP": "(01)00012345678905",
++}
++
+ _EC = {"L": qrcode.constants.ERROR_CORRECT_L, "M": qrcode.constants.ERROR_CORRECT_M,
+        "Q": qrcode.constants.ERROR_CORRECT_Q, "H": qrcode.constants.ERROR_CORRECT_H}
+ 
+@@ -850,28 +1050,38 @@ def sweep_fit_box(sym, cell_w, cell_h):
+ 
+ def sweep_symbol(p, box):
+     """스윕용 결정적 심볼 렌더. 페이로드가 고정이라 모듈 수도 고정이고,
+-    따라서 크기는 module 값에만 비례한다 (축 하나만 움직인다는 보장).
++    따라서 크기는 module 값에만 비례한다(축 하나만 움직인다는 보장).
+ 
+-    반환에 실제 모듈 픽셀 크기를 같이 준다 — 셀에 안 들어가서 클램프되면
+-    요청값과 달라지고, 그걸 모르면 스윕 결과를 잘못 읽는다.
++    난수 코퍼스와 **같은 렌더 경로**(인코더 -> 모듈 격자 -> 면적 샘플링)를
++    쓴다. 그래야 "모듈 px"가 심볼로지를 가로질러 같은 의미를 갖는다.
+     """
+-    if p["sym"] == "QR":
+-        payload = "VSCAN-SWEEP-0001"
+-        q = qrcode.QRCode(border=2, box_size=6, error_correction=_EC[p["ec"]])
++    kind = p["sym"]
++    payload = _SWEEP_PAYLOAD.get(kind)
++    if payload is None:
++        raise ValueError("스윕 미지원 심볼로지: " + kind)
++    if kind == "QR":
++        q = qrcode.QRCode(border=0, box_size=1, error_correction=_EC[p["ec"]])
+         q.add_data(payload); q.make(fit=True)
+-        modules = q.modules_count + 2 * q.border
+-        px = max(21, min(int(round(modules * p["module"])), box))
+-        img = q.make_image(fill_color="black", back_color="white").convert("L")
+-        return img.resize((px, px), Image.NEAREST), "QR_CODE", payload, px / modules
+-    cls, symname, wopts = _LINEAR[p["sym"]]
+-    payload = {"CODE128": "VSCAN-SWEEP-01", "CODE39": "VSCANSWEEP01",
+-               "EAN13": "1234567890128", "ITF": "12345670"}[p["sym"]]
++        grid, symname, text, is2d = np.array(q.get_matrix(), dtype=bool), "QR_CODE", payload, True
++    else:
++        grid, symname, text, is2d = _grid_for(kind, payload)
++
+     mod = float(p["module"])
+-    img, full = _linear_render(cls, payload, mod, _SWEEP_1D_RATIO, 10 ** 6, **wopts)
++    quiet = 2 if is2d else 10
++    gh, gw = grid.shape
++    span = max((gw + 2 * quiet), (gh + 2 * quiet) if is2d else 0)
++    if span * mod > box:
++        mod = box / span
++    if is2d:
++        img = _grid_to_image(grid, mod, quiet=quiet)
++    else:
++        bar_rows = max(6, int(round((gw + 2 * quiet) * _SWEEP_1D_RATIO)))
++        img = _grid_to_image(grid, mod, quiet=quiet, rows=bar_rows, quiet_y=2)
+     if img.width > box:
+-        mod *= box / img.width
+-        img = img.resize((box, max(24, int(img.height * box / img.width))), Image.NEAREST)
+-    return img, symname, full, mod
++        k = box / img.width
++        mod *= k
++        img = img.resize((int(box), max(24, int(img.height * k))), Image.BOX)
++    return img, symname, text, mod
+ 
+ 
+ def build_sweep(index, combo, cfg):
+-- 
+2.43.0
+

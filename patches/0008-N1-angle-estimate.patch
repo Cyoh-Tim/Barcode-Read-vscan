@@ -1,0 +1,232 @@
+From c2fea61ec0bb5ba51b1b108e80ebd31c6a6408e5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 22:17:45 +0000
+Subject: [PATCH] =?UTF-8?q?N1:=20=ED=9A=8C=EC=A0=84=20=EA=B5=AC=EC=A0=9C?=
+ =?UTF-8?q?=EA=B0=80=20=EA=B0=81=EB=8F=84=EB=A5=BC=20=EC=B6=94=EC=A0=95?=
+ =?UTF-8?q?=ED=95=98=EA=B2=8C=20=E2=80=94=20=EA=B5=AC=EC=A0=9C=20=EB=B9=84?=
+ =?UTF-8?q?=EC=9A=A9=2043~59%=20=EA=B0=90=EC=86=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+구제는 각도를 모른 채 45/22.5/67.5/135도를 맞을 때까지 순차 시도했다.
+실측(§3.11): 프레임당 평균 23~41ms를 쓰면서 난수 코퍼스에서 얻는 건
+500개 중 1개.
+
+그런데 각도를 추정할 재료가 이미 있었다. findDeskewCandidate()는 후보
+판정을 위해 타일마다 구조텐서(jxx/jyy/jxy)를 계산해놓고 coherence만 쓰고
+방향은 버렸다. 최대 덩어리의 텐서를 합해서(텐서는 선형이라 그냥 더하면
+된다) 지배 방향을 뽑는다:
+
+    theta = 0.5 * atan2(2*jxy, jxx - jyy)
+
+바코드에서 그래디언트는 막대에 수직이므로 theta가 곧 막대 기울기다.
+90도 배수는 zxing의 TryRotate가 처리하므로 (-45,45]로 접는다.
+추가 비용은 atan2 한 번 — 사실상 0.
+
+핵심은 각도를 아는 것 자체보다 **모를 때 그만두는 것**이었다:
+- 코히런스가 낮은 후보(텍스트 덩어리, 박스 모서리, 체커보드)는 1D
+  바코드가 아니다. 바코드라면 텐서가 반드시 한 방향을 가리킨다.
+  예전엔 그런 후보에도 4각도를 전부 돌리고 실패했고, 구제 비용의
+  대부분이 거기서 나왔다. 이제 즉시 포기한다.
+- 방향이 잡히면 추정각 1회 + 45도 1회(안전망)만 시도한다.
+  45도를 남긴 이유: 후보에 배경이 섞이면 추정이 흔들리는데, 40종 39번
+  (45도 1D)이 정확히 그 케이스라 추정만 쓰면 36/40으로 회귀했다.
+
+부호 주의: 텐서는 "기울어진 각"을 주고 rotateAroundPoint()는 그만큼
+되돌리는 방향이라 -theta를 넘긴다. 처음에 +theta로 넣었더니 각도
+커버리지가 90/91 -> 44/91로 무너졌다.
+
+실측 (동일 스크립트, reps=3, 구제 ON/OFF 차이로 구제 비용만 분리):
+| 코퍼스 | 이전 구제 비용 | 이후 | 전체 평균 |
+|--------|---------------|------|-----------|
+| mixed  | 26.6ms        | 15.1ms (-43%) | 129.8 -> 118.8ms |
+| hard   | 41.2ms        | 17.1ms (-59%) | 167.5 -> 144.3ms |
+
+커버리지/검출 변화 없음:
+- 1D 각도 스윕 90/91 유지 (44° 하나는 그대로 — 후보 탐지 쪽 별개 원인)
+- 40종 세 경로 모두 37/40 유지
+- mixed 텍스트 일치율 49.1% 동일 (오디코딩만 8 -> 7로 감소)
+---
+ include/vscan_internal/deskew1d.hpp | 17 ++++++++++
+ src/deskew1d.cpp                    | 33 +++++++++++++++++++
+ src/pipeline.cpp                    | 50 ++++++++++++++++++++---------
+ 3 files changed, 84 insertions(+), 16 deletions(-)
+
+diff --git a/include/vscan_internal/deskew1d.hpp b/include/vscan_internal/deskew1d.hpp
+index 2bea674..2486460 100644
+--- a/include/vscan_internal/deskew1d.hpp
++++ b/include/vscan_internal/deskew1d.hpp
+@@ -27,6 +27,23 @@ namespace vscan {
+ struct DeskewCandidate {
+     Rect bbox;       // 원본 프레임 좌표계의 후보 영역 (패딩 없음)
+     float coherence;  // 참고용 — 디버깅/튜닝에만 사용, 판정에는 안 씀
++
++    /*
++     * 후보 영역의 지배적 기울기 추정값(도). "이 각도만큼 되돌리면 막대가
++     * 축에 정렬된다"는 뜻이라, rotateAroundPoint()에 그대로 넘기면 된다.
++     *
++     * 구조텐서(jxx/jyy/jxy)는 후보 판정을 위해 어차피 계산하고 있었는데
++     * coherence만 쓰고 방향은 버리고 있었다 — atan2 한 번이면 나온다.
++     * 이걸 안 쓰던 시절에는 45/22.5/67.5/135도를 순차 시도해서 맞을 때까지
++     * 크롭+회전+디코드를 반복했고, 그 비용이 프레임당 평균 23.4ms
++     * (전체 디코드 시간의 21%)였다(§3.11).
++     *
++     * 값 범위는 (-45, 45]. 90도 배수 차이는 zxing의 TryRotate가 이미
++     * 처리하므로 그 안으로 접어서 준다.
++     * 추정이 불가능하면(코히런스가 낮으면) 0이 아니라 kAngleUnknown.
++     */
++    float angleDeg = 0.0f;
++    static constexpr float kAngleUnknown = 1e9f;
+ };
+ 
+ // 가장 강한(면적이 가장 큰) 후보 하나를 찾는다. 없으면 false.
+diff --git a/src/deskew1d.cpp b/src/deskew1d.cpp
+index 301b598..dbbeadf 100644
+--- a/src/deskew1d.cpp
++++ b/src/deskew1d.cpp
+@@ -50,6 +50,9 @@ struct TileStat {
+     float coherence = 0.0f;
+     float energy = 0.0f;
+     bool candidate = false;
++    // 각도 추정용 구조텐서 원소. 후보 판정에 어차피 계산하는 값이라
++    // 따로 드는 비용이 없다 — 예전엔 coherence만 뽑고 버렸다.
++    float jxx = 0.0f, jyy = 0.0f, jxy = 0.0f;
+ };
+ 
+ } // namespace
+@@ -102,6 +105,9 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
+             size_t idx = static_cast<size_t>(ty) * tilesX + tx;
+             tiles[idx].coherence = coherence;
+             tiles[idx].energy = energy;
++            tiles[idx].jxx = jxx;
++            tiles[idx].jyy = jyy;
++            tiles[idx].jxy = jxy;
+             energies.push_back(energy);
+         }
+     }
+@@ -119,6 +125,9 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
+     std::vector<int> visited(tiles.size(), 0);
+     int bestArea = 0;
+     int bestX0 = 0, bestY0 = 0, bestX1 = 0, bestY1 = 0;
++    // 최대 덩어리에 속한 타일들의 구조텐서 합 — 각도 추정에 쓴다.
++    // 텐서는 선형이라 그냥 더하면 영역 전체의 지배 방향이 나온다.
++    double bestJxx = 0, bestJyy = 0, bestJxy = 0;
+     std::vector<int> stack;
+     for (int ty = 0; ty < tilesY; ++ty) {
+         for (int tx = 0; tx < tilesX; ++tx) {
+@@ -128,11 +137,13 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
+             stack.push_back(static_cast<int>(start));
+             visited[start] = 1;
+             int area = 0, minX = tx, maxX = tx, minY = ty, maxY = ty;
++            double sJxx = 0, sJyy = 0, sJxy = 0;
+             while (!stack.empty()) {
+                 int cur = stack.back();
+                 stack.pop_back();
+                 int cx = cur % tilesX, cy = cur / tilesX;
+                 ++area;
++                sJxx += tiles[cur].jxx; sJyy += tiles[cur].jyy; sJxy += tiles[cur].jxy;
+                 minX = std::min(minX, cx); maxX = std::max(maxX, cx);
+                 minY = std::min(minY, cy); maxY = std::max(maxY, cy);
+                 static const int dxs[4] = {1, -1, 0, 0};
+@@ -150,6 +161,7 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
+             if (area > bestArea) {
+                 bestArea = area;
+                 bestX0 = minX; bestY0 = minY; bestX1 = maxX + 1; bestY1 = maxY + 1;
++                bestJxx = sJxx; bestJyy = sJyy; bestJxy = sJxy;
+             }
+         }
+     }
+@@ -162,6 +174,27 @@ bool findDeskewCandidate(const GrayView& image, DeskewCandidate& out, int tileSi
+     out.bbox.x1 = std::min(image.width, bestX1 * scale);
+     out.bbox.y1 = std::min(image.height, bestY1 * scale);
+     out.coherence = minCoherence; // 대표값(단일 스칼라 요구되는 인터페이스라 최소치만 기록)
++
++    // [각도 추정] 구조텐서의 지배 방향.
++    //   theta = 0.5 * atan2(2*jxy, jxx - jyy)
++    // 는 그래디언트가 가장 강한 방향인데, 바코드에서 그래디언트는 막대에
++    // **수직**이다. 따라서 theta가 곧 "막대가 기울어진 각"이고, 이미지를
++    // theta만큼 되돌리면 막대가 축에 정렬된다.
++    // 90도 배수 차이(막대가 수직이냐 수평이냐)는 zxing의 TryRotate가 이미
++    // 처리하므로 (-45, 45] 안으로 접는다.
++    const double denom = bestJxx - bestJyy;
++    const double coh = std::sqrt(denom * denom + 4.0 * bestJxy * bestJxy) /
++                       (bestJxx + bestJyy + 1e-6);
++    if (coh < 0.25) {
++        // 방향이 뚜렷하지 않으면(체커보드/텍스트 덩어리 등) 추정을 포기한다.
++        // 호출부가 기존 고정 각도 순회로 폴백한다.
++        out.angleDeg = DeskewCandidate::kAngleUnknown;
++    } else {
++        double theta = 0.5 * std::atan2(2.0 * bestJxy, denom) * 180.0 / 3.14159265358979323846;
++        while (theta > 45.0) theta -= 90.0;
++        while (theta <= -45.0) theta += 90.0;
++        out.angleDeg = static_cast<float>(theta);
++    }
+     return true;
+ }
+ 
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index e3bf851..19c640c 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -217,23 +217,41 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
+     rescueCfg.enableDPMRescue = false;       // 회전 크롭엔 불필요, 비용만 낭비
+     Pipeline rescuePipe(rescueCfg);
+ 
+-    // [회전 각도 목록 — 왜 45도만으로는 부족한가]
+-    // zxing은 카디널 방향(0/90도) 기준 대략 ±20도까지 1D를 읽는다(§3.2.15).
+-    // 그래서 45도로 한 번 돌리면 대략 25~65도 구간이 커버된다. 문제는 그
+-    // **경계**다: 1도 간격 스윕(§3.9)에서 20~25도와 65~70도가 통째로 실패했다
+-    // — 원본 각도로도 못 읽고(20도 > 허용범위), 45도 돌려도 못 읽는(20-45 =
+-    // -25도, 역시 밖) 사각지대다. 두 밴드가 45도 대칭인 게 그 증거다.
++    // [회전 각도 — 추정값 우선, 고정각은 폴백]
++    // findDeskewCandidate()가 후보 판정용으로 어차피 계산하는 구조텐서에서
++    // 지배 방향을 뽑아준다(cand.angleDeg). 그게 곧 막대가 기울어진 각이라,
++    // 그 각으로 한 번만 되돌리면 끝난다.
+     //
+-    // 22.5도와 67.5도를 추가하면 커버리지가 이어진다:
+-    //   회전 없음 [0,20] + 22.5도 [2.5,42.5] + 45도 [25,65]
+-    //   + 67.5도 [47.5,87.5] + (90도 근방은 zxing이 자체 처리) = 0~90도 전부
+-    // 넓은 구간을 먼저 잡도록 45도부터 시도한다(대부분 여기서 끝난다).
+-    // 135도는 45도와 90도 차이라 TryRotate가 이미 덮지만, 90도 부근 극단
+-    // 케이스의 안전망으로 마지막에 남겨둔다.
+-    // 비용은 "모든 단계가 실패한 프레임"에서만 발생하고, 성공하면 즉시
+-    // 빠져나가므로 사각지대가 메워지는 만큼 오히려 시간이 회수된다.
+-    // [[vscan-lite-1d-deskew-rescue]]
+-    for (float ang : {45.0f, 22.5f, 67.5f, 135.0f}) {
++    // 예전에는 각도를 모른 채 45 -> 22.5 -> 67.5 -> 135도를 맞을 때까지
++    // 순차 시도했다. 실측(§3.11): 그 비용이 프레임당 평균 23.4ms —
++    // 전체 디코드 시간의 21%인데, 난수 코퍼스에서 얻는 건 500개 중 1개였다.
++    //
++    // [중요] 추정각이 있으면 **그것만** 시도한다. 고정각을 뒤에 덧붙이면
++    // 안전해 보이지만 실제로는 반대다:
++    // 구제 비용의 대부분은 "구제해도 결국 실패하는 프레임"에서 나온다.
++    // 그런 프레임은 후보 영역이 애초에 바코드가 아니어서(텍스트 덩어리,
++    // 박스 모서리 등) 어떤 각도로 돌려도 안 읽힌다 — 각도를 늘릴수록
++    // 실패 비용만 비례해서 커진다. 실측으로 확인했다: 추정각을 앞에
++    // 붙이기만 하고 고정각 4개를 남겼더니 구제 비용이 23.4 -> 26.1ms로
++    // 오히려 늘었다.
++    // 반대로 진짜 회전된 1D가 있으면 구조텐서가 그 방향을 가리키므로,
++    // 추정각이 맞다. 즉 "추정이 되면 그것만, 안 되면 고정각 순회"가
++    // 커버리지는 유지하면서 실패 비용만 잘라내는 조합이다.
++    // 방향이 뚜렷하지 않은 후보(코히런스 낮음)는 **1D 바코드가 아니다** —
++    // 텍스트 덩어리, 박스 모서리, 체커보드 같은 것들이다. 예전에는 그런
++    // 후보에도 45/22.5/67.5/135도를 전부 돌려보고 실패했는데, 구제 비용의
++    // 대부분이 정확히 거기서 나왔다(실측: 구제가 프레임당 23.4ms를 쓰면서
++    // 난수 코퍼스에서 얻는 건 500개 중 1개, §3.11).
++    // 바코드라면 구조텐서가 반드시 한 방향을 가리킨다 — 그게 1D의 정의다.
++    if (cand.angleDeg == DeskewCandidate::kAngleUnknown) return {};
++
++    // 추정각(부호 반전: 텐서는 "기울어진 각"을 주므로 그만큼 되돌린다)
++    // + 45도 하나만 안전망으로. 45도를 남기는 이유는 후보 영역에 배경이
++    // 섞이면 추정이 흔들리기 때문 — 40종 39번(45도 1D)이 정확히 그 케이스라
++    // 추정만으로는 놓쳤다(36/40으로 회귀).
++    const float angles[2] = {-cand.angleDeg, 45.0f};
++
++    for (float ang : angles) {
+         if (budgetExceeded()) break;
+         GrayImage rotated;
+         rotateAroundPoint(GrayView(crop), ang, pivotX, pivotY, rotated);
+-- 
+2.43.0
+

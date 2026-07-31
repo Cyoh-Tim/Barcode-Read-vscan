@@ -1,10 +1,10 @@
 From 46f5c7a25c22f7ca24e2f40f02cc09197f872b82 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 31 Jul 2026 02:26:19 +0000
-Subject: [PATCH 17/18] =?UTF-8?q?=EC=98=81=EC=97=AD=20=EA=B5=AC=EC=A0=9C:?=
- =?UTF-8?q?=20=ED=81=B0=20=ED=94=84=EB=A0=88=EC=9E=84=20=EC=86=8D=20?=
- =?UTF-8?q?=EC=9E=91=EC=9D=80=20=EC=BD=94=EB=93=9C=EB=A5=BC=20=EC=9E=98?=
- =?UTF-8?q?=EB=9D=BC=EC=84=9C=20=EB=B3=B8=EB=8B=A4?=
+Subject: [PATCH] =?UTF-8?q?=EC=98=81=EC=97=AD=20=EA=B5=AC=EC=A0=9C:=20?=
+ =?UTF-8?q?=ED=81=B0=20=ED=94=84=EB=A0=88=EC=9E=84=20=EC=86=8D=20=EC=9E=91?=
+ =?UTF-8?q?=EC=9D=80=20=EC=BD=94=EB=93=9C=EB=A5=BC=20=EC=9E=98=EB=9D=BC?=
+ =?UTF-8?q?=EC=84=9C=20=EB=B3=B8=EB=8B=A4?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

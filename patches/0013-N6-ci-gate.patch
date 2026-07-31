@@ -1,0 +1,232 @@
+From 8f938aac4982dc4ba613c6ad52373f09261b5c70 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 22:45:10 +0000
+Subject: [PATCH] =?UTF-8?q?N6:=20=ED=9A=8C=EA=B7=80=20=EA=B2=8C=EC=9D=B4?=
+ =?UTF-8?q?=ED=8A=B8=20=EC=8A=A4=ED=81=AC=EB=A6=BD=ED=8A=B8=20=E2=80=94=20?=
+ =?UTF-8?q?40=EC=A2=85=20+=20=EA=B3=A0=EC=A0=95=20=EC=8B=9C=EB=93=9C=20?=
+ =?UTF-8?q?=EC=BD=94=ED=8D=BC=EC=8A=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+40종은 "읽히느냐"만 본다. 이번 작업에서 실제로 있었던 일: 회전 구제를
+고쳤더니 검출은 그대로인데 평균이 3~5ms 늘었다(§3.11). 40종으로는 절대
+안 보이는 종류의 회귀라, 코퍼스 지표를 함께 기준선으로 잡는다.
+
+tools/ci_gate.sh:
+  1) 고정 40종 -> 세 경로 모두 37/40 아니면 실패
+  2) 고정 시드 코퍼스 300장(스트리밍, 디스크 0) -> 기준선 대비
+     - 검출률(텍스트 일치) -1.0%p 초과 하락
+     - 평균/p95 +20% 초과 증가 (측정 잡음이 10% 안팎이라 그 두 배)
+     - 중복 반환 증가 (허용치 0 — 정확성 문제라 잡음 여지가 없다)
+  --update-baseline 으로 기준선 갱신.
+
+현재 기준선(tools/ci_baseline.txt, x86 4코어): 검출 54.6% / 평균 133.29ms
+/ p95 350.80ms / 오디코딩 7 / 중복 0.
+기준선은 하드웨어에 종속이므로 CI 러너를 바꾸면 --update-baseline 필요.
+
+§3.14에 N1~N6 결과를 정리했다. 반복해서 나온 패턴 하나를 함께 기록했다:
+N1(회전)과 N4(노이즈)는 조건 축에서는 극적인데 난수 코퍼스 평균에서는
+미미하다 — 난수 코퍼스는 "그 조건이 얼마나 자주 오는가"로 가중되기 때문.
+축별 스윕과 코퍼스 평균을 같이 봐야 한다.
+---
+ PROJECT_NOTES.md      | 32 +++++++++++++++
+ README.md             | 19 +++++++++
+ tools/ci_baseline.txt |  5 +++
+ tools/ci_gate.sh      | 92 +++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 148 insertions(+)
+ create mode 100644 tools/ci_baseline.txt
+ create mode 100755 tools/ci_gate.sh
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 62d17bc..efd15c7 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -1059,6 +1059,38 @@ python3 tools/generate_corpus.py -n 500 --difficulty mixed --bucket ok --seed 10
+ 
+ ---
+ 
++### 3.14 N1~N6 구현 결과 (2026-07-30)
++
++| # | 항목 | 결과 |
++|---|---|---|
++| N1 | 회전 구제 각도 추정 | ✅ 구제 비용 **−43~59%** (mixed 26.6→15.1ms, hard 41.2→17.1ms), 커버리지 90/91 유지 |
++| N2 | 빈 프레임 조기 종료 | ✅ 빈 프레임 **36ms → 0.1ms**, 정상 프레임 영향 없음 |
++| N3 | QR 회전 28/33/62° | ✅ 규명 — 회전 버그가 아니라 모듈 3px 경계 문제(4px면 91/91). 코드 변경 없음 |
++| N4 | 노이즈 구제 | ✅ 노이즈 축 **붕괴 임계 소멸**(QR 46→없음, Code128 30→없음, 0~60 전 구간 100%) |
++| N5 | 적응형 배치 프로파일 | ✅ 단일 심볼로지 배치에서 검출 **+1.1~3.6%p**, 속도 0~6% (2.5배는 재현 안 됨) |
++| N6 | CI 게이트 | ✅ `tools/ci_gate.sh` — 40종 + 고정 시드 코퍼스, 중복 반환은 허용치 0 |
++
++#### 두 번 반복해서 나온 패턴 — 기억할 것
++N1(회전)과 N4(노이즈) 둘 다 **조건 축에서는 극적, 난수 코퍼스 평균에서는 미미**했다.
++- 노이즈 축: Code128 23.8% → 100%. 그런데 혼합 코퍼스 검출률은 49.1% → 49.5%.
++- 회전 축: 실패 각도 13개 → 1개. 그런데 혼합 코퍼스 검출률은 변화 없음.
++
++난수 코퍼스는 "그 조건이 얼마나 자주 오는가"로 가중되기 때문이다. 즉
++**평균은 배치 조건이 정해지기 전까지는 판단 근거가 못 된다.** 현장이
++노이즈가 심하면 N4는 판정 자체를 바꾸고, 아니면 실패 프레임에만 붙는
++비용이다. 축별 스윕과 코퍼스 평균을 **같이** 봐야 하는 이유다.
++
++#### 구제 단계가 세 개가 됐다 — 순서와 비용
++실패한 프레임만 다음으로 내려간다. 싼 것부터:
++1. **노이즈 구제**(N4) — 3x3 블러 + 코어 패스 1회
++2. **DPM 구제** — 형태학적 닫힘 + 코어 패스 1회 (기본 꺼짐, opt-in)
++3. **1D 회전 구제**(N1) — 후보 탐지 + 추정각 회전 1~2회
++
++전부 `max_frame_ms`(§3.10 로드맵 1)의 단계 경계 검사를 받는다. 구제를 많이
++켤수록 실패 프레임의 꼬리가 길어지므로, 예산과 함께 쓰는 것이 기본 사용법이다.
++
++---
++
+ ### 3.13 N3 결론 — QR 회전 실패는 회전 문제가 아니라 모듈 크기 문제
+ 
+ 2차 측정에서 QR이 0~90도 중 28/33/62도에서 실패했다(module 3px). 1D 수정과
+diff --git a/README.md b/README.md
+index db81d42..9e4401c 100644
+--- a/README.md
++++ b/README.md
+@@ -62,6 +62,7 @@ examples/                decode_image, decode_rois, decode_workers 사용 예제
+ tools/
+   generate_stress_images.py   악조건 40종 테스트 이미지 생성 — 회귀 게이트 (§4)
+   generate_corpus.py          대량 코퍼스/파라미터 스윕 생성 (수만~수십만 장, §4.2)
++  ci_gate.sh                  회귀 게이트 (40종 + 고정 시드 코퍼스, 디스크 0)
+   verify_accuracy.cpp         정확도 회귀 테스트 하네스 (40종 + 대량 코퍼스 겸용)
+   bench_device.cpp            실기 캘리브레이션 벤치 (§6)
+ docker/                  Windows에서 aarch64 정확성 검증 (§5)
+@@ -153,6 +154,24 @@ image                              exp | full               | 2stage
+ 검출 성공 / 전체                 | 37/40      1155.0ms | 37/40       638.2ms | 37/40       593.8ms
+ ```
+ 
++### 4.1 한 번에 돌리기 — 회귀 게이트
++
++```bash
++tools/ci_gate.sh                    # 40종 + 코퍼스 기준선 비교
++tools/ci_gate.sh --update-baseline  # 지금 값을 새 기준선으로
++```
++
++40종은 "읽히느냐"만 본다. 실제로 있었던 일 — 회전 구제를 고쳤더니 검출은
++그대로인데 평균이 3~5ms 늘었다(PROJECT_NOTES §3.11). 40종으로는 절대 안
++보이는 회귀다. 그래서 게이트가 두 개다:
++
++| 게이트 | 실패 조건 |
++|---|---|
++| 고정 40종 | 세 경로 중 하나라도 37/40 미만 |
++| 고정 시드 코퍼스 300장 | 검출률 −1.0%p 초과 / 평균·p95 +20% 초과 / **중복 반환 증가(허용치 0)** |
++
++코퍼스는 스트리밍이라 이미지를 디스크에 한 장도 안 남긴다.
++
+ ### 4.2 대량 코퍼스 / 파라미터 스윕 (튜닝용)
+ 
+ 40종은 **회귀 게이트**다(통과/실패). 성능이나 검출률을 실제로 개선할 때는
+diff --git a/tools/ci_baseline.txt b/tools/ci_baseline.txt
+new file mode 100644
+index 0000000..f35533b
+--- /dev/null
++++ b/tools/ci_baseline.txt
+@@ -0,0 +1,5 @@
++rate=54.6
++mean=133.29
++p95=350.80
++misdec=7
++dup=0
+diff --git a/tools/ci_gate.sh b/tools/ci_gate.sh
+new file mode 100755
+index 0000000..5911df5
+--- /dev/null
++++ b/tools/ci_gate.sh
+@@ -0,0 +1,92 @@
++#!/usr/bin/env bash
++# ci_gate.sh — 회귀 게이트 두 개를 한 번에 돌린다.
++#
++#   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 37/40 미만이면 실패.
++#   2) 고정 시드 코퍼스: 검출률/평균/p95/중복을 기록하고, 직전 기준선 대비
++#                        허용치를 넘게 나빠지면 실패.
++#
++# 왜 둘 다 필요한가: 40종은 "읽히느냐"만 본다. 실제로 있었던 일 —
++# 회전 구제를 고쳤더니 검출은 그대로인데 평균이 3~5ms 늘었다(§3.11).
++# 40종으로는 절대 안 보이는 종류의 회귀다. 코퍼스는 그걸 잡는다.
++#
++# 코퍼스는 **스트리밍**이라 디스크에 이미지를 한 장도 안 남긴다(§3.8).
++#
++# 사용:
++#   tools/ci_gate.sh                 # 측정 + 기준선과 비교
++#   tools/ci_gate.sh --update-baseline   # 지금 값을 새 기준선으로 저장
++#
++# 환경변수:
++#   BUILD_DIR   기본 build
++#   CORPUS_N    코퍼스 장수 (기본 300)
++#   BASELINE    기준선 파일 (기본 tools/ci_baseline.txt)
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
++CORPUS_N="${CORPUS_N:-300}"
++BASELINE="${BASELINE:-$ROOT/tools/ci_baseline.txt}"
++UPDATE=0
++[ "${1:-}" = "--update-baseline" ] && UPDATE=1
++
++WORK="$(mktemp -d)"
++trap 'rm -rf "$WORK"' EXIT
++
++export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/third_party/zxing-cpp/core:$BUILD_DIR/zbar_install/lib:${LD_LIBRARY_PATH:-}"
++VERIFY="$WORK/verify_accuracy"
++
++echo ">> [1/4] verify_accuracy 빌드"
++g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/verify_accuracy.cpp" \
++    -L"$BUILD_DIR" -lvscan -o "$VERIFY"
++
++echo ">> [2/4] 고정 40종 게이트"
++python3 "$ROOT/tools/generate_stress_images.py" --outdir "$WORK/stress" >/dev/null
++"$VERIFY" "$WORK/stress" > "$WORK/stress.txt" 2>/dev/null || true
++LINE="$(grep "검출 성공" "$WORK/stress.txt" || true)"
++echo "   $LINE"
++if ! echo "$LINE" | grep -q "37/40.*37/40.*37/40"; then
++  echo "!! 40종 기준선(37/40) 미달 — 검출 회귀"
++  sed -n '1,50p' "$WORK/stress.txt"
++  exit 1
++fi
++
++echo ">> [3/4] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
++python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
++        --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
++  | "$VERIFY" --stdin --paths 2stage --reps 2 > "$WORK/corpus.txt" 2>/dev/null
++
++# 8번째 줄: path | img_pass% | codes | text_ok% | misdec | dup | mean | p50 | p95
++# 게이트 지표는 text_ok(코드 단위 텍스트 일치율) — 개수만 세는 것보다 엄격하다
++read -r _ _ _ RATE MISDEC DUP MEAN _ P95 <<<"$(sed -n '8p' "$WORK/corpus.txt" | tr -s ' ')"
++RATE="${RATE%\%}"
++echo "   검출 ${RATE}% / 평균 ${MEAN}ms / p95 ${P95}ms / 오디코딩 ${MISDEC} / 중복 ${DUP}"
++
++echo ">> [4/4] 기준선 비교"
++if [ "$UPDATE" = 1 ] || [ ! -f "$BASELINE" ]; then
++  printf 'rate=%s\nmean=%s\np95=%s\nmisdec=%s\ndup=%s\n' \
++         "$RATE" "$MEAN" "$P95" "$MISDEC" "$DUP" > "$BASELINE"
++  echo "   기준선 저장: $BASELINE"
++  exit 0
++fi
++
++# shellcheck disable=SC1090
++BASE_RATE=$(grep '^rate=' "$BASELINE" | cut -d= -f2)
++BASE_MEAN=$(grep '^mean=' "$BASELINE" | cut -d= -f2)
++BASE_P95=$(grep '^p95='  "$BASELINE" | cut -d= -f2)
++BASE_DUP=$(grep '^dup='  "$BASELINE" | cut -d= -f2)
++
++# 허용치: 검출률 -1.0%p, 평균/p95 +20%(측정 잡음이 10% 안팎이라 그 두 배),
++#         중복은 0에서 늘어나면 무조건 실패(정확성 문제라 잡음 여지가 없다)
++fail=0
++awk -v a="$RATE" -v b="$BASE_RATE" 'BEGIN{exit !(a < b - 1.0)}' && {
++  echo "!! 검출률 회귀: ${BASE_RATE}% -> ${RATE}%"; fail=1; }
++awk -v a="$MEAN" -v b="$BASE_MEAN" 'BEGIN{exit !(a > b * 1.20)}' && {
++  echo "!! 평균 시간 회귀: ${BASE_MEAN}ms -> ${MEAN}ms"; fail=1; }
++awk -v a="$P95" -v b="$BASE_P95" 'BEGIN{exit !(a > b * 1.20)}' && {
++  echo "!! p95 회귀: ${BASE_P95}ms -> ${P95}ms"; fail=1; }
++[ "$DUP" -gt "$BASE_DUP" ] && { echo "!! 중복 반환 증가: ${BASE_DUP} -> ${DUP}"; fail=1; }
++
++if [ "$fail" = 1 ]; then
++  echo ">> ❌ 코퍼스 게이트 실패"
++  exit 1
++fi
++echo ">> ✅ 통과 (40종 37/40, 코퍼스 기준선 이내)"
+-- 
+2.43.0
+

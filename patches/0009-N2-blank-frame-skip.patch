@@ -1,0 +1,219 @@
+From b739feb81331fa345560b984c2416694c4e68e41 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 30 Jul 2026 22:22:12 +0000
+Subject: [PATCH] =?UTF-8?q?N2:=20=EB=B9=88=20=ED=94=84=EB=A0=88=EC=9E=84?=
+ =?UTF-8?q?=20=EC=A1=B0=EA=B8=B0=20=EC=A2=85=EB=A3=8C=20=E2=80=94=20?=
+ =?UTF-8?q?=EC=BB=A8=EB=B2=A0=EC=9D=B4=EC=96=B4=20=EA=B3=B5=EB=B0=B1=20?=
+ =?UTF-8?q?=ED=94=84=EB=A0=88=EC=9E=84=2036ms=20->=200.1ms?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+컨베이어는 아이템 사이에 아무것도 없는 프레임이 계속 들어오는데, 지금
+구조는 그런 프레임에도 4단 폴백 체인을 전부 돌리고 실패했다.
+
+코드가 존재하려면 어딘가에 국소 명암차가 반드시 있어야 한다(§3.8 판독
+가능성 분류의 대비 기준과 같은 논리). 축소 샘플링으로 32x32 블록별
+최대-최소를 보고, 어느 블록도 임계(기본 24 LSB)를 못 넘으면 코드가
+물리적으로 존재할 수 없으므로 즉시 빈손을 반환한다.
+
+- 코드가 있는 프레임은 첫 블록 몇 개에서 바로 통과하므로 비용이 사실상 0
+- 임계는 §3.9에서 측정한 대비 붕괴점(진폭 약 34 LSB)보다 넉넉히 아래로 잡아
+  저대비 코드를 실수로 버리지 않게 했다
+- vscan_config_t.disable_blank_frame_skip 으로 끌 수 있다(기본 켜짐)
+
+실측 (2048x1536 빈 프레임, full 경로, reps=3):
+| 프레임 | 조기종료 OFF | ON |
+|--------|-------------|-----|
+| 노이즈 σ3 | 36.0ms | 0.1ms |
+| 노이즈 σ3 | 33.8ms | 0.1ms |
+| 노이즈 σ3 | 38.7ms | 0.1ms |
+| 노이즈 σ6 | 127.9ms | 130.3ms (건너뛰지 않음) |
+| 노이즈 σ9 | 136.3ms | 133.7ms (건너뛰지 않음) |
+
+노이즈가 임계를 넘는 빈 프레임은 일부러 건너뛰지 않는다 — 노이즈만으로도
+블록 명암차가 커지는데, 그 상태에서 "코드가 없다"고 단정하면 저대비 코드를
+놓칠 수 있다. 그런 프레임은 max_frame_ms(N1 이전 커밋)로 상한을 두는 게 맞다.
+
+회귀 없음: 40종 세 경로 37/40 유지, 악조건 혼합 코퍼스 검출률/시간 동일
+(117.4 vs 119.0ms — 차이는 측정 잡음 범위).
+---
+ include/vscan.h                     | 10 +++++++++
+ include/vscan_internal/pipeline.hpp | 23 ++++++++++++++++++++
+ src/pipeline.cpp                    | 33 +++++++++++++++++++++++++++++
+ src/vscan_c_api.cpp                 |  1 +
+ tools/verify_accuracy.cpp           |  5 ++++-
+ 5 files changed, 71 insertions(+), 1 deletion(-)
+
+diff --git a/include/vscan.h b/include/vscan.h
+index 183e38b..2667d7c 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -237,6 +237,16 @@ typedef struct {
+      *   곡선은 §3.11 참고).
+      */
+     int max_frame_ms;
++
++    /*
++     * [빈 프레임 조기 종료] 0 = 켜짐(기본), 1 = 끔.
++     * 컨베이어 아이템 사이처럼 코드가 아예 없는 프레임은 국소 명암차가
++     * 없으므로 폴백 체인을 돌 이유가 없다. 축소 샘플링으로 블록별 명암차를
++     * 보고 임계 미만이면 즉시 빈손을 반환한다(실측: 빈 프레임 처리 시간이
++     * 수십 ms에서 1ms 미만으로). 코드가 있는 프레임은 첫 블록 몇 개에서
++     * 바로 통과하므로 사실상 비용이 없다.
++     */
++    int disable_blank_frame_skip;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index c86ec0d..c93627e 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -150,6 +150,27 @@ struct PipelineConfig {
+      *   마감을 결정하므로, 여기에 주기의 60~80%를 넣는 게 보통 맞다.
+      */
+     int maxFrameMs = 0;
++
++    /*
++     * [빈 프레임 조기 종료] 0 = 켜짐(기본), 1 = 끔.
++     *
++     * 컨베이어는 아이템 사이에 **아무것도 없는 프레임**이 계속 들어온다.
++     * 지금 구조는 그런 프레임에도 4단 폴백 체인을 전부 돌리고 실패한다 —
++     * 실측(§3.9): 실패 프레임 하나가 150~230ms.
++     *
++     * 코드가 존재하려면 어딘가에 **국소 명암차**가 반드시 있어야 한다
++     * (§3.8 판독 가능성 분류의 대비 기준과 같은 논리). 축소본에서 블록별
++     * 최대-최소 범위를 보고, 어느 블록도 임계를 못 넘으면 코드가 물리적으로
++     * 존재할 수 없으므로 즉시 빈손을 반환한다.
++     *
++     * 비용은 축소본 1회 스캔(~1ms 미만)이고, 코드가 있는 프레임은 첫 블록
++     * 몇 개에서 바로 통과하므로 사실상 공짜다.
++     */
++    int disableBlankFrameSkip = 0;
++    // 블록 하나가 "구조가 있다"고 인정받는 최소 명암차(LSB). 노이즈 시그마의
++    // 몇 배로 잡아야 안전하다 — 기본 24는 §3.9에서 측정한 대비 붕괴점
++    // (진폭 약 34 LSB)보다 넉넉히 아래다.
++    int blankFrameMinRange = 24;
+ };
+ 
+ class Pipeline {
+@@ -238,6 +259,8 @@ private:
+     };
+     // 예산을 넘겼는가. 예산이 0이거나 미설정이면 항상 false.
+     bool budgetExceeded() const;
++    // 코드가 존재할 만한 국소 명암차가 프레임에 있는가(빈 프레임 조기 종료).
++    bool frameHasStructure(const GrayView& image) const;
+ 
+     // coarse locate 적응형 스킵 상태
+     int coarseMisses_ = 0;      // 연속 실패 횟수
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 19c640c..70aa914 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -34,6 +34,35 @@ bool Pipeline::budgetExceeded() const {
+     return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
+ }
+ 
++bool Pipeline::frameHasStructure(const GrayView& image) const {
++    // 축소본에서 블록별 (최대-최소)를 보고, 임계를 넘는 블록이 하나라도
++    // 있으면 true. 코드가 있는 프레임은 보통 첫 몇 블록에서 바로 걸리므로
++    // 조기 반환된다 — 진짜 빈 프레임에서만 전체를 훑는다.
++    if (cfg_.disableBlankFrameSkip) return true;
++    if (image.width < 64 || image.height < 64) return true;   // 너무 작으면 판단 안 함
++
++    const int stride = image.stride > 0 ? image.stride : image.width;
++    const int step = 4;                       // 4픽셀 건너뛰며 본다(1/16 샘플)
++    const int block = 32;                     // 블록 크기(원본 좌표 기준)
++    const int thresh = std::max(1, cfg_.blankFrameMinRange);
++
++    for (int by = 0; by + block <= image.height; by += block) {
++        for (int bx = 0; bx + block <= image.width; bx += block) {
++            int lo = 255, hi = 0;
++            for (int y = by; y < by + block; y += step) {
++                const uint8_t* __restrict row = image.pixels + static_cast<size_t>(y) * stride;
++                for (int x = bx; x < bx + block; x += step) {
++                    int v = row[x];
++                    if (v < lo) lo = v;
++                    if (v > hi) hi = v;
++                }
++            }
++            if (hi - lo >= thresh) return true;
++        }
++    }
++    return false;
++}
++
+ void Pipeline::addDecoder(std::unique_ptr<IDecoder> decoder) {
+     decoders_.push_back(std::move(decoder));
+ }
+@@ -135,6 +164,9 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
+ 
+ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     BudgetGuard budget(this);
++    // 코드가 물리적으로 존재할 수 없는 프레임(컨베이어 아이템 사이 등)은
++    // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
++    if (!frameHasStructure(image)) return {};
+     auto hits = processViewCore(image);
+     if (!hits.empty()) return hits;
+ 
+@@ -268,6 +300,7 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
+ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image, int cropPadPx) {
+     if (image.empty()) return {};
+     BudgetGuard budget(this);
++    if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
+     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
+ 
+     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index cfcdf3e..0a027d1 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -104,6 +104,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->disable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = false;
+         if (cfg->enable_dpm_rescue) pcfg.enableDPMRescue = true;
+         if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
++        if (cfg->disable_blank_frame_skip) pcfg.disableBlankFrameSkip = 1;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+diff --git a/tools/verify_accuracy.cpp b/tools/verify_accuracy.cpp
+index edcf3f7..e6c5353 100644
+--- a/tools/verify_accuracy.cpp
++++ b/tools/verify_accuracy.cpp
+@@ -200,6 +200,7 @@ static void usage(const char* argv0) {
+         "  --dpm-rescue     enable_dpm_rescue=1 (기본 꺼짐 — 40종 기준선은 꺼진 값)\n"
+         "  --max-frame-ms N 프레임 시간 예산(0=무제한). 폴백 꼬리를 자른다\n"
+         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
++        "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
+         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
+         "  --stdin          디렉토리 대신 stdin 스트림을 읽는다 (디스크 0). 아래 참고\n"
+         "  --tag-sort n|i   태그표 정렬: name(스윕용) / imgs(기본, 이미지 수)\n"
+@@ -216,7 +217,7 @@ int main(int argc, char** argv) {
+     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
+     int reps = 0, limit = 0, stride = 1, overlap = 500;
+     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
+-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0;
++    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0;
+ 
+     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
+         std::string a = argv[i];
+@@ -238,6 +239,7 @@ int main(int argc, char** argv) {
+         else if (a == "--dpm-rescue") dpmRescue = 1;
+         else if (a == "--max-frame-ms") maxFrameMs = atoi(next());
+         else if (a == "--no-deskew") noDeskew = 1;
++        else if (a == "--no-blank-skip") noBlankSkip = 1;
+         else if (a == "--dump-mismatch") dumpMismatch = 1;
+         else if (a == "--stdin") stdinMode = 1;
+         else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
+@@ -337,6 +339,7 @@ int main(int argc, char** argv) {
+             cfg.enable_dpm_rescue = dpmRescue;
+             cfg.max_frame_ms = maxFrameMs;
+             cfg.disable_1d_deskew_rescue = noDeskew;
++            cfg.disable_blank_frame_skip = noBlankSkip;
+             // "아이템당 코드 개수를 아는 현장" 사용법: 빠른 경로가 이 개수를
+             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
+             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
+-- 
+2.43.0
+
