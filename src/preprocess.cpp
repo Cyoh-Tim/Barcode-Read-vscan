@@ -140,6 +140,33 @@ void rotateAroundPoint(const GrayView& src, float degrees, float pivotX, float p
     // 걸어서(원본을 -degrees만큼) "degrees만큼 되돌린" 결과가 나오게 한다.
     const float rad = -degrees * 3.14159265358979323846f / 180.0f;
     const float c = std::cos(rad), s = std::sin(rad);
+
+    // [샘플링: 쌍선형]
+    // 예전엔 최근접 이웃이었다. 회전하면 원본 픽셀 격자와 목적지 격자가
+    // 어긋나는데, 최근접은 그 어긋남을 반올림으로 흡수한다 — 모듈 경계가
+    // 격자에 스냅되면서 막대 폭 비율이 흔들리고, 디코더는 폭 비율로
+    // 심볼을 읽으므로 그걸 거부한다.
+    //
+    // [주의 — 처음 도입할 때의 근거는 틀렸다]
+    // 이 변경은 원래 "DataMatrix가 48도부터 전부 실패하고 PDF417이
+    // 7/46인 것"의 원인이라고 보고 넣었다. 그 진단은 **틀렸다**. 그
+    // 실패의 진짜 원인은 리샘플 품질이 아니라 탐색 면적이었다 — 코드
+    // 주변만 잘라내면 회전을 한 번도 안 하고 전 각도가 읽힌다(§3.17,
+    // [[vscan-lite-region-rescue]]). 쌍선형으로 바꿔도 그 수치는 거의
+    // 안 움직였다.
+    //
+    // 그래도 남기는 이유는 따로 있다. 영역 구제까지 들어간 상태에서
+    // 최근접/쌍선형을 A/B 하면:
+    //   고정 40종      36/40 -> 37/40   (45도 1D인 39번이 쌍선형에서만 붙는다)
+    //   단일코드 300장 60.3% -> 60.8%
+    //   PDF417 각도스윕 94.7% -> 89.5%  (여기는 최근접이 낫다)
+    // 즉 이득은 있지만 원래 주장했던 크기가 아니고, PDF417 회전에서는
+    // 오히려 손해다. 40종 게이트가 걸려 있어 유지한다.
+    //
+    // 비용(실측): 최근접 대비 3배(1200x900에서 1.62 -> 4.81ms). 회전은
+    // 구제/ROI 경로에서만 돌고 그 다음 디코드가 13.3ms라, 시도 1회 기준
+    // 14.9 -> 18.1ms(+21%)다. 실패 프레임 전체(150~230ms) 대비 +2% 수준.
+    // [[vscan-lite-rotate-bilinear]]
     for (int y = 0; y < H; ++y) {
         const float dy = static_cast<float>(y) - pivotY;
         // x=0에서의 소스 좌표. 이후 x 증가마다 (c, s)만 더하면 되므로
@@ -149,11 +176,24 @@ void rotateAroundPoint(const GrayView& src, float degrees, float pivotX, float p
         float sy = (0.0f - pivotX) * s + dy * c + pivotY;
         uint8_t* __restrict dstRow = out.pixels.data() + static_cast<size_t>(y) * W;
         for (int x = 0; x < W; ++x, sx += c, sy += s) {
-            int isx = static_cast<int>(sx + 0.5f);
-            int isy = static_cast<int>(sy + 0.5f);
-            if (static_cast<unsigned>(isx) < static_cast<unsigned>(W) &&
-                static_cast<unsigned>(isy) < static_cast<unsigned>(H))
-                dstRow[x] = src.pixels[static_cast<size_t>(isy) * stride + isx];
+            const int ix = static_cast<int>(sx);
+            const int iy = static_cast<int>(sy);
+            if (static_cast<unsigned>(ix) < static_cast<unsigned>(W - 1) &&
+                static_cast<unsigned>(iy) < static_cast<unsigned>(H - 1)) {
+                const float fx = sx - static_cast<float>(ix);
+                const float fy = sy - static_cast<float>(iy);
+                const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(iy) * stride + ix;
+                const uint8_t* __restrict r1 = r0 + stride;
+                const float top = r0[0] + (r0[1] - r0[0]) * fx;
+                const float bot = r1[0] + (r1[1] - r1[0]) * fx;
+                dstRow[x] = static_cast<uint8_t>(top + (bot - top) * fy + 0.5f);
+            } else {
+                // 가장자리 1픽셀은 이웃이 없으므로 최근접으로 떨어뜨린다.
+                const int nx = static_cast<int>(sx + 0.5f), ny = static_cast<int>(sy + 0.5f);
+                if (static_cast<unsigned>(nx) < static_cast<unsigned>(W) &&
+                    static_cast<unsigned>(ny) < static_cast<unsigned>(H))
+                    dstRow[x] = src.pixels[static_cast<size_t>(ny) * stride + nx];
+            }
         }
     }
 }
