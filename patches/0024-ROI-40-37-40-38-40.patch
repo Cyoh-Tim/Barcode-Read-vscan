@@ -1,0 +1,428 @@
+From 65b3f16d26b194a4023abc30169e0fab0095cc2f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 04:56:46 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=A0=80=EB=8C=80=EB=B9=84=20ROI=20=EA=B5=AC?=
+ =?UTF-8?q?=EC=A0=9C=20=E2=80=94=2040=EC=A2=85=20=EA=B2=8C=EC=9D=B4?=
+ =?UTF-8?q?=ED=8A=B8=EA=B0=80=2037/40=EC=97=90=EC=84=9C=2038/40=EC=9C=BC?=
+ =?UTF-8?q?=EB=A1=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+각도 말고 다른 축은 그동안 Code128로만 봤다. 14종 x 4축(모듈/노이즈/
+블러/대비)을 전수로 도니 대비 축만 전 심볼로지에서 75~90%로 남았고
+나머지 세 축은 전부 100%였다. 끊기는 대비가 심볼로지마다 다르다:
+
+  Code128            0.15까지 읽힘
+  QR                 0.20까지
+  EAN13/EAN8/UPCA    0.30까지    <- 두 배가 필요하다
+
+퍼센타일 선형 스트레칭(하위/상위 0.5% 절단)을 ROI 안에서만 건다.
+전역으로 걸면 안 된다 — 실측: 전역 스트레칭은 EAN/UPC는 똑같이 살리면서
+QR 0.20/0.25/0.30을 전부 죽였다(원래 읽히던 것들이다). 프레임 전체의
+최소/최대는 배경과 조명이 지배하는데, 그 값으로 만든 LUT는 코드 영역
+안의 계조를 오히려 뭉갠다. 영역 구제가 이미 ROI를 만들고 있으므로
+그 자리에 붙였다.
+
+두 번 헛디딘 것을 주석에 남겼다:
+- 게이트 임계를 110으로 잡았다가 정작 살리려던 케이스가 전부 걸러졌다.
+  배경이 밝고 코드만 저대비인 프레임은 (배경 - 가장 어두운 바)가 이미
+  128쯤 된다 — 코드 자체의 대비와 프레임 계조 폭은 다른 값이다.
+- 편 다음엔 한 번 뭉개야 한다. 스트레칭은 신호와 노이즈를 같이 증폭하고,
+  대비가 낮을수록 이득이 커지므로 노이즈도 그만큼 커진다. EAN13 0.20은
+  펴기만 하면 실패, 편 뒤 3x3 블러를 먹이면 읽힌다.
+
+결과:
+  EAN13/UPCA        75% -> 85%
+  EAN8              75% -> 80%
+  CODE39/UPCE       80% -> 85%
+  DATABAR/DATABAREXP 85% -> 90%
+  고정 40종       37/40 -> 38/40   <- 이 세션 내내 37이었다
+  단일 코퍼스     60.3% -> 61.3%
+  다중 코퍼스     57.8% -> 58.3%
+  평균 시간       +7~11%
+
+게이트의 40종 판정을 고정 문자열 grep에서 숫자 비교로 바꿨다. 검출이
+좋아져도 실패했다(37/40 패턴이 38/40과 안 맞는다) — 게이트는 회귀만
+잡아야 한다.
+
+§3.20에 실물 해상도 차트 측정을 남겼다(모듈 2.1px, 채택 안 한 확대+언샤프
+구제의 실측 근거와 막힌 지점 포함).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      | 100 +++++++++++++++++++++++++-
+ include/vscan_internal/pipeline.hpp   |   2 +
+ include/vscan_internal/preprocess.hpp |  30 ++++++++
+ src/pipeline.cpp                      |  58 ++++++++++++++-
+ src/preprocess.cpp                    |  37 ++++++++++
+ tools/ci_baseline.txt                 |   6 +-
+ tools/ci_gate.sh                      |  20 ++++--
+ 7 files changed, 241 insertions(+), 12 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 64330d1..6dff174 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.18 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 미검출보다 나쁜 오디코딩** | 무엇부터 할지 정할 때 |
++| §3.14~3.20 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+@@ -1525,6 +1525,104 @@ DataBarExp 10도  A (47,633)-(929,729)  두께 96
+ - **회귀 게이트에 심볼로지 각도 스윕 추가**(로드맵 M4). 이번에 찾은 것이
+   정확히 코퍼스 지표로는 안 보이는 부류라, 하드 게이트로 걸었다.
+ 
++### 3.19 대비 축 — ROI 안에서 편다 (2026-07-31)
++
++각도 말고 다른 축은 그동안 Code128로만 봤다. 14종 x 4축(모듈/노이즈/
++블러/대비)을 전수로 돌리니 **대비 축만 전 심볼로지에서 75~90%**로 남았고
++나머지 세 축은 전부 100%였다. 끊기는 지점이 심볼로지마다 다르다:
++
++| 심볼로지 | 읽히는 최저 대비 |
++|---|---|
++| Code128 | 0.15 |
++| QR | 0.20 |
++| **EAN13 / EAN8 / UPCA** | **0.30** |
++
++EAN/UPC 계열만 두 배가 필요하다.
++
++#### ROI 안에서만 펴야 한다
++퍼센타일 선형 스트레칭(하위/상위 0.5% 절단)을 걸어봤다:
++
++| 대상 | EAN13 0.20/0.25 | QR 0.20/0.25/0.30 |
++|---|---|---|
++| 전역(프레임 전체) | 살아남 | **죽음** (원래 읽히던 것) |
++| **ROI 안** | **살아남** | 유지 |
++
++프레임 전체의 최소/최대는 배경과 조명이 지배하는데, 그 값으로 만든 LUT는
++코드 영역 안의 계조를 오히려 뭉갠다. ROI 히스토그램으로 만들면 그런 일이
++없다. 영역 구제가 이미 ROI를 만들고 있으므로 그 자리에 붙였다.
++`[[vscan-lite-roi-contrast-stretch]]`
++
++#### 두 번 헛디딘 것
++- **게이트 임계를 110으로 잡았다가 정작 살리려던 케이스가 전부 걸러졌다.**
++  배경이 밝고 코드만 저대비인 프레임은 (배경 - 가장 어두운 바)가 이미
++  128쯤 된다 — 코드 자체의 대비와 프레임 계조 폭은 다른 값이다. 200으로.
++- **편 다음엔 한 번 뭉개야 한다.** 스트레칭은 신호와 노이즈를 같이
++  증폭하고, 대비가 낮을수록 이득이 커지므로 노이즈도 그만큼 커진다.
++  EAN13 0.20은 펴기만 하면 실패, 편 뒤 3x3 블러를 먹이면 읽힌다.
++
++#### 결과
++| 심볼로지 | 이전 | 이후 |
++|---|---|---|
++| EAN13 / UPCA | 75% | **85%** |
++| EAN8 | 75% | **80%** |
++| CODE39 / UPCE | 80% | **85%** |
++| DATABAR / DATABAREXP | 85% | **90%** |
++| **고정 40종** | **37/40** | **38/40** |
++| 단일 코퍼스 | 60.3% | **61.3%** |
++| 다중 코퍼스 | 57.8% | **58.3%** |
++| 평균 시간 | — | +7~11% |
++
++40종 게이트가 이 세션 내내 37/40이었는데 처음으로 38이 됐다.
++
++### 3.20 실물 해상도 차트 — 모듈 2px의 벽 (측정, 미채택)
++
++사용자가 실물 카메라 해상도 차트(Autonics 3.1MP FOV 차트, 2000x1500
++사본)를 줬다. QR 26개 안팎이 화면 전체에 흩뿌려져 있고 **전부 내용이
++같다**("VC QR Test").
++
++**현재 결과: 0개 검출, 140ms.**
++
++원인은 명확하다. QR이 21x21 모듈인데 화면에서 40~45px이라 **모듈이
++2.1px**이다. §3.8 판독 가능성 분류가 "모듈 1.3px 미만 불가 / 2.0px 미만
++경계"로 잡아둔 바로 그 경계선이고, 게다가 사본이라 흐림이 심하다.
++이 차트는 원래 **카메라가 어디까지 분해하는지를 재려고** 만든 것이라
++코드가 한계에 놓여 있는 게 정상이다.
++
++#### 상한을 재봤다
++코드 주변을 사람이 잘라주고(140px 창) 전처리 16가지를 전부 시도했을 때:
++
++| 처리 | 24곳 중 판독 |
++|---|---|
++| 확대만 (2/3/4/6배) | 3곳 |
++| **확대 + 언샤프** | **9곳** |
++| 3배 + 언샤프 하나만 | 6곳 |
++
++**언샤프가 결정적이었다** — 배율보다 샤프닝 유무가 갈랐다. 확대만으로는
++흐림도 같이 커질 뿐이고, 확대한 뒤 고주파를 되살려야 모듈 경계가 선다.
++
++#### 그런데 파이프라인에 넣으면 안 나온다 — 막힌 곳은 전처리가 아니라 탐지
++`upscaleSharpen()` + 전용 구제 단계를 만들어 붙여봤다. 결과 0 -> 1곳,
++비용 +35~45ms. 여백을 키우면 2곳/+240ms. 채택하지 않았다.
++
++막힌 곳은 로케이터다:
++- 기본 타일이 원본 128px이라 45px 코드 여러 개가 한 타일에 뭉친다.
++  타일을 64px로 줄이면 작은 영역이 7 -> 12개로 갈라지지만 여전히 24개엔
++  못 미친다.
++- 에너지 순위 상위 2개가 **글자**였다("AUTONICS 3.1MP" 896x128,
++  좌상단 640x896). 큰 텍스트 블록이 작은 QR을 순위에서 밀어낸다.
++- 타일 정렬 크롭이라 코드가 창 가운데에 오지 않는다. 사람이 코드 중심에
++  맞춰 자른 위 상한(6~9곳)과의 차이가 대부분 여기서 난다.
++
++즉 전처리는 맞았는데 **"어디를 자를지"가 이 밀도에서 안 맞는다.** 이걸
++제대로 하려면 QR 파인더 패턴 전용 탐지기 같은 별도 작업이 필요하고,
++그건 이 항목의 범위를 넘는다. 측정만 남기고 코드는 넣지 않았다.
++(재현: `upscaleSharpen`은 쌍선형 정수배 확대 + `out = up + 1.5*(up - blur^n(up))`,
++n = 배율. 3배 + amount 150이 위 6곳 조합이다.)
++
++**남은 항목**: 밀집된 소형 코드용 탐지기. 지금 로케이터는 "큰 프레임 속
++코드 하나~몇 개"에 맞춰져 있고(§3.17), 수십 개가 흩뿌려진 차트류는
++설계 범위 밖이다.
++
+ ---
+ 
+ ## §4. 심볼로지 커버리지
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 0b078a4..74b4d63 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -187,6 +187,7 @@ struct PipelineConfig {
+     // PDF417/1D뿐이라 상위 몇 개면 충분하다.
+     int regionRescueMaxRotations = 2;
+ 
++
+     // [DPM/점각인 구제] §6.4 대화 참고. 실물 비교 대상 리더기 대조 검증까지
+     // 완료됨 — 반전->닫힘->재반전으로 점각인 코드의 이진화 실패를
+     // 구제한다.
+@@ -430,6 +431,7 @@ private:
+     std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
+                                                  RegionPass pass = RegionPass::Both);
+ 
++
+     std::vector<PipelineResult> tryDeskewRescue1D(const GrayView& image, int need);
+ 
+     // processViewTwoStage()의 2단계와 processViewROIs()가 공유하는 실제 작업:
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index e32feb7..a762dfc 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -65,5 +65,35 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage&
+  */
+ void boxBlur3x3(const GrayView& src, GrayImage& out);
+ 
++/*
++ * 퍼센타일 기반 선형 대비 스트레칭. 하위/상위 0.5%를 잘라 0~255로 편다.
++ * 이미 계조를 거의 다 쓰고 있으면(유효 폭이 minSpan 이상) 아무것도 하지
++ * 않고 false를 돌려준다 — 호출부가 헛디코드를 건너뛸 수 있게.
++ *
++ * minSpan 기본 200의 근거: 이 함수가 하는 일은 [lo,hi]를 [0,255]로 펴는
++ * 것뿐이라, lo/hi가 이미 양끝에 가까우면 LUT가 거의 항등식이 되어 결과가
++ * 안 바뀐다. 처음에 110으로 잡았다가 **정작 살리려던 케이스가 전부
++ * 걸러졌다** — 배경이 밝고 코드만 저대비인 프레임은 (배경 - 가장 어두운
++ * 바)가 이미 128쯤 되기 때문이다. 코드 자체의 대비와 프레임 전체의
++ * 계조 폭은 다른 값이다.
++ *
++ * 용도는 **저대비 ROI 구제**다. 실측(모듈 6px, 대비 축 스윕): 심볼로지마다
++ * 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다.
++ *   Code128  0.15까지 읽힘
++ *   QR       0.20까지
++ *   EAN13/EAN8/UPCA  0.30까지   <- 두 배가 필요하다
++ * 저대비 프레임에서 코드 영역만 잘라 이걸 먹이면 EAN13/UPCA가 0.20까지
++ * 내려간다(0.20/0.25 각각 실패 -> 성공).
++ *
++ * [중요 — 반드시 ROI 안에서만 할 것] 프레임 전체에 걸면 오히려 깨진다.
++ * 실측: 전역 스트레칭은 EAN/UPC는 똑같이 살리면서 QR 0.20/0.25/0.30을
++ * 전부 죽였다(원본에서는 읽히던 것들이다). 프레임 전체의 최소/최대는
++ * 배경과 조명이 지배하는데, 그 값으로 만든 LUT는 코드 영역 안의 계조를
++ * 오히려 뭉갠다. ROI 안의 히스토그램으로 만들면 그런 일이 없다.
++ * [[vscan-lite-roi-contrast-stretch]]
++ */
++bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
++
++
+ } // namespace vscan
+ 
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index be757c5..0069d0e 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -300,6 +300,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+     }
+ 
++
+     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
+     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
+     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
+@@ -324,7 +325,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+     // 이유는 실측상 **크롭이 너무 커도 다시 실패**하기 때문이다 — 애초에
+     // 실패 원인이 "프레임이 커서"였으니 당연하다(여백 240px 크롭 665x660은
+     // 읽히는데 여백 480px 크롭 1085x1140은 다시 실패한 각도가 있었다).
+-    const int maxRegions = std::max(1, cfg_.regionRescueMaxRegions);
++    // 기대 코드 수가 많으면 영역 상한도 그만큼 늘린다 — 상한이 4인데
++    // 코드가 12개면 영역 구제가 need를 채울 방법이 원천적으로 없다.
++    const int maxRegions = std::min(16, std::max(std::max(1, cfg_.regionRescueMaxRegions), need));
+     auto regions = findCodeRegions(image, maxRegions);
+     if (regions.empty()) return {};
+ 
+@@ -372,6 +375,59 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+     if (pass != RegionPass::RotateOnly) {
+         hits = decodeRegionsParallel(image, rects, 0, roiCfg);
+         if ((int)hits.size() >= need) return hits;
++
++        // [저대비 ROI 구제] 자르기만으로 안 되면 ROI 안에서 대비를 편다.
++        // 심볼로지마다 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다
++        // (Code128 0.15 / QR 0.20 / EAN13·UPCA 0.30). 저대비 프레임에서
++        // 코드 영역만 잘라 스트레칭하면 EAN13/UPCA가 0.20까지 내려간다.
++        //
++        // stretchContrast()는 이미 대비가 충분하면 false를 돌려주므로,
++        // 대비가 문제가 아닌 프레임에서는 히스토그램 한 번 값만 내고
++        // 디코드는 아예 안 돈다 — 비용이 사실상 0이다.
++        // 프레임 전체가 아니라 반드시 ROI 안에서 해야 한다는 근거는
++        // preprocess.hpp의 stretchContrast() 주석 참고.
++        // [[vscan-lite-roi-contrast-stretch]]
++        if (!budgetExceeded()) {
++            std::vector<PipelineResult> stretched;
++            const int srcStride = image.stride > 0 ? image.stride : image.width;
++            for (const Rect& rc : rects) {
++                if (budgetExceeded()) break;
++                const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
++                if (rw < 16 || rh < 16) continue;
++
++                GrayImage crop;
++                crop.width = rw;
++                crop.height = rh;
++                crop.pixels.resize(static_cast<size_t>(rw) * rh);
++                for (int r = 0; r < rh; ++r)
++                    std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
++                                image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
++
++                GrayImage boosted;
++                if (!stretchContrast(GrayView(crop), boosted)) continue;
++
++                Pipeline roiPipe(roiCfg);
++                auto sHits = roiPipe.processViewCore(GrayView(boosted));
++                if (sHits.empty()) {
++                    // [편 다음엔 한 번 뭉갠다] 스트레칭은 신호와 **노이즈를
++                    // 같이** 증폭한다. 대비가 낮을수록 이득이 커지므로
++                    // 양자화/센서 노이즈도 그만큼 커져서, 편 직후에는
++                    // 오히려 이진화가 흔들린다.
++                    // 실측(EAN13 대비 0.20): ROI를 펴기만 하면 실패,
++                    // 편 뒤 3x3 블러를 한 번 먹이면 읽힌다. 0.25는 펴는
++                    // 것만으로도 읽히므로 이 단계는 더 낮은 대비 전용이다.
++                    GrayImage smoothed;
++                    boxBlur3x3(GrayView(boosted), smoothed);
++                    sHits = roiPipe.processViewCore(GrayView(smoothed));
++                }
++                for (auto& r : sHits)
++                    for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
++                stretched.insert(stretched.end(), sHits.begin(), sHits.end());
++            }
++            stretched = dedup(std::move(stretched));
++            if ((int)stretched.size() >= need) return stretched;
++            if (stretched.size() > hits.size()) hits = std::move(stretched);
++        }
+     }
+     if (pass == RegionPass::CropOnly) return hits;
+ 
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 0487127..189a738 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -332,4 +332,41 @@ void boxBlur3x3(const GrayView& src, GrayImage& out) {
+     }
+ }
+ 
++bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
++    const int W = src.width, H = src.height;
++    if (W <= 0 || H <= 0) return false;
++    const int stride = src.stride > 0 ? src.stride : W;
++
++    int hist[256] = {0};
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        for (int x = 0; x < W; ++x) ++hist[row[x]];
++    }
++
++    // 하위/상위 0.5%를 잘라낸다. 최소/최대를 그대로 쓰면 먼지 한 점이나
++    // 반사광 한 픽셀이 전체 범위를 정해버린다.
++    const long total = static_cast<long>(W) * H;
++    const long cut = static_cast<long>(total * 0.005);
++    int lo = 0, hi = 255;
++    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
++    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
++
++    const int span = hi - lo;
++    if (span >= minSpan || span <= 0) return false;   // 이미 계조를 거의 다 쓰고 있다
++
++    uint8_t lut[256];
++    for (int i = 0; i < 256; ++i)
++        lut[i] = static_cast<uint8_t>(std::min(255, std::max(0, (i - lo) * 255 / span)));
++
++    out.width = W;
++    out.height = H;
++    out.pixels.resize(static_cast<size_t>(W) * H);
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
++        for (int x = 0; x < W; ++x) o[x] = lut[in[x]];
++    }
++    return true;
++}
++
+ } // namespace vscan
+diff --git a/tools/ci_baseline.txt b/tools/ci_baseline.txt
+index 267e826..2c24bda 100644
+--- a/tools/ci_baseline.txt
++++ b/tools/ci_baseline.txt
+@@ -1,5 +1,5 @@
+-rate=57.8
+-mean=138.00
+-p95=426.16
++rate=59.4
++mean=150.84
++p95=421.83
+ misdec=2
+ dup=3
+diff --git a/tools/ci_gate.sh b/tools/ci_gate.sh
+index a24ab95..2805281 100755
+--- a/tools/ci_gate.sh
++++ b/tools/ci_gate.sh
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env bash
+ # ci_gate.sh — 회귀 게이트 두 개를 한 번에 돌린다.
+ #
+-#   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 37/40 미만이면 실패.
++#   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 기준치 미만이면 실패.
+ #   2) 심볼로지 각도 스윕: 14종 x 0~90도. 검출률 100% 미만이거나 오디코딩이
+ #                        하나라도 나오면 실패.
+ #   3) 고정 시드 코퍼스: 검출률/평균/p95/중복을 기록하고, 직전 기준선 대비
+@@ -51,11 +51,17 @@ python3 "$ROOT/tools/generate_stress_images.py" --outdir "$WORK/stress" >/dev/nu
+ "$VERIFY" "$WORK/stress" > "$WORK/stress.txt" 2>/dev/null || true
+ LINE="$(grep "검출 성공" "$WORK/stress.txt" || true)"
+ echo "   $LINE"
+-if ! echo "$LINE" | grep -q "37/40.*37/40.*37/40"; then
+-  echo "!! 40종 기준선(37/40) 미달 — 검출 회귀"
+-  sed -n '1,50p' "$WORK/stress.txt"
+-  exit 1
+-fi
++# 세 경로(full / 2stage / 2stage-fast) 각각의 "N/40"을 뽑아 전부 기준치 이상인지 본다.
++# 고정 문자열로 grep하던 것을 숫자 비교로 바꾼 이유: 검출이 **좋아져도**
++# 실패했다(37/40 패턴이 38/40과 안 맞는다). 게이트는 회귀만 잡아야 한다.
++STRESS_MIN="${STRESS_MIN:-38}"
++for N in $(echo "$LINE" | grep -oE '[0-9]+/40' | cut -d/ -f1); do
++  if [ "$N" -lt "$STRESS_MIN" ]; then
++    echo "!! 40종 기준선(${STRESS_MIN}/40) 미달 — 검출 회귀 (${N}/40)"
++    sed -n '1,50p' "$WORK/stress.txt"
++    exit 1
++  fi
++done
+ 
+ echo ">> [3/5] 심볼로지 각도 스윕 (14종 x 0~90도 5도 간격, 디스크 0)"
+ SWEEP_FAIL=0
+@@ -116,4 +122,4 @@ if [ "$fail" = 1 ]; then
+   echo ">> ❌ 코퍼스 게이트 실패"
+   exit 1
+ fi
+-echo ">> ✅ 통과 (40종 37/40, 심볼로지 스윕 100%/오디코딩 0, 코퍼스 기준선 이내)"
++echo ">> ✅ 통과 (40종 ${STRESS_MIN}/40 이상, 심볼로지 스윕 100%/오디코딩 0, 코퍼스 기준선 이내)"
+-- 
+2.43.0
+
