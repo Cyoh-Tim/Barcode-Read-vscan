@@ -369,6 +369,58 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     return true;
 }
 
+void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount) {
+    const int W = src.width, H = src.height;
+    if (W <= 1 || H <= 1 || factor < 2) return;
+    const int stride = src.stride > 0 ? src.stride : W;
+    const int dw = W * factor, dh = H * factor;
+
+    // 1) 쌍선형 확대. 최근접으로 키우면 계단이 그대로 남아 아래 언샤프가
+    //    그 계단을 강조해버린다(모듈 경계가 아니라 픽셀 경계를 세운다).
+    GrayImage up;
+    up.width = dw;
+    up.height = dh;
+    up.pixels.resize(static_cast<size_t>(dw) * dh);
+    const float inv = 1.0f / static_cast<float>(factor);
+    for (int y = 0; y < dh; ++y) {
+        const float sy = (static_cast<float>(y) + 0.5f) * inv - 0.5f;
+        int iy = static_cast<int>(sy < 0 ? 0 : sy);
+        if (iy > H - 2) iy = H - 2;
+        const float fy = sy - static_cast<float>(iy);
+        const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(iy) * stride;
+        const uint8_t* __restrict r1 = r0 + stride;
+        uint8_t* __restrict o = up.pixels.data() + static_cast<size_t>(y) * dw;
+        for (int x = 0; x < dw; ++x) {
+            const float sx = (static_cast<float>(x) + 0.5f) * inv - 0.5f;
+            int ix = static_cast<int>(sx < 0 ? 0 : sx);
+            if (ix > W - 2) ix = W - 2;
+            const float fx = sx - static_cast<float>(ix);
+            const float top = r0[ix] + (r0[ix + 1] - r0[ix]) * fx;
+            const float bot = r1[ix] + (r1[ix + 1] - r1[ix]) * fx;
+            o[x] = static_cast<uint8_t>(top + (bot - top) * fy + 0.5f);
+        }
+    }
+
+    // 2) 언샤프: out = up + amount% * (up - blur(up)).
+    //    블러를 factor번 겹쳐 반경을 확대 배율에 맞춘다 — 원본 1픽셀이
+    //    확대본에서 factor픽셀이 되므로 그 스케일의 고주파를 되살려야 한다.
+    GrayImage blurred = up;
+    for (int i = 0; i < factor; ++i) {
+        GrayImage tmp;
+        boxBlur3x3(GrayView(blurred), tmp);
+        blurred = std::move(tmp);
+    }
+
+    out.width = dw;
+    out.height = dh;
+    out.pixels.resize(static_cast<size_t>(dw) * dh);
+    for (size_t i = 0; i < out.pixels.size(); ++i) {
+        const int base = up.pixels[i];
+        const int v = base + (base - blurred.pixels[i]) * amount / 100;
+        out.pixels[i] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    }
+}
+
 bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx) {
     const int W = src.width, H = src.height;
     if (W < 64 || H < 64) return false;

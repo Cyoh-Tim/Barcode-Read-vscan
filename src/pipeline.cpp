@@ -802,6 +802,11 @@ std::vector<PipelineResult> Pipeline::processViewROIs(const GrayView& image, con
     // 보고, processViewTwoStage처럼 "무조건 풀옵션"으로 덮어쓰지 않는다.
     PipelineConfig regionCfg = cfg_;
     regionCfg.tileThreads = 1; // 작은 crop이라 추가 타일링 불필요
+    // 작은 ROI 구제를 여기서만 켠다 — 호출자가 위치를 알려준 상황이라
+    // "작아서 안 읽히는" 코드에 확대를 걸 근거가 분명하다. 자동 탐지
+    // 경로는 그 근거가 없어서 기본 꺼짐이다.
+    // [[vscan-lite-small-code-upscale]]
+    if (regionCfg.smallRoiUpscale <= 1) regionCfg.smallRoiUpscale = 3;
 
     return decodeRegionsParallel(image, rects, padPx, regionCfg);
 }
@@ -901,19 +906,52 @@ std::vector<PipelineResult> Pipeline::decodeRegionsParallel(const GrayView& imag
     // 워커 3개가 각자 1코어를 쓰는 구조에서 ROI마다 스레드를 추가로 만들면
     // 3코어에 워커3 x ROI수 만큼의 스레드가 올라가 서로 경쟁한다(과다구독).
     // 이 경우 순차 처리가 더 빠르다.
+    // [작은 ROI 구제] 원본 크기로 빈손이면 확대 + 언샤프로 한 번 더.
+    // 모듈이 2px 안팎이면 인쇄/광학 흐림이 모듈 경계를 뭉개서 이진화가
+    // 어느 쪽으로도 안 떨어진다. 확대만으로는 흐림도 같이 커질 뿐이라
+    // 확대한 뒤 고주파를 되살려야 한다.
+    //
+    // 실측(실물 3.1MP 해상도 차트, QR 21x21모듈이 약 45px = 모듈 2.1px):
+    // 좌표를 정확히 알려줘도 원본 크기로는 24곳 중 0곳, 3배 확대 +
+    // 언샤프를 붙이면 6곳이 읽힌다.
+    //
+    // 여기(ROI 디코드 공통 경로)에 두는 이유: 외부에서 위치를 주는
+    // vscan_process_gray_rois()와 추적 모드가 이 함수를 쓰는데, 그 경로는
+    // "어디에 있는지는 안다, 작아서 안 읽힐 뿐"인 상황 그 자체다.
+    // 자동 탐지 경로에서는 영역이 보통 타일 크기(128px+여백)를 넘어서
+    // 이 분기에 잘 안 걸린다 — 밀집 소형 코드는 탐지 자체가 막히는데
+    // 그건 별도 문제다(§3.20).
+    //
+    // 비용: ROI 디코드가 빈손일 때만, 그것도 작은 ROI에만 든다.
+    // [[vscan-lite-small-code-upscale]]
+    auto decodeCrop = [&](Pipeline& pipe, const GrayImage& packed) {
+        auto hits = pipe.processViewCore(GrayView(packed));
+        if (!hits.empty()) return hits;
+        const int f = regionCfg.smallRoiUpscale;
+        if (f < 2 || packed.width > regionCfg.smallRoiMaxPx || packed.height > regionCfg.smallRoiMaxPx)
+            return hits;
+        GrayImage big;
+        upscaleSharpen(GrayView(packed), f, big);
+        if (big.pixels.empty()) return hits;
+        auto up = pipe.processViewCore(GrayView(big));
+        for (auto& r : up)
+            for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
+        return up;
+    };
+
     std::vector<std::vector<PipelineResult>> parts(crops.size());
     if (regionCfg.tileThreads == 1 || crops.size() <= 1) {
         Pipeline refiner(regionCfg);   // crop 전체가 같은 설정이라 한 번만 만든다
         for (size_t i = 0; i < crops.size(); ++i) {
-            parts[i] = refiner.processViewCore(GrayView(crops[i].packed));
+            parts[i] = decodeCrop(refiner, crops[i].packed);
         }
     } else {
         std::vector<std::future<std::vector<PipelineResult>>> futures;
         futures.reserve(crops.size());
         for (auto& c : crops) {
-            futures.push_back(std::async(std::launch::async, [regionCfg, &c]() {
+            futures.push_back(std::async(std::launch::async, [regionCfg, &c, &decodeCrop]() {
                 Pipeline refiner(regionCfg);
-                return refiner.processViewCore(GrayView(c.packed));
+                return decodeCrop(refiner, c.packed);
             }));
         }
         for (size_t i = 0; i < futures.size(); ++i) parts[i] = futures[i].get();

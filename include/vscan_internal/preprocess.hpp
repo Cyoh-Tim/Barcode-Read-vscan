@@ -114,6 +114,27 @@ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
  */
 bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24);
 
+/*
+ * 정수배 확대(쌍선형) + 언샤프 마스킹.
+ *
+ * 용도는 **작은 코드 구제**다. 모듈이 2px 안팎이면 인쇄/광학 흐림이
+ * 모듈 경계를 뭉개서 이진화가 어느 쪽으로도 안 떨어진다. 확대만으로는
+ * 흐림도 같이 커질 뿐이라, 확대한 뒤 고주파를 되살려야 한다.
+ *
+ * 실측(실물 카메라 해상도 차트, 3.1MP 2000x1500, QR 21x21모듈이 약
+ * 45px = 모듈 2.1px, 사본이라 흐림이 심함) — 코드 주변을 잘라놓고:
+ *   원본 크기 그대로   24곳 중  0곳
+ *   확대만(2/3/4/6배)  24곳 중  3곳
+ *   확대 + 언샤프      24곳 중  9곳 (배율별 최선)
+ *   3배 + 언샤프 고정  24곳 중  6곳
+ * 성공 조합의 거의 전부에 언샤프가 들어 있었다 — 배율보다 샤프닝 유무가
+ * 결정적이었다.
+ *
+ * amount는 고주파를 더하는 세기(100 = 원본 + (원본-블러) 1.0배).
+ * [[vscan-lite-small-code-upscale]]
+ */
+void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount = 150);
+
 
 } // namespace vscan
 
