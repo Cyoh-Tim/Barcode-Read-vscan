@@ -1,0 +1,208 @@
+From 2103d9072676f0299767cdcbe1a18b3bf7b5610a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 12:00:43 +0000
+Subject: [PATCH 32/32] =?UTF-8?q?=EB=A7=88=EC=9D=BC=EC=8A=A4=ED=86=A4=204?=
+ =?UTF-8?q?=20=EC=B0=A9=EC=88=98=20=E2=80=94=20=EA=B2=A9=EC=9E=90=20?=
+ =?UTF-8?q?=EC=9E=AC=EC=83=98=ED=94=8C=EB=A7=81=EC=9D=80=20=EC=A0=95?=
+ =?UTF-8?q?=EB=B0=80=EB=8F=84=EC=97=90=EC=84=9C=20=EB=A7=89=ED=98=94?=
+ =?UTF-8?q?=EB=8B=A4=20(=EB=AF=B8=EC=B1=84=ED=83=9D)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+디코더를 새로 쓰는 대신 더 싼 길을 시도했다: 파인더 3점으로 모듈 격자를
+세우고 각 칸의 중심 한 점만 원본에서 읽어, 모듈당 6px짜리 이상적인 QR을
+만들어 zxing에 넘긴다. 확대+언샤프가 "흐린 그림을 덜 흐리게" 만드는
+것이라면 이쪽은 아예 경계를 안 본다 — 중심은 흐림에 가장 덜 오염된
+지점이다.
+
+확인한 것:
+- 격자 자체는 맞는다. 재샘플 이미지를 보면 파인더 셋이 세 모서리에
+  또렷하다.
+- 표본이 회색이다(모듈 2px대면 중심 한 점도 이웃과 섞인다). 파인더의
+  "답을 아는 칸"(안쪽 3x3 검정, 둘레 흰색)으로 흑백 기준을 잡아 모듈
+  단위 이진화까지 했다.
+- 그래도 0/8이다. 이진화한 격자에서 파인더 모양이 깨진다 — 격자가
+  반 모듈 밀렸다는 뜻이다.
+
+원인은 파인더 중심의 정밀도다. 기하는 멀쩡하다(사잇각 85~93도, 두 팔
+길이 비 0.98~1.08로 원근 왜곡 거의 없음). 그런데 두 파인더 중심 사이는
+정확히 V-7 = 14모듈이어야 하는데 실측이 12.6~13.9다. 행/열 스캔의 중심은
+오차가 ±1px인데 모듈이 2.1px이니 그게 반 모듈이고, 코드 반대편까지
+누적된다.
+
+좁히려고 두 가지를 했고 둘 다 남긴다:
+- 어두운 질량 무게중심으로 부분화소 정밀화(창 ±2.5모듈). 두 팔 길이 비가
+  0.94~1.13 -> 0.98~1.08로 좋아졌다. 판독은 그대로지만 후보 상자가
+  정확해지므로 유지한다.
+- 파인더 좌표를 QrCandidate에 내보낸다(격자를 세우려는 쪽이 쓸 수 있게).
+
+필요한 것은 파인더 중심을 ~0.2px까지 잡는 부분화소 정합(런 경계의 50%
+교차점을 선형 보간, 두 축 x 여러 스캔라인 평균)과, 버전 1에는 정렬
+패턴이 없으니 타이밍 패턴으로 격자를 보정하는 것이다. §3.22에 적어뒀다.
+
+격자 렌더러 자체는 지웠다 — 안 쓰는 100줄을 두는 것보다 문서로 남기는
+편이 낫다(이 저장소의 기존 관행과 같다).
+
+덤: 1:1:3:1:1에서 잰 모듈은 흐림 때문에 4%쯤 크게 나온다(바깥 검정 런이
+번져 total이 커진다).
+
+게이트 통과. 실물 차트 자동 검출 7곳 유지.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                     | 45 +++++++++++++++++++++++-----
+ include/vscan_internal/locate_qr.hpp | 10 +++++++
+ src/locate_qr.cpp                    | 42 ++++++++++++++++++++++++++
+ 3 files changed, 89 insertions(+), 8 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 949af00..3b6eb94 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -1802,7 +1802,7 @@ angleDeg가 이미 있으면 자르기 패스에서 곧바로 회전까지 갈 
+ | | 0곳 | 목표 |
+ |---|---|---|
+ | 자동(`vscan_process_gray`) | **0곳** | — |
+-| 자동 + `enable_qr_finder_rescue=1` | **7곳** | 마일스톤 1~3 완료 |
++| 자동 + `enable_qr_finder_rescue=1` | **7곳** | 마일스톤 1~3 완료, 4는 미채택 |
+ | 파인더 좌표를 직접 준 ROI API | **6곳** | 좌표 품질이 결과를 가른다 |
+ | 이론 천장 | 10곳 | 광학 흐림이 한계 |
+ 
+@@ -1867,13 +1867,42 @@ angleDeg가 이미 있으면 자르기 패스에서 곧바로 회전까지 갈 
+ 천장 10곳 중 못 찾은 2곳은 (1513,1313), (899,360)이고, 찾았으나 못 읽는
+ 곳이 1곳이다.
+ 
+-**마일스톤 3(연구)** — 천장 자체를 올리려면 모듈 격자를 부분화소로
+-맞춰 샘플링하는 모델 기반 디코드가 필요하다. 파인더 3개 좌표에서
+-호모그래피를 세우고 격자점을 직접 샘플링하는 방식인데, 이건
+-"전처리 후 일반 디코더"가 아니라 **QR 전용 디코더를 새로 쓰는 것**이다.
+-착수 전에 실물 카메라 캡처로 다시 재볼 것 — 이 이미지는 인쇄물의
+-사본이라 실제 렌즈 캡처보다 흐림이 심할 수 있고, 그러면 천장이
+-저절로 올라간다.
++**마일스톤 4 — 착수했고, 막힌 지점을 정확히 확인했다(미채택).**
++
++디코더를 새로 쓰는 대신 더 싼 길을 택했다: 파인더 3점으로 모듈 격자를
++세우고 **각 칸의 중심 한 점만** 원본에서 읽어, 모듈당 6px짜리 이상적인
++QR 이미지를 만들어 zxing에 넘긴다. 확대+언샤프가 "흐린 그림을 덜 흐리게"
++만드는 것이라면 이쪽은 아예 경계를 안 본다 — 중심은 흐림에 가장 덜
++오염된 지점이다.
++
++구현해서 눈으로 확인한 것:
++- **격자 자체는 맞는다.** 재샘플한 이미지를 보면 파인더 세 개가 세
++  모서리에 또렷하게 자리잡는다.
++- **표본이 회색이다.** 모듈이 2px대면 중심 한 점도 이웃과 섞인다.
++  그래서 파인더의 "답을 아는 칸"(안쪽 3x3은 반드시 검정, 그 둘레는
++  반드시 흰색)으로 흑백 기준을 잡아 모듈 단위로 이진화했다.
++- **그래도 0/8이다.** 이진화한 격자를 보면 파인더 모양이 깨져 있다 —
++  격자가 반 모듈쯤 밀렸다는 뜻이다.
++
++원인은 **파인더 중심의 정밀도**다. 기하는 문제가 없다(사잇각 85~93도,
++두 팔 길이 비 0.98~1.08로 원근 왜곡은 거의 없다). 그런데 두 파인더
++중심 사이는 정확히 V-7 = 14모듈이어야 하는데 실측이 12.6~13.9다.
++행/열 스캔에서 얻는 중심은 오차가 ±1px 수준인데 모듈이 2.1px이니
++그게 **반 모듈**이고, 격자를 세우면 코드 반대편까지 누적된다.
++
++두 가지를 시도해 좁혔지만 못 넘었다:
++- 어두운 질량의 무게중심으로 부분화소 정밀화(창 ±2.5모듈). 두 팔 길이
++  비가 0.94~1.13 -> 0.98~1.08로 좋아졌지만 판독은 여전히 0.
++- 모듈 크기 대신 팔 길이로 기저를 정의(자기모순 제거). 변화 없음.
++  덤으로 알게 된 것: 1:1:3:1:1에서 잰 모듈은 흐림 때문에 4%쯤 크게
++  나온다(바깥 검정 런이 번져서 total이 커진다).
++
++**필요한 것**: 파인더 중심을 ~0.2px까지 잡는 부분화소 정합. 런 경계의
++50% 교차점을 선형 보간으로 잡고 두 축 x 여러 스캔라인으로 평균 내는
++방식이면 될 것으로 보인다. 버전 1은 정렬 패턴이 없으니 타이밍 패턴
++(6번 행/열의 교대 무늬)으로 격자를 보정하는 것도 같이 필요하다.
++코드는 남기지 않았다 — 위 내용이면 다시 만들 수 있고, 안 쓰는 100줄을
++두는 것보다 낫다. 파인더 좌표는 `QrCandidate`에 그대로 내보내 둔다.
+ 
+ ---
+ 
+diff --git a/include/vscan_internal/locate_qr.hpp b/include/vscan_internal/locate_qr.hpp
+index 45fe146..ee941fa 100644
+--- a/include/vscan_internal/locate_qr.hpp
++++ b/include/vscan_internal/locate_qr.hpp
+@@ -29,8 +29,18 @@ namespace vscan {
+ struct QrCandidate {
+     Rect bbox;        // 코드 전체를 감싸는 상자 (정지대 제외)
+     float modulePx;   // 파인더에서 잰 모듈 한 칸의 픽셀 크기
++
++    // 파인더 세 개의 중심. corner가 직각(좌상단), armA/armB가 두 팔이다.
++    // 상자 계산에 쓰고, 모듈 격자를 직접 세우려는 쪽에도 그대로 넘길 수
++    // 있게 내보낸다(§3.22 마일스톤 4 참고 — 지금은 정밀도가 모자라
++    // 파이프라인에서 쓰지 않는다).
++    float cornerX, cornerY;
++    float armAX, armAY;
++    float armBX, armBY;
++    int versionModules;   // 한 변의 모듈 수 (21, 25, ..., 177)
+ };
+ 
++
+ /*
+  * 파인더 패턴 세 개가 직각이등변을 이루는 조합을 찾아 QR 후보를 돌려준다.
+  *
+diff --git a/src/locate_qr.cpp b/src/locate_qr.cpp
+index de58f99..c1c1bec 100644
+--- a/src/locate_qr.cpp
++++ b/src/locate_qr.cpp
+@@ -159,6 +159,40 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
+         }
+         if (!merged) pts.push_back({h.cx, h.cy, h.module, 1});
+     }
++    // [부분화소 정밀화] 각 파인더 중심을 어두운 질량의 무게중심으로
++    // 다시 잡는다.
++    //
++    // 왜 필요한가. 행/열 스캔에서 얻는 중심은 런 경계의 정수 좌표에서
++    // 나오므로 오차가 ±1px 수준인데, 모듈이 2.1px이면 그게 **반 모듈**이다.
++    // 격자를 세울 때 이 오차가 코드 반대편까지 누적돼서, 파인더는 맞아
++    // 보여도 데이터 칸은 한 칸씩 밀린다(실측: 재샘플한 격자를 눈으로 보면
++    // 파인더 모양이 깨져 있었고 판독이 0곳이었다).
++    //
++    // 파인더는 7x7 안에서 검정이 압도적이라 무게중심이 곧 중심이다.
++    // 창은 ±3.5모듈 — 딱 파인더 크기다.
++    for (auto& p : pts) {
++        // 창 반경 2.5모듈: 파인더의 검은 테두리(반경 3.5)까지 다 넣으면
++        // 바로 옆 데이터 칸이 섞여 무게중심이 끌린다. 조금 좁게 잡아
++        // 파인더 안쪽 구조만 본다.
++        const int r = std::max(2, static_cast<int>(2.5f * p.module + 0.5f));
++        const int cx = static_cast<int>(p.cx + 0.5f), cy = static_cast<int>(p.cy + 0.5f);
++        const int x0 = std::max(0, cx - r), x1 = std::min(image.width - 1, cx + r);
++        const int y0 = std::max(0, cy - r), y1 = std::min(image.height - 1, cy + r);
++        if (x1 <= x0 || y1 <= y0) continue;
++        const int stride = image.stride > 0 ? image.stride : image.width;
++        double wsum = 0, sx = 0, sy = 0;
++        for (int y = y0; y <= y1; ++y) {
++            const uint8_t* __restrict row = image.pixels + static_cast<size_t>(y) * stride;
++            for (int x = x0; x <= x1; ++x) {
++                const double w = 255.0 - row[x];   // 어두울수록 무겁게
++                wsum += w;
++                sx += w * x;
++                sy += w * y;
++            }
++        }
++        if (wsum > 1e-6) { p.cx = static_cast<float>(sx / wsum); p.cy = static_cast<float>(sy / wsum); }
++    }
++
+     // 표가 적은 것은 잡음이다 — 파인더는 가로 7모듈 x 세로 7모듈이라
+     // 가로 스캔에서도 세로 스캔에서도 여러 번 걸린다. 임계 3은 실측값:
+     // 2로 두면 후보가 9곳 나오는데 그중 하나가 가짜였고(ROI 디코드를
+@@ -280,6 +314,14 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
+                     y0 = std::min(y0, ys[t]); y1 = std::max(y1, ys[t]);
+                 }
+                 QrCandidate c;
++                c.cornerX = P[corner]->cx; c.cornerY = P[corner]->cy;
++                c.armAX = P[a]->cx;        c.armAY = P[a]->cy;
++                c.armBX = P[b]->cx;        c.armBY = P[b]->cy;
++                // 변 길이에서 버전을 역산해 유효 격자(17+4k)로 맞춘다.
++                {
++                    const int v = static_cast<int>(std::lround((t.leg / mod + 7.0f - 17.0f) / 4.0f));
++                    c.versionModules = 17 + 4 * std::max(1, std::min(40, v));
++                }
+                 c.bbox.x0 = std::max(0, static_cast<int>(x0 - pad));
+                 c.bbox.y0 = std::max(0, static_cast<int>(y0 - pad));
+                 c.bbox.x1 = std::min(image.width, static_cast<int>(x1 + pad) + 1);
+-- 
+2.43.0
+
