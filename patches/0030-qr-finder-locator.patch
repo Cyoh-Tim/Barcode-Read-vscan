@@ -1,0 +1,628 @@
+From 358a001aba5a65be0f08be13b387635e822600cd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 10:36:10 +0000
+Subject: [PATCH] =?UTF-8?q?=EB=A7=88=EC=9D=BC=EC=8A=A4=ED=86=A4=201:=20QR?=
+ =?UTF-8?q?=20=ED=8C=8C=EC=9D=B8=EB=8D=94=20=EB=A1=9C=EC=BC=80=EC=9D=B4?=
+ =?UTF-8?q?=ED=84=B0=20=E2=80=94=20=EC=8B=A4=EB=AC=BC=20=EC=B0=A8=ED=8A=B8?=
+ =?UTF-8?q?=20=EC=9E=90=EB=8F=99=20=EA=B2=80=EC=B6=9C=200=20->=203?=
+ =?UTF-8?q?=EA=B3=B3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+사용자가 §3.20/3.22의 실물 해상도 차트를 목표로 정했고, 그게 사본이
+아니라 실제 카메라 캡처이며 한계 시험에 상시 쓰는 것임을 확인했다.
+즉 흐림은 광학에서 오는 진짜 값이다.
+
+에너지 로케이터(findCodeRegions)는 이 프레임에서 원리적으로 못 쓴다 —
+타일이 원본 128px이라 45px 코드 여러 개가 한 타일에 뭉치고, 에너지
+순위가 면적에 좌우돼 큰 글자 블록("AUTONICS 3.1MP" 896x128)이 작은
+QR을 밀어낸다.
+
+QR 고유 구조를 쓰는 탐지기를 새로 넣었다(src/locate_qr.cpp). 파인더
+패턴은 어느 방향으로 잘라도 1:1:3:1:1이고 이 비율은 크기·회전 불변이라,
+작아도 흐려도 비율만 살아있으면 걸린다. 찾은 상자는 processViewROIs()로
+넘긴다 — 거기엔 작은 ROI를 확대+언샤프로 살리는 단계가 이미 있다.
+
+결과: 후보 5곳을 **오탐 없이** 찾고(모듈 2.14~2.23px, 실제 2.1px),
+자동 경로 검출이 0 -> 3곳이 된다.
+
+구현하며 배운 것:
+
+- 행을 건너뛰면 안 된다. rowStep=2로 뒀다가 후보가 11 -> 4곳으로
+  반토막 났다(파인더점 68 -> 33). 흐린 이미지에서는 각 행의 비율 검사가
+  아슬아슬하게 통과/탈락해서, 건너뛰면 통과하는 행을 놓친다.
+
+- 같은 크기 코드가 격자로 늘어서면 **이웃 코드의 파인더끼리도**
+  직각이등변을 이룬다. 45x45 진짜 5곳과 함께 298x280, 486x374 같은
+  가짜가 6곳 나왔다. (1) 변이 짧은 조합부터 고르고 (2) 변 길이를
+  40모듈(버전 8)로 제한해 걸렀다. 규격 격자(14,18,22,... 모듈)로도
+  걸러봤는데 큰 크기에서는 안 듣는다 — 변 90모듈이면 격자 간격이
+  전체의 4%라 모듈 추정 오차에 묻히고, 실제로 가짜 하나가 정확히
+  90.0모듈로 통과했다.
+
+- 기본은 OFF다. 전체 행 스캔이라 프레임당 7.6~16ms이고 실패 프레임마다
+  든다. 난수 코퍼스 평균이 150 -> 186ms(+24%)로 회귀 게이트를 넘었다.
+  얻는 것이 "밀집 소형 QR" 한정이라 아는 쪽에서 켜는 게 맞다
+  (enable_qr_finder_rescue).
+
+게이트 통과: 40종 38/40, 14종 각도 스윕 100%/오디코딩 0, 코퍼스 기준선 이내.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ CMakeLists.txt                       |   1 +
+ PROJECT_NOTES.md                     |  44 ++++-
+ include/vscan.h                      |  14 ++
+ include/vscan_internal/locate_qr.hpp |  55 ++++++
+ include/vscan_internal/pipeline.hpp  |  24 +++
+ src/locate_qr.cpp                    | 277 +++++++++++++++++++++++++++
+ src/pipeline.cpp                     |  45 +++++
+ src/vscan_c_api.cpp                  |   1 +
+ 8 files changed, 453 insertions(+), 8 deletions(-)
+ create mode 100644 include/vscan_internal/locate_qr.hpp
+ create mode 100644 src/locate_qr.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7531b52..fc22842 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -97,6 +97,7 @@ set(VSCAN_SOURCES
+   src/preprocess.cpp
+   src/deskew1d.cpp
+   src/locate.cpp
++  src/locate_qr.cpp
+   src/decoder_zxing.cpp
+   src/pipeline.cpp
+   src/gs1.cpp
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 57147f1..a72f876 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -1801,14 +1801,42 @@ angleDeg가 이미 있으면 자르기 패스에서 곧바로 회전까지 갈 
+ #### 현재 위치와 남은 길
+ | | 0곳 | 목표 |
+ |---|---|---|
+-| 자동(`vscan_process_gray`) | **0곳** | 파인더 로케이터 필요 |
+-| 파인더 좌표 + ROI API | **6곳** | 천장 10곳 |
+-| 이론 천장 | 10곳 | 사본 흐림이 한계 |
+-
+-**마일스톤 1** — QR 파인더 로케이터를 C++로 구현해 자동 경로에 넣는다.
+-프로토타입이 검증됐으므로 순수 구현 작업이다. 이걸로 자동 0 -> 6곳.
+-2D 전용이라 1D/DataMatrix에는 영향이 없고, 기존 에너지 로케이터가
+-빈손일 때만 돌리면 비용도 실패 프레임에 한정된다.
++| 자동(`vscan_process_gray`) | **0곳** | — |
++| 자동 + `enable_qr_finder_rescue=1` | **3곳** | 마일스톤 1 완료 |
++| 파인더 좌표를 직접 준 ROI API | **6곳** | 좌표 품질이 결과를 가른다 |
++| 이론 천장 | 10곳 | 광학 흐림이 한계 |
++
++**이 이미지는 실물 카메라 캡처이고 사용자가 한계 시험에 상시 쓰는
++것이다**(사본이 아니다). 즉 위 흐림은 렌즈·센서·거리에서 오는 진짜
++값이고, 천장 10곳도 이 광학 구성의 진짜 천장이다.
++
++**마일스톤 1 — 완료(2026-07-31), 자동 0 -> 3곳.**
++`src/locate_qr.cpp` / `findQrCandidates()`. 구현하며 배운 것 셋:
++
++1. **행을 건너뛰면 안 된다.** "파인더가 세로 7모듈이니 2행 간격이어도
++   여러 번 걸린다"고 보고 rowStep=2로 뒀다가 후보가 11 -> 4곳으로
++   반토막 났다(파인더점 68 -> 33). 흐린 이미지에서는 각 행의 1:1:3:1:1이
++   아슬아슬하게 통과/탈락해서, 건너뛰면 통과하는 행 자체를 놓친다.
++   비용 차이는 8.1 vs 5.4ms다.
++
++2. **같은 크기 코드가 격자로 늘어서면 이웃 코드의 파인더끼리도
++   직각이등변을 이룬다.** 차트가 정확히 그래서, 45x45 진짜 5곳과 함께
++   298x280, 486x374 같은 가짜가 6곳 나왔다. 두 가지로 걸렀다:
++   - 변이 짧은 조합부터 고른다(진짜 파인더 셋은 언제나 자기 코드 안에 있다)
++   - **변 길이 상한 40모듈**(버전 8). 이 단계는 작은 코드 전용이므로
++     상한을 두는 게 뜻도 맞다.
++   규격 격자(변이 14, 18, 22, ... 모듈)로도 걸러봤는데 큰 크기에서는
++   안 듣는다 — 변이 90모듈이면 격자 간격 4모듈이 전체의 4%라 모듈 추정
++   오차(±10%)에 묻힌다. 가짜 하나가 정확히 90.0모듈로 나와 통과했다.
++
++3. **기본을 켤 수는 없었다.** 전체 행을 훑어야 해서 2048x1536 기준
++   프레임당 7.6~16ms이고 실패 프레임마다 든다. 난수 코퍼스 평균이
++   150 -> 186ms(+24%)로 회귀 게이트를 넘었다. 얻는 것이 "밀집 소형 QR"
++   이라는 특정 상황 한정이라 **opt-in**으로 뒀다
++   (`enable_qr_finder_rescue`). 켠 상태의 차트 결과가 위의 3곳이다.
++
++찾은 후보는 5곳이고 **오탐 0**이다(전부 진짜 QR, 모듈 2.14~2.23px).
++그중 3곳이 최종 판독된다 — 나머지 2곳은 아래 마일스톤 2의 몫이다.
+ 
+ **마일스톤 2** — 6 -> 10곳. 천장 측정에서 성공한 조합을 보면 LANCZOS
+ 확대와 오토콘트라스트가 섞여 있다. 지금 구현은 쌍선형 + 박스블러
+diff --git a/include/vscan.h b/include/vscan.h
+index ceaa4e6..42eb7a6 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -292,6 +292,20 @@ typedef struct {
+      * 오른다(실측). 마지막 한 자리가 절실한 배치에서만 쓸 것.
+      */
+     int enable_1d_deskew_rescue;
++
++    /*
++     * [QR 파인더 구제] 0 = 기본(꺼짐), 1 = 켬.
++     *
++     * 작은 QR이 여럿 흩뿌려진 프레임 전용이다. 일반 로케이터는 그래디언트
++     * 에너지로 영역을 찾는데, 45px짜리 코드 여러 개는 한 타일에 뭉치고
++     * 큰 글자 블록에 순위가 밀린다. 이걸 켜면 QR 파인더 패턴(1:1:3:1:1)
++     * 으로 코드를 직접 찾아 그 자리만 확대·재디코드한다.
++     *
++     * 실측(실물 3.1MP 해상도 차트, 모듈 2.2px): 검출 0 -> 3곳.
++     * 비용은 실패한 프레임마다 7.6~16ms(전체 행 스캔)라 기본은 꺼둔다.
++     * 코드가 화면에서 50px 안팎으로 작게 잡히는 배치에서만 켤 것.
++     */
++    int enable_qr_finder_rescue;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/locate_qr.hpp b/include/vscan_internal/locate_qr.hpp
+new file mode 100644
+index 0000000..45fe146
+--- /dev/null
++++ b/include/vscan_internal/locate_qr.hpp
+@@ -0,0 +1,55 @@
++#pragma once
++#include "vscan_internal/frame.hpp"
++#include <vector>
++
++namespace vscan {
++
++/*
++ * [QR 파인더 패턴 탐지 — 작고 흐린 QR 전용]
++ *
++ * 왜 별도 탐지기인가. findCodeRegions()(locate.hpp)는 그래디언트 에너지만
++ * 보므로 심볼로지를 안 가리는 대신, **작은 코드가 여러 개 흩뿌려진 프레임**
++ * 에서는 원리적으로 못 쓴다:
++ *   - 타일이 원본 128px이라 45px짜리 코드 여러 개가 한 타일에 뭉친다.
++ *   - 에너지 순위가 면적에 좌우돼서, 큰 글자 블록이 작은 QR을 밀어낸다.
++ *     실측(실물 3.1MP 해상도 차트): 상위 2개가 "AUTONICS 3.1MP"(896x128)와
++ *     좌상단 텍스트 덩어리(640x896)였다.
++ *
++ * 여기서는 QR **고유의 구조**를 쓴다. 파인더 패턴(세 모서리의 겹눈 사각형)은
++ * 어느 방향으로 잘라도 흑:백:흑:백:흑 = 1:1:3:1:1 비율로 나온다. 이 비율은
++ * 크기와 회전에 불변이라, 코드가 작아도 흐려도 비율만 살아있으면 걸린다.
++ *
++ * 실측(같은 차트, 모듈 2.1px): 파인더 후보 64개 -> 직각이등변 3개 조합으로
++ * QR 후보 11곳. 변 길이에서 역산한 모듈이 2.16~2.51px로 실제(2.1px)와
++ * 맞고, **11곳 중 9곳이 "잘라주면 읽히는" 지점**이었다. 즉 읽을 수 있는
++ * 코드를 정확히 집어낸다.
++ *
++ * 비용이 있으므로(전체 행 스캔) 다른 모든 단계가 실패한 뒤에만 부른다.
++ */
++struct QrCandidate {
++    Rect bbox;        // 코드 전체를 감싸는 상자 (정지대 제외)
++    float modulePx;   // 파인더에서 잰 모듈 한 칸의 픽셀 크기
++};
++
++/*
++ * 파인더 패턴 세 개가 직각이등변을 이루는 조합을 찾아 QR 후보를 돌려준다.
++ *
++ * minModulePx: 이보다 작은 모듈은 후보에서 뺀다. 기본 0.8px — 그 아래는
++ *   1:1:3:1:1을 이룰 픽셀 자체가 없어서 잡히는 게 전부 잡음이다.
++ * maxModulePx: 이보다 큰 모듈은 후보에서 뺀다. 기본 6.0px.
++ *   이 탐지기는 "모듈이 작아서 일반 경로가 놓친 코드"를 위한 것이다.
++ *   모듈이 4px를 넘는데 못 읽혔다면 원인이 크기가 아니므로 여기서
++ *   찾아봐야 얻을 게 없고, 대신 난수 코퍼스처럼 정상 크기 코드가 있는
++ *   프레임에서 헛후보가 나와 ROI 확대 디코드를 헛돌린다 —
++ *   실측으로 코퍼스 평균이 24% 늘었다.
++ * rowStep: 몇 행마다 스캔할지. **1이 기본이고, 2로 올리면 안 된다.**
++ *   "파인더가 세로 7모듈이니 2행 간격이어도 여러 번 걸린다"고 보고 2로
++ *   뒀다가 실측에서 후보가 11곳 -> 4곳으로 반토막 났다(파인더점 68 -> 33).
++ *   흐린 이미지에서는 각 행의 1:1:3:1:1이 아슬아슬하게 통과/탈락하므로,
++ *   행을 건너뛰면 통과하는 행 자체를 놓친다. 비용 차이는 8.1 vs 5.4ms다.
++ */
++std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidates = 16,
++                                          float minModulePx = 0.8f, float maxModulePx = 6.0f,
++                                          int rowStep = 1);
++
++} // namespace vscan
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 1c14f24..b60448c 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -84,6 +84,26 @@ struct PipelineConfig {
+      */
+     bool enableZBar = false;
+ 
++    /*
++     * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
++     * 때만 돈다.
++     *
++     * 에너지 로케이터가 원리적으로 못 잡는 "작은 QR이 여럿 흩뿌려진
++     * 프레임"을 위한 것이다 — 파인더 패턴(1:1:3:1:1)으로 QR 자체를 찾는다.
++     * 실측(실물 3.1MP 해상도 차트, QR 21x21모듈이 45px = 모듈 2.2px):
++     * 자동 경로 검출 0 -> 3곳. 후보 5곳을 오탐 없이 찾는다.
++     *
++     * 기본을 끄는 이유는 비용이다. 전체 행을 훑어야 해서 2048x1536 기준
++     * 프레임당 7.6~16ms이고, **실패한 프레임마다** 든다. 난수 코퍼스에서
++     * 평균이 150 -> 186ms(+24%)로 올라 회귀 게이트를 넘었다.
++     * 얻는 것이 "밀집 소형 QR"이라는 특정 상황에 한정되므로, 그 상황을
++     * 아는 쪽에서 켜는 게 맞다.
++     *
++     * 켤 만한 배치: 해상도/한계 시험 차트, 작은 라벨이 여러 개 붙는 팔레트,
++     * 상위 검출기가 없는 상태에서 화면상 코드가 50px 안팎으로 작게 잡히는 경우.
++     */
++    bool enableQrFinderRescue = false;
++
+     /*
+      * [작은 ROI 구제] ROI 디코드가 빈손이고 ROI가 이 크기(px) 이하면
+      * 확대 + 언샤프로 한 번 더 시도한다. 0 또는 1이면 끔.
+@@ -456,6 +476,10 @@ private:
+     std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
+                                                  RegionPass pass = RegionPass::Both);
+ 
++    // [QR 파인더 구제] 파인더 패턴으로 작은 QR을 직접 찾아 ROI 디코드로
++    // 넘긴다. [[vscan-lite-qr-finder-locate]]
++    std::vector<PipelineResult> tryQrFinderRescue(const GrayView& image, int need);
++
+ 
+     std::vector<PipelineResult> tryDeskewRescue1D(const GrayView& image, int need);
+ 
+diff --git a/src/locate_qr.cpp b/src/locate_qr.cpp
+new file mode 100644
+index 0000000..a06da32
+--- /dev/null
++++ b/src/locate_qr.cpp
+@@ -0,0 +1,277 @@
++#include "vscan_internal/locate_qr.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++namespace vscan {
++namespace {
++
++// 파인더 하나를 한 행에서 본 흔적.
++struct FinderHit {
++    float cx;      // 패턴 중심 x (부분화소)
++    float cy;      // 행 y
++    float module;  // 이 행에서 잰 모듈 크기 = 전체폭 / 7
++};
++
++// 여러 행에 걸쳐 같은 자리에서 나온 흔적을 뭉친 것.
++struct FinderPoint {
++    float cx = 0, cy = 0, module = 0;
++    int votes = 0;
++};
++
++/*
++ * [국소 이진화] 블록 평균에서 조금 낮은 값을 임계로 쓴다.
++ *
++ * 전역 임계를 쓰면 안 되는 이유는 이 탐지기가 노리는 상황 그 자체다 —
++ * 조명이 기울고 대비가 낮은 프레임에서 작은 코드를 찾는 것이라, 프레임
++ * 한쪽의 흰색이 다른 쪽의 검정보다 어두울 수 있다. 블록 평균이면
++ * 그런 기울기가 자동으로 상쇄된다.
++ *
++ * 블록 크기 16px은 "코드보다 크고 조명 변화보다 작은" 값이다. 45px짜리
++ * 코드 안에 블록이 3x3으로 들어가므로 코드 자체가 임계를 끌어올리는
++ * 일은 생기지만, 파인더는 흑백이 반반이라 그 평균 근처에서 잘 갈린다.
++ */
++void binarizeLocal(const GrayView& src, std::vector<uint8_t>& out, int block = 16, int bias = 8) {
++    const int W = src.width, H = src.height;
++    const int stride = src.stride > 0 ? src.stride : W;
++    const int bw = (W + block - 1) / block, bh = (H + block - 1) / block;
++
++    std::vector<uint16_t> mean(static_cast<size_t>(bw) * bh, 0);
++    for (int by = 0; by < bh; ++by) {
++        const int y0 = by * block, y1 = std::min(H, y0 + block);
++        for (int bx = 0; bx < bw; ++bx) {
++            const int x0 = bx * block, x1 = std::min(W, x0 + block);
++            unsigned sum = 0;
++            for (int y = y0; y < y1; ++y) {
++                const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++                for (int x = x0; x < x1; ++x) sum += row[x];
++            }
++            const int n = (y1 - y0) * (x1 - x0);
++            mean[static_cast<size_t>(by) * bw + bx] = static_cast<uint16_t>(n ? sum / n : 128);
++        }
++    }
++
++    out.assign(static_cast<size_t>(W) * H, 0);
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        uint8_t* __restrict o = out.data() + static_cast<size_t>(y) * W;
++        const uint16_t* __restrict m = mean.data() + static_cast<size_t>(y / block) * bw;
++        for (int x = 0; x < W; ++x) o[x] = row[x] < static_cast<int>(m[x / block]) - bias ? 1 : 0;
++    }
++}
++
++// 한 행에서 1:1:3:1:1(흑백흑백흑)을 찾는다.
++void scanRow(const uint8_t* row, int W, int y, float minModulePx, float maxModulePx,
++             std::vector<FinderHit>& out) {
++    // 런 길이 5개를 굴리며 본다. 새 런이 나올 때마다 한 칸 밀어서,
++    // 항상 "직전 5개"를 검사한다 — 행당 한 번만 훑는다.
++    int len[5] = {0, 0, 0, 0, 0};
++    int val[5] = {0, 0, 0, 0, 0};
++    int start5 = 0;   // len[0] 런이 시작한 x
++    int runStart = 0;
++
++    auto push = [&](int s, int n, int v) {
++        start5 += len[0];
++        for (int i = 0; i < 4; ++i) { len[i] = len[i + 1]; val[i] = val[i + 1]; }
++        len[4] = n; val[4] = v;
++        (void)s;
++        // 흑-백-흑-백-흑 순서가 아니면 볼 것도 없다.
++        if (!(val[0] && !val[1] && val[2] && !val[3] && val[4])) return;
++        const float total = static_cast<float>(len[0] + len[1] + len[2] + len[3] + len[4]);
++        const float u = total / 7.0f;
++        if (u < minModulePx || u > maxModulePx) return;
++        // 각 런이 기대치(1,1,3,1,1)*u에서 0.7u 이내.
++        // 0.5u면 규격상 정확하지만 흐린 이미지에서 경계 한 칸이 이웃으로
++        // 새는 일이 잦아 놓친다 — 최종 판정은 어차피 디코더가 한다.
++        const float exp[5] = {u, u, 3.0f * u, u, u};
++        for (int i = 0; i < 5; ++i)
++            if (std::fabs(static_cast<float>(len[i]) - exp[i]) > 0.7f * u) return;
++        FinderHit h;
++        h.cx = static_cast<float>(start5) + total * 0.5f;
++        h.cy = static_cast<float>(y);
++        h.module = u;
++        out.push_back(h);
++    };
++
++    int cur = row[0];
++    for (int x = 1; x < W; ++x) {
++        if (row[x] == cur) continue;
++        push(runStart, x - runStart, cur);
++        runStart = x;
++        cur = row[x];
++    }
++    push(runStart, W - runStart, cur);
++}
++
++} // namespace
++
++std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidates,
++                                          float minModulePx, float maxModulePx, int rowStep) {
++    std::vector<QrCandidate> out;
++    if (image.empty() || image.width < 32 || image.height < 32 || maxCandidates <= 0) return out;
++
++    std::vector<uint8_t> bw;
++    binarizeLocal(image, bw);
++
++    std::vector<FinderHit> hits;
++    for (int y = 0; y < image.height; y += std::max(1, rowStep))
++        scanRow(bw.data() + static_cast<size_t>(y) * image.width, image.width, y, minModulePx,
++                maxModulePx, hits);
++    if (hits.size() < 3) return out;
++
++    // [뭉치기] 같은 파인더는 인접한 여러 행에서 거의 같은 x로 나온다.
++    // 허용 반경을 모듈 크기에 비례시킨다 — 큰 코드는 파인더도 커서
++    // 행마다 중심이 더 흔들린다.
++    std::vector<FinderPoint> pts;
++    for (const auto& h : hits) {
++        bool merged = false;
++        for (auto& p : pts) {
++            const float tol = std::max(4.0f, 2.5f * p.module);
++            if (std::fabs(p.cx - h.cx) < tol && std::fabs(p.cy - h.cy) < tol) {
++                const float n = static_cast<float>(p.votes);
++                p.cx = (p.cx * n + h.cx) / (n + 1);
++                p.cy = (p.cy * n + h.cy) / (n + 1);
++                p.module = (p.module * n + h.module) / (n + 1);
++                ++p.votes;
++                merged = true;
++                break;
++            }
++        }
++        if (!merged) pts.push_back({h.cx, h.cy, h.module, 1});
++    }
++    // 한 행에서만 나온 것은 잡음이다 — 파인더는 세로로도 7모듈이라
++    // 반드시 여러 행에 걸린다.
++    pts.erase(std::remove_if(pts.begin(), pts.end(), [](const FinderPoint& p) { return p.votes < 2; }),
++              pts.end());
++    if (pts.size() < 3) return out;
++
++    // [삼각형 맞추기] 파인더 셋은 코드의 세 모서리라, 중심끼리는
++    // **직각이등변**을 이룬다(두 변이 같고 빗변이 그 1.414배).
++    // 후보가 많으면 조합이 폭발하므로 개수를 제한한다 — 파인더가 아주
++    // 많이 나오는 프레임은 대개 텍스처(격자무늬 등)라 얻을 게 없다.
++    // 자르기 전에 **표(votes) 많은 순**으로 정렬한다. 정렬 없이 자르면
++    // 스캔 순서(위에서 아래)로 남아서, 프레임 아래쪽 코드가 통째로
++    // 날아간다 — 실측으로 후보가 11곳에서 4곳으로 줄었다.
++    std::sort(pts.begin(), pts.end(),
++              [](const FinderPoint& a, const FinderPoint& b) { return a.votes > b.votes; });
++    if (pts.size() > 96) pts.resize(96);
++
++    // [삼각형 후보 모으기] 조건을 통과한 조합을 모아 **변이 짧은 순**으로
++    // 고른다. 짧은 순인 이유가 핵심이다 — 같은 크기의 코드가 격자로
++    // 늘어선 프레임(해상도 차트가 정확히 그렇다)에서는 **서로 다른 코드의
++    // 파인더끼리도 직각이등변을 이룬다.** 실측: 그냥 첫 조합부터 쓰면
++    // 705x870, 1149x839 같은 상자가 나왔다(코드 하나는 45x45px인데).
++    // 진짜 파인더 셋은 자기 코드 안에 있으므로 언제나 가장 가깝다.
++    struct Tri { size_t i, j, k; float leg, mod; };
++    std::vector<Tri> tris;
++    const size_t n = pts.size();
++    for (size_t i = 0; i < n; ++i) {
++        for (size_t j = i + 1; j < n; ++j) {
++            for (size_t k = j + 1; k < n; ++k) {
++                const FinderPoint* P[3] = {&pts[i], &pts[j], &pts[k]};
++                // 한 코드의 파인더 셋은 모듈 크기가 같다. 많이 다르면
++                // 서로 다른 코드(혹은 잡음)에서 온 것이다.
++                const float mlo = std::min({P[0]->module, P[1]->module, P[2]->module});
++                const float mhi = std::max({P[0]->module, P[1]->module, P[2]->module});
++                if (mhi > 1.5f * mlo) continue;
++                const float mod = (P[0]->module + P[1]->module + P[2]->module) / 3.0f;
++
++                float d[3];
++                d[0] = std::hypot(P[0]->cx - P[1]->cx, P[0]->cy - P[1]->cy);
++                d[1] = std::hypot(P[0]->cx - P[2]->cx, P[0]->cy - P[2]->cy);
++                d[2] = std::hypot(P[1]->cx - P[2]->cx, P[1]->cy - P[2]->cy);
++                std::sort(d, d + 3);
++                if (d[1] < 1e-3f) continue;
++                if (std::fabs(d[0] / d[1] - 1.0f) > 0.25f) continue;
++                if (std::fabs(d[2] / d[1] - 1.414f) > 0.25f) continue;
++
++                // 변 길이 = (버전모듈수 - 7) 모듈. 버전1(21모듈)이면 14모듈,
++                // 최대 버전40(177모듈)이면 170모듈이다. 이 범위를 벗어나면
++                // QR일 수 없다 — 위의 "다른 코드끼리 짝지음"을 걸러내는
++                // 가장 강한 조건이기도 하다.
++                // [크기 상한] 이 탐지기는 **작은 코드 전용**이다. 큰 QR은
++                // 일반 경로가 이미 잘 찾으므로 여기서 볼 이유가 없고,
++                // 상한을 두지 않으면 같은 크기 코드가 격자로 늘어선
++                // 프레임에서 **이웃 코드의 파인더끼리** 짝지어진 거대한
++                // 가짜 상자가 나온다(실측: 45x45 진짜 5곳과 함께 298x280,
++                // 486x374 같은 가짜 6곳).
++                //
++                // 규격 격자(변이 14, 18, 22, ... 모듈)로 걸러보려 했지만
++                // 안 된다 — 변이 90모듈쯤 되면 격자 간격 4모듈이 전체의
++                // 4%라 모듈 추정 오차(±10%)에 묻힌다. 위 가짜 하나는
++                // 정확히 90.0모듈로 나와 격자를 통과했다.
++                // 크기 상한이 그보다 확실하고 뜻도 분명하다.
++                const float legMods = d[1] / mod;
++                if (legMods < 12.0f || legMods > 40.0f) continue;   // 버전 1~8
++
++                // [버전 격자] QR 버전 V의 한 변은 17 + 4v 모듈이고
++                // (v = 0..39, 즉 21,25,29,...,177), 파인더 중심 사이의
++                // 변은 그보다 7 모듈 짧다. 따라서 legMods는 14, 18, 22, ...
++                // 로 **4 간격 격자 위에만** 있을 수 있다.
++                //
++                // 허용 오차 0.3은 모듈 추정이 흐린 이미지에서 ±10% 흔들리는
++                // 것을 감안한 값이다. 위 크기 상한(40모듈) 안에서는 격자
++                // 간격 4모듈이 전체의 10% 이상이라 이 조건이 실제로 듣는다.
++                const float steps = (legMods - 14.0f) / 4.0f;
++                if (steps < -0.3f || steps > 6.8f) continue;
++                if (std::fabs(steps - std::round(steps)) > 0.3f) continue;
++
++                tris.push_back({i, j, k, d[1], mod});
++            }
++        }
++    }
++    std::sort(tris.begin(), tris.end(), [](const Tri& a, const Tri& b) { return a.leg < b.leg; });
++
++    std::vector<uint8_t> used(pts.size(), 0);
++    for (const auto& t : tris) {
++        if (static_cast<int>(out.size()) >= maxCandidates) break;
++        if (used[t.i] || used[t.j] || used[t.k]) continue;
++        {
++            {
++                const size_t i = t.i, j = t.j, k = t.k;
++                const FinderPoint* P[3] = {&pts[i], &pts[j], &pts[k]};
++                const float mod = t.mod;
++
++                // [상자] 파인더 중심 셋의 외접 상자에 3.5모듈씩 덧대고,
++                // 네 번째 모서리(대각)를 더한다 — 회전돼 있어도 이 네 점의
++                // 외접 상자면 코드가 온전히 들어간다.
++                float xs[4] = {P[0]->cx, P[1]->cx, P[2]->cx, 0};
++                float ys[4] = {P[0]->cy, P[1]->cy, P[2]->cy, 0};
++                // 빗변의 양 끝이 아닌 점이 직각(좌상단)이다.
++                int corner = 0;
++                {
++                    const float dd[3] = {std::hypot(P[0]->cx - P[1]->cx, P[0]->cy - P[1]->cy),
++                                         std::hypot(P[0]->cx - P[2]->cx, P[0]->cy - P[2]->cy),
++                                         std::hypot(P[1]->cx - P[2]->cx, P[1]->cy - P[2]->cy)};
++                    if (dd[0] >= dd[1] && dd[0] >= dd[2]) corner = 2;        // 0-1이 빗변 -> 2가 직각
++                    else if (dd[1] >= dd[0] && dd[1] >= dd[2]) corner = 1;   // 0-2가 빗변 -> 1이 직각
++                    else corner = 0;
++                }
++                const int a = (corner + 1) % 3, b = (corner + 2) % 3;
++                xs[3] = P[a]->cx + P[b]->cx - P[corner]->cx;
++                ys[3] = P[a]->cy + P[b]->cy - P[corner]->cy;
++
++                const float pad = 3.5f * mod;
++                float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
++                for (int t = 1; t < 4; ++t) {
++                    x0 = std::min(x0, xs[t]); x1 = std::max(x1, xs[t]);
++                    y0 = std::min(y0, ys[t]); y1 = std::max(y1, ys[t]);
++                }
++                QrCandidate c;
++                c.bbox.x0 = std::max(0, static_cast<int>(x0 - pad));
++                c.bbox.y0 = std::max(0, static_cast<int>(y0 - pad));
++                c.bbox.x1 = std::min(image.width, static_cast<int>(x1 + pad) + 1);
++                c.bbox.y1 = std::min(image.height, static_cast<int>(y1 + pad) + 1);
++                c.modulePx = mod;
++                if (c.bbox.x1 - c.bbox.x0 < 16 || c.bbox.y1 - c.bbox.y0 < 16) continue;
++
++                out.push_back(c);
++                used[i] = used[j] = used[k] = 1;
++            }
++        }
++    }
++    return out;
++}
++
++} // namespace vscan
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 7bc0081..da80119 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -3,6 +3,7 @@
+ #include "vscan_internal/preprocess.hpp"
+ #include "vscan_internal/deskew1d.hpp"
+ #include "vscan_internal/locate.hpp"
++#include "vscan_internal/locate_qr.hpp"
+ #ifdef VSCAN_HAVE_ZBAR
+ #include "vscan_internal/decoder_zbar.hpp"
+ #endif
+@@ -304,6 +305,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     }
+ 
+ 
++    // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
++    // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
++    if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
++        auto qrHits = tryQrFinderRescue(image, std::max(1, cfg_.minExpectedCodes));
++        if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) return qrHits;
++        if (qrHits.size() > hits.size()) hits = std::move(qrHits);
++    }
++
+     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
+     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
+     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
+@@ -524,6 +533,42 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+     return hits;
+ }
+ 
++std::vector<PipelineResult> Pipeline::tryQrFinderRescue(const GrayView& image, int need) {
++    // [[vscan-lite-qr-finder-locate]]
++    //
++    // 에너지 로케이터(findCodeRegions)는 심볼로지를 안 가리는 대신,
++    // **작은 코드가 여러 개 흩뿌려진 프레임**에서는 원리적으로 못 쓴다 —
++    // 타일이 원본 128px이라 45px 코드 여러 개가 한 타일에 뭉치고, 에너지
++    // 순위는 면적에 좌우돼서 큰 글자 블록이 작은 QR을 밀어낸다(실측:
++    // 실물 3.1MP 해상도 차트에서 상위 2개가 글자였다).
++    //
++    // QR은 고유 구조가 있으니 그걸 쓴다. 파인더 패턴은 어느 방향으로
++    // 잘라도 1:1:3:1:1이고 이 비율은 크기·회전 불변이라, 작아도 흐려도
++    // 비율만 살아있으면 걸린다. 실측(같은 차트, 모듈 2.1px): 8.1ms에
++    // QR 후보 11곳, 그중 9곳이 "잘라주면 읽히는" 지점이었다.
++    //
++    // 찾은 상자는 processViewROIs()로 넘긴다 — 거기엔 작은 ROI를 확대 +
++    // 언샤프로 살리는 단계가 이미 있고(§3.22), 모듈 2px대 코드에는 그게
++    // 필수다.
++    // QR/MicroQR 비트(0,1)가 마스크에서 빠져 있으면 돌 이유가 없다.
++    constexpr uint32_t kQrBits = (1u << 0) | (1u << 1);
++    if (cfg_.formatMask != 0 && (cfg_.formatMask & kQrBits) == 0) return {};
++
++    auto cands = findQrCandidates(image, std::min(16, std::max(4, need * 2)));
++    if (cands.empty()) return {};
++
++    std::vector<Rect> rects;
++    rects.reserve(cands.size());
++    for (const auto& c : cands) rects.push_back(c.bbox);
++
++    // 정지대 몫으로 조금 넉넉히. 파인더 기반 상자는 코드에 딱 맞아서
++    // 여백이 없으면 디코더가 경계를 못 잡는다.
++    // 정지대 몫으로 조금 넉넉히. 파인더 기반 상자는 코드에 딱 맞아서
++    // 여백이 없으면 디코더가 경계를 못 잡는다. 8~40px를 훑어봤는데
++    // 결과가 같았다(모듈이 2px대라 어느 쪽이든 정지대가 충분하다).
++    return processViewROIs(image, rects, 12);
++}
++
+ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, int need) {
+     // 여기까지 왔다는 건 zxing의 카디널 회전 허용범위(실측 ±21도 부근,
+     // §3.2.15/16) 밖에 있는 1D 바코드일 가능성이 있다는 뜻이다.
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index 219e506..42f7ad2 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -110,6 +110,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->disable_denoise_rescue) pcfg.disableDenoiseRescue = 1;
+         if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
+         if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
++        if (cfg->enable_qr_finder_rescue) pcfg.enableQrFinderRescue = true;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+-- 
+2.43.0
+
