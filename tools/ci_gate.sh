@@ -2,12 +2,20 @@
 # ci_gate.sh — 회귀 게이트 두 개를 한 번에 돌린다.
 #
 #   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 37/40 미만이면 실패.
-#   2) 고정 시드 코퍼스: 검출률/평균/p95/중복을 기록하고, 직전 기준선 대비
+#   2) 심볼로지 각도 스윕: 14종 x 0~90도. 검출률 100% 미만이거나 오디코딩이
+#                        하나라도 나오면 실패.
+#   3) 고정 시드 코퍼스: 검출률/평균/p95/중복을 기록하고, 직전 기준선 대비
 #                        허용치를 넘게 나빠지면 실패.
 #
-# 왜 둘 다 필요한가: 40종은 "읽히느냐"만 본다. 실제로 있었던 일 —
-# 회전 구제를 고쳤더니 검출은 그대로인데 평균이 3~5ms 늘었다(§3.11).
-# 40종으로는 절대 안 보이는 종류의 회귀다. 코퍼스는 그걸 잡는다.
+# 왜 셋 다 필요한가.
+#  - 40종은 "읽히느냐"만 본다. 실제로 있었던 일: 회전 구제를 고쳤더니
+#    검출은 그대로인데 평균이 3~5ms 늘었다(§3.11). 코퍼스가 그걸 잡는다.
+#  - 코퍼스는 난수라 **특정 심볼로지의 특정 각도**가 통째로 죽어도 전체
+#    평균에 묻힌다. 실제로 있었던 일: ITF가 각도 5~80도에서 정답과 함께
+#    "345670" 같은 부분 디코딩을 같이 뱉고 있었는데(오디코딩 11건),
+#    코퍼스 지표로는 안 보였고 심볼로지별 각도 스윕을 돌리고서야 나왔다.
+#    산업 현장에서 품번을 잘못 읽는 것이라 미검출보다 나쁘다 — 그래서
+#    이건 기준선 비교가 아니라 **0/100% 하드 게이트**로 건다.
 #
 # 코퍼스는 **스트리밍**이라 디스크에 이미지를 한 장도 안 남긴다(§3.8).
 #
@@ -34,11 +42,11 @@ trap 'rm -rf "$WORK"' EXIT
 export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/third_party/zxing-cpp/core:$BUILD_DIR/zbar_install/lib:${LD_LIBRARY_PATH:-}"
 VERIFY="$WORK/verify_accuracy"
 
-echo ">> [1/4] verify_accuracy 빌드"
+echo ">> [1/5] verify_accuracy 빌드"
 g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/verify_accuracy.cpp" \
     -L"$BUILD_DIR" -lvscan -o "$VERIFY"
 
-echo ">> [2/4] 고정 40종 게이트"
+echo ">> [2/5] 고정 40종 게이트"
 python3 "$ROOT/tools/generate_stress_images.py" --outdir "$WORK/stress" >/dev/null
 "$VERIFY" "$WORK/stress" > "$WORK/stress.txt" 2>/dev/null || true
 LINE="$(grep "검출 성공" "$WORK/stress.txt" || true)"
@@ -49,7 +57,26 @@ if ! echo "$LINE" | grep -q "37/40.*37/40.*37/40"; then
   exit 1
 fi
 
-echo ">> [3/4] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
+echo ">> [3/5] 심볼로지 각도 스윕 (14종 x 0~90도 5도 간격, 디스크 0)"
+SWEEP_FAIL=0
+for S in $(python3 -c "import sys;sys.path.insert(0,'$ROOT/tools');import generate_corpus as g;print(' '.join(sorted(g._SWEEP_PAYLOAD)))"); do
+  OUT=$(python3 "$ROOT/tools/generate_corpus.py" --sweep angle:0:90:5 \
+          --base sym=$S,module=8,count=1 --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+        | "$VERIFY" --stdin --paths full --reps 1 2>/dev/null | grep -E "^full " | tr -s ' ')
+  RATE_S=$(echo "$OUT" | cut -d' ' -f4)
+  MD_S=$(echo "$OUT" | cut -d' ' -f5)
+  if [ "$RATE_S" != "100.0%" ] || [ "${MD_S:-1}" != "0" ]; then
+    echo "   !! $S 검출 $RATE_S / 오디코딩 $MD_S"
+    SWEEP_FAIL=1
+  fi
+done
+if [ "$SWEEP_FAIL" = 1 ]; then
+  echo "!! 심볼로지 각도 스윕 실패 — 검출 100% 또는 오디코딩 0을 못 지켰다"
+  exit 1
+fi
+echo "   14종 x 19각도 전부 100% / 오디코딩 0"
+
+echo ">> [4/5] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
 python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
         --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
   | "$VERIFY" --stdin --paths 2stage --reps 2 > "$WORK/corpus.txt" 2>/dev/null
@@ -60,7 +87,7 @@ read -r _ _ _ RATE MISDEC DUP MEAN _ P95 <<<"$(sed -n '8p' "$WORK/corpus.txt" | 
 RATE="${RATE%\%}"
 echo "   검출 ${RATE}% / 평균 ${MEAN}ms / p95 ${P95}ms / 오디코딩 ${MISDEC} / 중복 ${DUP}"
 
-echo ">> [4/4] 기준선 비교"
+echo ">> [5/5] 기준선 비교"
 if [ "$UPDATE" = 1 ] || [ ! -f "$BASELINE" ]; then
   printf 'rate=%s\nmean=%s\np95=%s\nmisdec=%s\ndup=%s\n' \
          "$RATE" "$MEAN" "$P95" "$MISDEC" "$DUP" > "$BASELINE"
@@ -89,4 +116,4 @@ if [ "$fail" = 1 ]; then
   echo ">> ❌ 코퍼스 게이트 실패"
   exit 1
 fi
-echo ">> ✅ 통과 (40종 37/40, 코퍼스 기준선 이내)"
+echo ">> ✅ 통과 (40종 37/40, 심볼로지 스윕 100%/오디코딩 0, 코퍼스 기준선 이내)"

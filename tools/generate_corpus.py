@@ -1349,6 +1349,21 @@ def main():
     axes, combos = (None, None)
     if a.sweep:
         axes, combos = build_combos(a.sweep)
+        # [빠른 실패] 스윕이 지원하지 않는 심볼로지 이름을 그냥 두면
+        # 워커 프로세스 안에서 예외가 나고 그게 삼켜져서 **0바이트를
+        # 조용히 내보낸다** — 실제로 `sym=QRCODE`(정답은 `QR`)로 스윕을
+        # 돌렸다가 빈 스트림을 받고 한참 헤맸다. 여기서 미리 잡는다.
+        wanted = set()
+        if "sym" in base:
+            wanted.add(base["sym"])
+        for combo in combos:
+            if "sym" in combo:
+                wanted.add(str(combo["sym"]).upper())
+        unknown = sorted(w for w in wanted if w not in _SWEEP_PAYLOAD)
+        if unknown:
+            raise SystemExit(
+                "스윕 미지원 심볼로지: " + ", ".join(unknown) +
+                "\n사용 가능: " + ", ".join(sorted(_SWEEP_PAYLOAD)))
         idxs = list(range(len(combos)))
         if a.only is not None:
             idxs = [a.only]
