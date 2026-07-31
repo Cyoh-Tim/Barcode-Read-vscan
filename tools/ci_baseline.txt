@@ -1,5 +1,5 @@
-rate=54.6
-mean=133.29
-p95=350.80
-misdec=7
-dup=0
+rate=58.7
+mean=178.82
+p95=553.51
+misdec=4
+dup=10
