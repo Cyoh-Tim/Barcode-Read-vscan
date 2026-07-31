@@ -73,5 +73,27 @@ struct CodeRegion {
 std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions = 4,
                                         int tileSize = 32, int downscale = 4,
                                         float energyRatio = 0.20f);
+/*
+ * [각도 정밀화] 영역 안에서 **원본 해상도로** 구조텐서를 다시 재서
+ * 기울기를 돌려준다. 방향성이 약하면 CodeRegion::kAngleUnknown.
+ *
+ * 왜 필요한가. findCodeRegions()의 angleDeg는 4배 축소본에서 나온 값인데,
+ * 축소가 각도를 **축(0도) 쪽으로 끌어당긴다**. 박스 다운샘플이 고주파를
+ * 깎는 방식이 x/y 축에 정렬돼 있어서 생기는 앨리어싱이다. 실측(PDF417,
+ * 각도를 (-45,45]로 접은 참값 대비):
+ *
+ *   참값    -5    -10    -20    -25    -30    -35    30(60도)   15(75도)
+ *   4배   -4.6   -8.5  -17.2  -21.9  -26.9  -33.2      25.8       11.2
+ *   2배   -4.7   -9.4  -18.9  -23.9  -28.5  -34.4      28.3       13.6
+ *   1배   -4.9   -9.8  -19.6  -24.6  -29.1  -34.9      28.9       14.3
+ *
+ * 4배에서 오차가 최대 4.2도인데 원본에서는 0.7도다. PDF417은 되돌린 뒤
+ * 읽히는 각도 창이 8도 남짓이라, 3~4도 오차면 창을 벗어난다 — 실제로
+ * 25/30도가 정확히 그렇게 실패했다.
+ *
+ * 비용은 영역 크기에 비례한다. 영역은 보통 프레임의 1~20%이고, 회전을
+ * 시도하는 프레임(다른 게 전부 실패한 프레임)에서만 부른다.
+ */
+float refineRegionAngle(const GrayView& image, const Rect& bbox);
 
 } // namespace vscan

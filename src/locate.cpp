@@ -168,4 +168,35 @@ std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions, i
     return out;
 }
 
+float refineRegionAngle(const GrayView& image, const Rect& bbox) {
+    const int x0 = std::max(0, bbox.x0), y0 = std::max(0, bbox.y0);
+    const int x1 = std::min(image.width, bbox.x1), y1 = std::min(image.height, bbox.y1);
+    const int w = x1 - x0, h = y1 - y0;
+    if (w < 8 || h < 8) return CodeRegion::kAngleUnknown;
+
+    const int stride = image.stride > 0 ? image.stride : image.width;
+    double jxx = 0, jyy = 0, jxy = 0;
+    for (int y = y0 + 1; y < y1 - 1; ++y) {
+        const uint8_t* __restrict r0 = image.pixels + static_cast<size_t>(y - 1) * stride;
+        const uint8_t* __restrict r1 = image.pixels + static_cast<size_t>(y) * stride;
+        const uint8_t* __restrict r2 = image.pixels + static_cast<size_t>(y + 1) * stride;
+        for (int x = x0 + 1; x < x1 - 1; ++x) {
+            const double gx = (r0[x + 1] + 2 * r1[x + 1] + r2[x + 1]) -
+                              (r0[x - 1] + 2 * r1[x - 1] + r2[x - 1]);
+            const double gy = (r2[x - 1] + 2 * r2[x] + r2[x + 1]) -
+                              (r0[x - 1] + 2 * r0[x] + r0[x + 1]);
+            jxx += gx * gx;
+            jyy += gy * gy;
+            jxy += gx * gy;
+        }
+    }
+    const double denom = jxx - jyy;
+    const double coh = std::sqrt(denom * denom + 4.0 * jxy * jxy) / (jxx + jyy + 1e-6);
+    if (coh < 0.25) return CodeRegion::kAngleUnknown;
+    double theta = 0.5 * std::atan2(2.0 * jxy, denom) * 180.0 / 3.14159265358979323846;
+    while (theta > 45.0) theta -= 90.0;
+    while (theta <= -45.0) theta += 90.0;
+    return static_cast<float>(theta);
+}
+
 } // namespace vscan

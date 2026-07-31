@@ -394,8 +394,16 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
             std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
                         image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
 
+        // [각도 정밀화] findCodeRegions()의 추정각은 4배 축소본에서 나온
+        // 값이라 축 쪽으로 3~4도 끌려 있다. PDF417은 되돌린 뒤 읽히는
+        // 각도 창이 8도 남짓이라 그 오차면 창을 벗어난다(25/30도 실패).
+        // 여기서 영역 안만 원본 해상도로 다시 재면 오차가 0.7도로 줄어든다.
+        // 회전할 영역(최대 2개)에만 드는 비용이다.
+        float useAngle = refineRegionAngle(image, regions[i].bbox);
+        if (useAngle >= CodeRegion::kAngleUnknown) useAngle = regions[i].angleDeg;
+
         GrayImage rotated;
-        rotateAroundPoint(GrayView(crop), -regions[i].angleDeg,
+        rotateAroundPoint(GrayView(crop), -useAngle,
                           static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
         Pipeline roiPipe(roiCfg);
         auto rotHits = roiPipe.processViewCore(GrayView(rotated));
@@ -407,7 +415,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
             // 위치를 뭉개서 대표점 하나로 주면 안 되는 이유: dedup()이
             // 넓이 기반이라 4점이 한 점으로 겹치면 넓이가 0이 되어
             // 중복 판정이 통째로 무력화된다(실측: 중복 반환 2건).
-            const float rad = regions[i].angleDeg * 3.14159265358979323846f / 180.0f;
+            const float rad = useAngle * 3.14159265358979323846f / 180.0f;
             const float cc = std::cos(rad), ss = std::sin(rad);
             const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
             for (auto& r : rotHits)
