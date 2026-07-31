@@ -101,12 +101,14 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->min_expected_codes > 1) pcfg.minExpectedCodes = cfg->min_expected_codes;
         if (cfg->disable_coarse_locate) pcfg.coarseLocate = false;
         if (cfg->coarse_factor == 2) pcfg.coarseFactor = 2;
+        if (cfg->enable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = true;
         if (cfg->disable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = false;
         if (cfg->enable_dpm_rescue) pcfg.enableDPMRescue = true;
         if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
         if (cfg->disable_blank_frame_skip) pcfg.disableBlankFrameSkip = 1;
         if (cfg->disable_denoise_rescue) pcfg.disableDenoiseRescue = 1;
         if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
+        if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

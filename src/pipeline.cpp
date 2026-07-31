@@ -2,6 +2,7 @@
 #include "vscan_internal/decoder_zxing.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
+#include "vscan_internal/locate.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -272,6 +273,22 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dpmHits;
     }
 
+    // [영역 구제 — 큰 프레임 속 작은 코드]
+    // 여기까지 왔다는 건 풀프레임 풀옵션이 빈손이라는 뜻인데, 실측상
+    // 그 실패의 상당수는 "코드가 프레임에 비해 너무 작아서 못 찾은 것"
+    // 이다. 회전이 문제가 아니다 — 2048x1536 프레임의 128px DataMatrix는
+    // 55도 이상에서 전부 실패하지만, 같은 이미지에서 코드 주변만
+    // 205x200으로 잘라내면 **회전 없이** 전 각도가 읽힌다(§3.17).
+    // 그래서 회전을 더 시도하는 대신 "어디를 보라"를 알려준다.
+    // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
+    // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
+    if (cfg_.enableRegionRescue && !budgetExceeded()) {
+        auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
+                                          regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
+        if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
+        if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+    }
+
     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
@@ -283,6 +300,128 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     int need = std::max(1, cfg_.minExpectedCodes);
     auto rescued = tryDeskewRescue1D(image, need);
     return rescued.empty() ? hits : rescued;
+}
+
+std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int need, RegionPass pass) {
+    // [[vscan-lite-region-rescue]]
+    //
+    // 원리는 헤더(locate.hpp)에 적어둔 실측 그대로다: zxing이 못 읽는 게
+    // 아니라 못 찾는 것이라, 찾아서 잘라주기만 하면 된다.
+    //
+    // 여백(pad)을 영역 크기에 비례해서 주되 상한을 둔다. 크기 비례인 이유는
+    // 정지대(quiet zone)가 모듈 크기에 비례해야 하기 때문이고, 상한을 두는
+    // 이유는 실측상 **크롭이 너무 커도 다시 실패**하기 때문이다 — 애초에
+    // 실패 원인이 "프레임이 커서"였으니 당연하다(여백 240px 크롭 665x660은
+    // 읽히는데 여백 480px 크롭 1085x1140은 다시 실패한 각도가 있었다).
+    const int maxRegions = std::max(1, cfg_.regionRescueMaxRegions);
+    auto regions = findCodeRegions(image, maxRegions);
+    if (regions.empty()) return {};
+
+    // [헛수고 차단] 영역 하나당 코드는 많아야 하나다. 찾은 영역이 요구
+    // 개수보다 적으면 이 단계는 어차피 need를 못 채우고 뒤 단계로 넘어간다 —
+    // 그럴 거면 크롭 디코드를 돌 이유가 없다. locate 자체는 4ms라 여기서
+    // 끊는 비용은 무시할 만하다.
+    // 실측(코드 1~12개가 섞인 300장, need=기대개수): 이 검사가 없으면
+    // 평균 147 -> 235ms(+60%)로 뛰는데 검출은 +1.0%p뿐이었다. 다중 코드
+    // 프레임에서는 영역 4개로 12개를 채울 수 없으니 전부 헛돈 것이다.
+    if ((int)regions.size() < need) return {};
+
+    PipelineConfig roiCfg = cfg_;
+    roiCfg.tileThreads = 1;          // ROI는 작아서 타일링이 손해다
+    // [옵션은 항상 풀옵션] 자르기 패스가 파이프라인 이른 자리에서 도니
+    // 옵션을 아껴야 할 것 같지만, 실측은 반대였다. TryRotate/TryInvert를
+    // 끄면 이 패스의 성공률이 떨어져 뒤의 풀프레임 단계로 더 자주
+    // 넘어가고, 그 단계들이 훨씬 비싸서 총합이 커진다
+    // (단일 코드 300장 p50 59.0 -> 92.7ms, 40종 합계 1593 -> 2076ms).
+    // ROI가 작아서 옵션을 다 켜도 절대 비용이 작다는 점이 핵심이다.
+    roiCfg.tryHarder = true;
+    roiCfg.tryRotate = true;
+    roiCfg.tryInvert = true;
+    roiCfg.enableRegionRescue = false;   // 재귀 방지
+    roiCfg.enable1DDeskewRescue = false;
+    roiCfg.enableDPMRescue = false;
+
+    // 영역마다 크기가 달라서 pad도 달라진다 — decodeRegionsParallel()은
+    // 단일 pad만 받으므로, 여기서 미리 여백을 먹인 rect를 만들어 넘기고
+    // pad 인자는 0으로 준다.
+    std::vector<Rect> rects;
+    rects.reserve(regions.size());
+    for (const auto& r : regions) {
+        const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
+        if (w < 16 || h < 16) continue;
+        int pad = static_cast<int>(0.35f * std::max(w, h));
+        pad = std::min(pad, cfg_.regionRescueMaxPadPx);
+        Rect rc{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
+                std::min(image.width, r.bbox.x1 + pad), std::min(image.height, r.bbox.y1 + pad)};
+        rects.push_back(rc);
+    }
+    if (rects.empty()) return {};
+
+    std::vector<PipelineResult> hits;
+    if (pass != RegionPass::RotateOnly) {
+        hits = decodeRegionsParallel(image, rects, 0, roiCfg);
+        if ((int)hits.size() >= need) return hits;
+    }
+    if (pass == RegionPass::CropOnly) return hits;
+
+    // [2차: 영역을 각도만큼 되돌려 다시] 여기까지 오면 자르는 것만으로는
+    // 부족한 심볼로지다 — 실측상 PDF417과 1D가 그렇다. 2D 행렬코드는
+    // 자르기만 하면 전 각도가 읽히므로(DataMatrix 0~90도 19/19) 여기까지
+    // 내려오지 않는다.
+    //
+    // 각도는 findCodeRegions()가 영역별로 이미 준다. 실측(PDF417 module 8,
+    // 0~90도): 잘라내기만 하면 0/19였는데, 영역 추정각으로 한 번 되돌리니
+    // 10/11이 살아났다(5/10/20/40/45/50/60/70/75/80도 성공, 30도만 추정
+    // 오차 3도로 실패).
+    //
+    // 회전은 리샘플링이 들어가 영역 디코드보다 비싸므로, 방향이 뚜렷한
+    // (angleDeg가 있는) 영역에만, 그리고 상위 몇 개에만 건다.
+    const int rotLimit = std::min<int>(cfg_.regionRescueMaxRotations, (int)regions.size());
+    for (int i = 0; i < rotLimit; ++i) {
+        if (budgetExceeded()) break;
+        if (regions[i].angleDeg >= CodeRegion::kAngleUnknown) continue;
+        if (i >= (int)rects.size()) break;
+        const Rect& rc = rects[i];
+        const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
+        if (rw < 32 || rh < 32) continue;
+
+        GrayImage crop;
+        crop.width = rw;
+        crop.height = rh;
+        crop.pixels.resize(static_cast<size_t>(rw) * rh);
+        const int srcStride = image.stride > 0 ? image.stride : image.width;
+        for (int r = 0; r < rh; ++r)
+            std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
+                        image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
+
+        GrayImage rotated;
+        rotateAroundPoint(GrayView(crop), -regions[i].angleDeg,
+                          static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
+        Pipeline roiPipe(roiCfg);
+        auto rotHits = roiPipe.processViewCore(GrayView(rotated));
+        if (!rotHits.empty()) {
+            // [좌표 되돌리기] zxing이 준 건 회전된 크롭의 좌표라 그대로
+            // 쓰면 안 된다. rotateAroundPoint()의 목적지->원본 매핑을
+            // 그대로 한 번 더 적용하면 원본 크롭 좌표가 나온다
+            // (그 함수가 쓰는 각이 -degrees인 것까지 같이 맞춰야 한다).
+            // 위치를 뭉개서 대표점 하나로 주면 안 되는 이유: dedup()이
+            // 넓이 기반이라 4점이 한 점으로 겹치면 넓이가 0이 되어
+            // 중복 판정이 통째로 무력화된다(실측: 중복 반환 2건).
+            const float rad = regions[i].angleDeg * 3.14159265358979323846f / 180.0f;
+            const float cc = std::cos(rad), ss = std::sin(rad);
+            const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
+            for (auto& r : rotHits)
+                for (auto& pt : r.symbol.position) {
+                    const float dx = static_cast<float>(pt.first) - px;
+                    const float dy = static_cast<float>(pt.second) - py;
+                    pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
+                    pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
+                }
+            if ((int)rotHits.size() >= need) return rotHits;
+            if (rotHits.size() > hits.size()) hits = std::move(rotHits);
+        }
+    }
+    return hits;
 }
 
 std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, int need) {
@@ -387,6 +526,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     if (image.empty()) return {};
     BudgetGuard budget(this);
     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
+    regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
 
     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
@@ -454,6 +594,29 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline fast(fastCfg);
     auto hits = fast.processViewCore(image);
     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
+
+    // [1.5단계 — 위치부터 찾고 그 자리만 본다]
+    // 빠른 풀프레임 패스가 빈손일 때 가장 흔한 이유는 "코드가 프레임에 비해
+    // 작아서 못 찾은 것"이다(§3.17). 그런데 그 다음에 오는 2/3/4단계는
+    // 전부 **같은 크기의 프레임을 더 열심히** 다시 보는 것이라, 원인이
+    // 면적이면 아무리 옵션을 켜도 잘 안 걸린다 — 대신 시간만 100~250ms 쓴다.
+    //
+    // 여기서 그래디언트 에너지로 코드 후보 영역을 먼저 찾고(수 ms) 그
+    // 영역만 풀옵션으로 본다. 실측(§3.17): 2048x1536 프레임의 128px
+    // DataMatrix는 55~90도 전 구간이 실패하는데, 이 단계만 넣으면 회전을
+    // 한 번도 안 하고 19/19가 된다.
+    //
+    // 이게 산업용 리더기가 회전각과 무관하게 10~20ms로 일정한 이유이기도
+    // 하다 — "찾기 + 작은 ROI 디코드"는 각도에 비례해 늘어나는 비용이 아니다.
+    // 실패했을 때의 추가 비용은 locate 몇 ms + 작은 크롭 디코드뿐이고,
+    // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
+    // [[vscan-lite-region-first]]
+    if (cfg_.enableRegionRescue && !budgetExceeded()) {
+        regionCropDone_ = true;
+        auto roiHits = tryRegionRescue(image, need, RegionPass::CropOnly);
+        if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
+        if (roiHits.size() > hits.size()) hits = std::move(roiHits);
+    }
     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
     // "부분 검출이라도 제때"가 "완벽하지만 늦음"보다 나은 배치를 위한 것 —
     // 기본값(maxFrameMs=0)에서는 이 검사가 전부 무효라 동작이 동일하다.

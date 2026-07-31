@@ -96,6 +96,7 @@ endif()
 set(VSCAN_SOURCES
   src/preprocess.cpp
   src/deskew1d.cpp
+  src/locate.cpp
   src/decoder_zxing.cpp
   src/pipeline.cpp
   src/gs1.cpp
