@@ -675,6 +675,28 @@ BBox bboxOf(const DecodedSymbol& s) {
 }
 double areaOf(const BBox& b) { return std::max(0.0, b.x1 - b.x0) * std::max(0.0, b.y1 - b.y0); }
 
+// 위치 정보가 쓸모없는(퇴화한) 결과인가.
+//
+// zxing이 같은 코드를 두 번 돌려주면서 한쪽 꼭짓점 두 개를 (0,0)으로
+// 채워 보내는 경우가 있다 — 실측(PDF417 회전 10/35도):
+//   [0] "VSCAN-SWEEP-01" (38,263) (988,263) (988,288) (38,310)   <- 정상
+//   [1] "VSCAN-SWEEP-01" (36,264) (0,0)     (0,0)     (39,309)   <- 퇴화
+// 부분 검출이 살아남은 흔적으로 보이는데, 이런 결과는 bbox가 엉뚱한
+// 곳까지 늘어나 중심점도 겹침비도 정상 결과와 안 맞는다. 그래서
+// 아래 dedup()의 기하 규칙을 전부 빠져나가 **같은 코드가 두 번**
+// 반환됐다(단일 코드 프레임에서 중복 2건).
+//
+// 꼭짓점이 서로 겹친 시점에서 그 결과의 위치는 신뢰할 수 없다. 위치를
+// 못 믿는 결과는 "다른 자리에 있는 다른 코드"임을 주장할 근거가 없으므로,
+// 같은 심볼로지 + 같은 텍스트라면 중복으로 본다.
+// [[vscan-lite-dedup-degenerate-quad]]
+bool hasDegenerateQuad(const DecodedSymbol& s) {
+    for (int i = 0; i < 4; ++i)
+        for (int j = i + 1; j < 4; ++j)
+            if (s.position[i] == s.position[j]) return true;
+    return false;
+}
+
 // 교집합 넓이 / 더 작은 쪽 넓이.
 // IoU가 아니라 "작은 쪽 기준"인 이유는 아래 dedup() 주석 참고.
 double containRatio(const BBox& a, const BBox& b) {
@@ -731,7 +753,8 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
             double dy = candCenter.second - keptCenter.second;
             bool near = std::sqrt(dx * dx + dy * dy) < kCenterDup;
 
-            if (near || containRatio(candBox, keptBox) >= kOverlapDup) {
+            if (near || containRatio(candBox, keptBox) >= kOverlapDup ||
+                hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol)) {
                 isDup = true;
                 if (areaOf(candBox) > areaOf(keptBox)) kept = std::move(cand);
                 break;
