@@ -65,5 +65,35 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& 
  */
 void boxBlur3x3(const GrayView& src, GrayImage& out);
 
+/*
+ * 퍼센타일 기반 선형 대비 스트레칭. 하위/상위 0.5%를 잘라 0~255로 편다.
+ * 이미 계조를 거의 다 쓰고 있으면(유효 폭이 minSpan 이상) 아무것도 하지
+ * 않고 false를 돌려준다 — 호출부가 헛디코드를 건너뛸 수 있게.
+ *
+ * minSpan 기본 200의 근거: 이 함수가 하는 일은 [lo,hi]를 [0,255]로 펴는
+ * 것뿐이라, lo/hi가 이미 양끝에 가까우면 LUT가 거의 항등식이 되어 결과가
+ * 안 바뀐다. 처음에 110으로 잡았다가 **정작 살리려던 케이스가 전부
+ * 걸러졌다** — 배경이 밝고 코드만 저대비인 프레임은 (배경 - 가장 어두운
+ * 바)가 이미 128쯤 되기 때문이다. 코드 자체의 대비와 프레임 전체의
+ * 계조 폭은 다른 값이다.
+ *
+ * 용도는 **저대비 ROI 구제**다. 실측(모듈 6px, 대비 축 스윕): 심볼로지마다
+ * 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다.
+ *   Code128  0.15까지 읽힘
+ *   QR       0.20까지
+ *   EAN13/EAN8/UPCA  0.30까지   <- 두 배가 필요하다
+ * 저대비 프레임에서 코드 영역만 잘라 이걸 먹이면 EAN13/UPCA가 0.20까지
+ * 내려간다(0.20/0.25 각각 실패 -> 성공).
+ *
+ * [중요 — 반드시 ROI 안에서만 할 것] 프레임 전체에 걸면 오히려 깨진다.
+ * 실측: 전역 스트레칭은 EAN/UPC는 똑같이 살리면서 QR 0.20/0.25/0.30을
+ * 전부 죽였다(원본에서는 읽히던 것들이다). 프레임 전체의 최소/최대는
+ * 배경과 조명이 지배하는데, 그 값으로 만든 LUT는 코드 영역 안의 계조를
+ * 오히려 뭉갠다. ROI 안의 히스토그램으로 만들면 그런 일이 없다.
+ * [[vscan-lite-roi-contrast-stretch]]
+ */
+bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+
+
 } // namespace vscan
 

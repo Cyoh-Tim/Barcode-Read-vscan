@@ -187,6 +187,7 @@ struct PipelineConfig {
     // PDF417/1D뿐이라 상위 몇 개면 충분하다.
     int regionRescueMaxRotations = 2;
 
+
     // [DPM/점각인 구제] §6.4 대화 참고. 실물 비교 대상 리더기 대조 검증까지
     // 완료됨 — 반전->닫힘->재반전으로 점각인 코드의 이진화 실패를
     // 구제한다.
@@ -429,6 +430,7 @@ private:
     enum class RegionPass { CropOnly, RotateOnly, Both };
     std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
                                                  RegionPass pass = RegionPass::Both);
+
 
     std::vector<PipelineResult> tryDeskewRescue1D(const GrayView& image, int need);
 

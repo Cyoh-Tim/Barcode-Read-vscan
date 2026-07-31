@@ -332,4 +332,41 @@ void boxBlur3x3(const GrayView& src, GrayImage& out) {
     }
 }
 
+bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+    const int W = src.width, H = src.height;
+    if (W <= 0 || H <= 0) return false;
+    const int stride = src.stride > 0 ? src.stride : W;
+
+    int hist[256] = {0};
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < W; ++x) ++hist[row[x]];
+    }
+
+    // 하위/상위 0.5%를 잘라낸다. 최소/최대를 그대로 쓰면 먼지 한 점이나
+    // 반사광 한 픽셀이 전체 범위를 정해버린다.
+    const long total = static_cast<long>(W) * H;
+    const long cut = static_cast<long>(total * 0.005);
+    int lo = 0, hi = 255;
+    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
+    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
+
+    const int span = hi - lo;
+    if (span >= minSpan || span <= 0) return false;   // 이미 계조를 거의 다 쓰고 있다
+
+    uint8_t lut[256];
+    for (int i = 0; i < 256; ++i)
+        lut[i] = static_cast<uint8_t>(std::min(255, std::max(0, (i - lo) * 255 / span)));
+
+    out.width = W;
+    out.height = H;
+    out.pixels.resize(static_cast<size_t>(W) * H);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) o[x] = lut[in[x]];
+    }
+    return true;
+}
+
 } // namespace vscan

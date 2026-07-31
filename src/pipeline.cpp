@@ -300,6 +300,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
     }
 
+
     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
@@ -324,7 +325,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     // 이유는 실측상 **크롭이 너무 커도 다시 실패**하기 때문이다 — 애초에
     // 실패 원인이 "프레임이 커서"였으니 당연하다(여백 240px 크롭 665x660은
     // 읽히는데 여백 480px 크롭 1085x1140은 다시 실패한 각도가 있었다).
-    const int maxRegions = std::max(1, cfg_.regionRescueMaxRegions);
+    // 기대 코드 수가 많으면 영역 상한도 그만큼 늘린다 — 상한이 4인데
+    // 코드가 12개면 영역 구제가 need를 채울 방법이 원천적으로 없다.
+    const int maxRegions = std::min(16, std::max(std::max(1, cfg_.regionRescueMaxRegions), need));
     auto regions = findCodeRegions(image, maxRegions);
     if (regions.empty()) return {};
 
@@ -372,6 +375,59 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     if (pass != RegionPass::RotateOnly) {
         hits = decodeRegionsParallel(image, rects, 0, roiCfg);
         if ((int)hits.size() >= need) return hits;
+
+        // [저대비 ROI 구제] 자르기만으로 안 되면 ROI 안에서 대비를 편다.
+        // 심볼로지마다 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다
+        // (Code128 0.15 / QR 0.20 / EAN13·UPCA 0.30). 저대비 프레임에서
+        // 코드 영역만 잘라 스트레칭하면 EAN13/UPCA가 0.20까지 내려간다.
+        //
+        // stretchContrast()는 이미 대비가 충분하면 false를 돌려주므로,
+        // 대비가 문제가 아닌 프레임에서는 히스토그램 한 번 값만 내고
+        // 디코드는 아예 안 돈다 — 비용이 사실상 0이다.
+        // 프레임 전체가 아니라 반드시 ROI 안에서 해야 한다는 근거는
+        // preprocess.hpp의 stretchContrast() 주석 참고.
+        // [[vscan-lite-roi-contrast-stretch]]
+        if (!budgetExceeded()) {
+            std::vector<PipelineResult> stretched;
+            const int srcStride = image.stride > 0 ? image.stride : image.width;
+            for (const Rect& rc : rects) {
+                if (budgetExceeded()) break;
+                const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
+                if (rw < 16 || rh < 16) continue;
+
+                GrayImage crop;
+                crop.width = rw;
+                crop.height = rh;
+                crop.pixels.resize(static_cast<size_t>(rw) * rh);
+                for (int r = 0; r < rh; ++r)
+                    std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
+                                image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
+
+                GrayImage boosted;
+                if (!stretchContrast(GrayView(crop), boosted)) continue;
+
+                Pipeline roiPipe(roiCfg);
+                auto sHits = roiPipe.processViewCore(GrayView(boosted));
+                if (sHits.empty()) {
+                    // [편 다음엔 한 번 뭉갠다] 스트레칭은 신호와 **노이즈를
+                    // 같이** 증폭한다. 대비가 낮을수록 이득이 커지므로
+                    // 양자화/센서 노이즈도 그만큼 커져서, 편 직후에는
+                    // 오히려 이진화가 흔들린다.
+                    // 실측(EAN13 대비 0.20): ROI를 펴기만 하면 실패,
+                    // 편 뒤 3x3 블러를 한 번 먹이면 읽힌다. 0.25는 펴는
+                    // 것만으로도 읽히므로 이 단계는 더 낮은 대비 전용이다.
+                    GrayImage smoothed;
+                    boxBlur3x3(GrayView(boosted), smoothed);
+                    sHits = roiPipe.processViewCore(GrayView(smoothed));
+                }
+                for (auto& r : sHits)
+                    for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
+                stretched.insert(stretched.end(), sHits.begin(), sHits.end());
+            }
+            stretched = dedup(std::move(stretched));
+            if ((int)stretched.size() >= need) return stretched;
+            if (stretched.size() > hits.size()) hits = std::move(stretched);
+        }
     }
     if (pass == RegionPass::CropOnly) return hits;
 

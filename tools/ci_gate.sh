@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci_gate.sh — 회귀 게이트 두 개를 한 번에 돌린다.
 #
-#   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 37/40 미만이면 실패.
+#   1) 고정 40종      : 통과/실패 게이트. 세 경로 모두 기준치 미만이면 실패.
 #   2) 심볼로지 각도 스윕: 14종 x 0~90도. 검출률 100% 미만이거나 오디코딩이
 #                        하나라도 나오면 실패.
 #   3) 고정 시드 코퍼스: 검출률/평균/p95/중복을 기록하고, 직전 기준선 대비
@@ -51,11 +51,17 @@ python3 "$ROOT/tools/generate_stress_images.py" --outdir "$WORK/stress" >/dev/nu
 "$VERIFY" "$WORK/stress" > "$WORK/stress.txt" 2>/dev/null || true
 LINE="$(grep "검출 성공" "$WORK/stress.txt" || true)"
 echo "   $LINE"
-if ! echo "$LINE" | grep -q "37/40.*37/40.*37/40"; then
-  echo "!! 40종 기준선(37/40) 미달 — 검출 회귀"
-  sed -n '1,50p' "$WORK/stress.txt"
-  exit 1
-fi
+# 세 경로(full / 2stage / 2stage-fast) 각각의 "N/40"을 뽑아 전부 기준치 이상인지 본다.
+# 고정 문자열로 grep하던 것을 숫자 비교로 바꾼 이유: 검출이 **좋아져도**
+# 실패했다(37/40 패턴이 38/40과 안 맞는다). 게이트는 회귀만 잡아야 한다.
+STRESS_MIN="${STRESS_MIN:-38}"
+for N in $(echo "$LINE" | grep -oE '[0-9]+/40' | cut -d/ -f1); do
+  if [ "$N" -lt "$STRESS_MIN" ]; then
+    echo "!! 40종 기준선(${STRESS_MIN}/40) 미달 — 검출 회귀 (${N}/40)"
+    sed -n '1,50p' "$WORK/stress.txt"
+    exit 1
+  fi
+done
 
 echo ">> [3/5] 심볼로지 각도 스윕 (14종 x 0~90도 5도 간격, 디스크 0)"
 SWEEP_FAIL=0
@@ -116,4 +122,4 @@ if [ "$fail" = 1 ]; then
   echo ">> ❌ 코퍼스 게이트 실패"
   exit 1
 fi
-echo ">> ✅ 통과 (40종 37/40, 심볼로지 스윕 100%/오디코딩 0, 코퍼스 기준선 이내)"
+echo ">> ✅ 통과 (40종 ${STRESS_MIN}/40 이상, 심볼로지 스윕 100%/오디코딩 0, 코퍼스 기준선 이내)"
