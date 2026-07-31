@@ -1,0 +1,787 @@
+From 46f5c7a25c22f7ca24e2f40f02cc09197f872b82 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 31 Jul 2026 02:26:19 +0000
+Subject: [PATCH 17/18] =?UTF-8?q?=EC=98=81=EC=97=AD=20=EA=B5=AC=EC=A0=9C:?=
+ =?UTF-8?q?=20=ED=81=B0=20=ED=94=84=EB=A0=88=EC=9E=84=20=EC=86=8D=20?=
+ =?UTF-8?q?=EC=9E=91=EC=9D=80=20=EC=BD=94=EB=93=9C=EB=A5=BC=20=EC=9E=98?=
+ =?UTF-8?q?=EB=9D=BC=EC=84=9C=20=EB=B3=B8=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+회전이 문제가 아니었다. 탐색 면적이었다.
+
+2048x1536 프레임 한가운데 128px DataMatrix(모듈 8px)를 놓고 0~90도를
+5도 간격으로 돌리면 55도부터 전부 실패한다. 그런데 같은 이미지에서
+코드 주변만 잘라내면:
+
+  angle=90  풀프레임 2048x1536 -> 0개
+    여백  10 크롭  205x 200 -> "VSCAN-SWEEP-01"
+    여백 240 크롭  665x 660 -> "VSCAN-SWEEP-01"
+    여백 480 크롭 1085x1140 -> 0개      <- 다시 커지면 다시 실패
+
+회전을 한 번도 하지 않았고, 55~90도가 전부 같았다. zxing은 그 각도의
+코드를 못 읽는 게 아니라 큰 프레임에서 작은 코드를 못 찾는 것이다.
+마지막 줄이 결정적이다 — 크롭을 키우면 원인이 그대로 되돌아온다.
+
+기존 findDeskewCandidate()로는 안 잡힌다. 그건 1D 전용이라 그래디언트
+방향 일관성(coherence > 0.55)이 높은 타일만 후보로 치는데, 2D 행렬코드는
+사방으로 엣지가 뻗어 coherence가 낮다. 실제로 128x128 DataMatrix에서
+솔리드 L-파인더 가장자리만 걸린 256x128짜리 bbox가 나왔고, 거기서 파생된
+크롭은 코드 아래쪽을 잘라먹고 있었다.
+
+새로 넣은 findCodeRegions()(src/locate.cpp)는 방향을 아예 안 보고
+그래디언트 에너지만 본다 — 바코드는 종류 불문 배경보다 단위 면적당
+엣지가 많다. 연결 성분으로 덩어리를 잡고 에너지 상위 N개를 크기 비례
+여백(상한 160px)과 함께 잘라 디코드한다. 여백 상한은 위 실험의 마지막
+줄 그대로다. locate 자체는 2048x1536에서 4.0ms.
+
+파이프라인에 두 자리:
+  - 이른 자리(빠른 패스 직후) — 자르기만. 성공하면 뒤의 100~250ms짜리
+    풀프레임 단계들을 통째로 건너뛴다.
+  - 늦은 자리(구제 체인 끝) — 영역 추정각만큼 되돌려서 한 번 더.
+자르기와 회전을 안 나누면 2단계 경로에서 자르기가 두 번 돈다(p95 +50%).
+
+PDF417은 적층형이라 자르기만으로는 0/19다. 영역별 추정각으로 한 번
+되돌리면 살아난다 — 각도는 findCodeRegions()가 영역 단위로 따로 계산한다.
+findDeskewCandidate()의 추정값을 쓰면 PDF417 크롭 20/30/60/75/80도에서
+전부 "추정 불가"가 나오는데, 정보가 없던 게 아니라 1D 필터가 버린 것이다.
+
+결과 — 각도 스윕(모듈 8px, 0~90도 5도 간격, 19장):
+  DataMatrix  57.9% (11/19) -> 100%  (19/19)
+  PDF417      15.8% ( 3/19) ->  89.5% (17/19)
+
+코퍼스(고정 시드, 코드 단위 텍스트 일치):
+  단일 코드 300장  59.3% -> 60.8%,  p50 84~94ms -> 55~69ms
+  다중 코드 300장  58.4% -> 58.7%,  오디코딩 10 -> 4
+성공하는 프레임이 30% 빨라지고(p50) 어차피 실패하는 프레임이 10~35%
+느려진다(p95). 꼬리가 마감을 위협하면 max_frame_ms로 자르는 구조다.
+
+1D 회전 구제는 기본 OFF로 내렸다. 영역 구제가 같은 일을 더 넓게 한다:
+  1D 회전 구제만  59.3%  평균 165.5ms  p50 85.4ms
+  영역 구제만     60.8%  평균 166.2ms  p50 54.3ms
+  둘 다           61.3%  평균 195.2ms  p50 58.1ms
+고정 40종은 영역 구제만으로도 37/40 동일(45도 1D인 39번 포함). 둘 다
+켜면 0.5%p가 더 붙지만 평균이 18% 오른다. enable_1d_deskew_rescue=1로
+되살릴 수 있게 남겼다.
+
+C API: disable_region_rescue(0=켜짐), enable_1d_deskew_rescue(0=꺼짐) 추가.
+disable_1d_deskew_rescue는 의미가 바뀌었다 — 0이 이제 "기본값(꺼짐)"이다.
+verify_accuracy에 --no-region 추가.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ CMakeLists.txt                      |   1 +
+ include/vscan.h                     |  35 +++++-
+ include/vscan_internal/locate.hpp   |  77 +++++++++++++
+ include/vscan_internal/pipeline.hpp |  82 ++++++++++++-
+ src/locate.cpp                      | 171 ++++++++++++++++++++++++++++
+ src/pipeline.cpp                    | 163 ++++++++++++++++++++++++++
+ src/vscan_c_api.cpp                 |   2 +
+ tools/verify_accuracy.cpp           |   6 +-
+ 8 files changed, 525 insertions(+), 12 deletions(-)
+ create mode 100644 include/vscan_internal/locate.hpp
+ create mode 100644 src/locate.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 386cff6..7531b52 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -96,6 +96,7 @@ endif()
+ set(VSCAN_SOURCES
+   src/preprocess.cpp
+   src/deskew1d.cpp
++  src/locate.cpp
+   src/decoder_zxing.cpp
+   src/pipeline.cpp
+   src/gs1.cpp
+diff --git a/include/vscan.h b/include/vscan.h
+index ef6374b..ceaa4e6 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -191,11 +191,16 @@ typedef struct {
+     int coarse_factor;
+ 
+     /*
+-     * [1D 바코드 회전 구제] 20~75도 부근 회전된 1D 바코드(zxing이 풀옵션
+-     * 으로도 못 읽는 구간 — 실물 산업용 리더기에서는 되는 것이 스크린샷으로
+-     * 확인됨)를 구제하는 최종 5단계. 0 = 기본(켜짐). 1 = 끔.
+-     * 다른 4단계가 전부 실패했을 때만 도는 비용이라 정상 프레임에는
+-     * 영향이 없다. 회전 각도가 나올 수 있는 배치 환경이면 켜둘 것.
++     * [1D 바코드 회전 구제 — 영역 구제로 대체됨. 이제 기본 OFF]
++     *
++     * 20~75도 부근 회전된 1D 바코드를 구제하던 최종 단계다. 아래
++     * disable_region_rescue가 가리키는 영역 구제가 같은 일을 더 넓게
++     * (1D뿐 아니라 2D 행렬코드까지) 그리고 더 싸게 한다 — 실측 비교는
++     * vscan_internal/pipeline.hpp의 enable1DDeskewRescue 주석 참고.
++     *
++     * **동작이 바뀌었다**: 예전에는 0이 "켜짐"이었지만 지금은 0이 "기본값
++     * (=꺼짐)"이다. 굳이 되살리려면 아래 enable_1d_deskew_rescue를 1로.
++     * 1을 주면 예전과 같이 강제로 끈다(무해).
+      */
+     int disable_1d_deskew_rescue;
+ 
+@@ -267,6 +272,26 @@ typedef struct {
+      * symbology_mask를 이미 손으로 지정했다면 켤 이유가 없다.
+      */
+     int enable_adaptive_profile;
++
++    /*
++     * [영역 구제] 0 = 켜짐(기본), 1 = 끔.
++     * 모든 단계가 실패했을 때, 그래디언트 에너지로 코드 후보 영역을 찾아
++     * 그 주변만 잘라서 다시 디코드한다.
++     *
++     * 근거(§3.17): 큰 프레임 속 작은 코드의 실패는 회전 탓이 아니라
++     * **탐색 면적** 탓이다. 2048x1536 프레임의 128px DataMatrix는 55~90도
++     * 전 구간이 실패하는데, 코드 주변 205x200만 잘라내면 회전을 한 번도
++     * 하지 않고 전 각도가 읽힌다(실측 19/19). 실패한 프레임에서만 도는
++     * 비용이며, 회전/리샘플링이 없어 1D 회전 구제보다 싸다.
++     */
++    int disable_region_rescue;
++
++    /*
++     * [1D 회전 구제 되살리기] 0 = 기본(꺼짐), 1 = 켬.
++     * 영역 구제와 같이 켜면 검출이 0.5%p 더 붙지만 평균 처리 시간이 18%
++     * 오른다(실측). 마지막 한 자리가 절실한 배치에서만 쓸 것.
++     */
++    int enable_1d_deskew_rescue;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/locate.hpp b/include/vscan_internal/locate.hpp
+new file mode 100644
+index 0000000..49ad48c
+--- /dev/null
++++ b/include/vscan_internal/locate.hpp
+@@ -0,0 +1,77 @@
++#pragma once
++#include "vscan_internal/frame.hpp"
++#include <vector>
++
++namespace vscan {
++
++/*
++ * [코드 후보 영역 탐지 — 심볼로지 무관]
++ *
++ * 왜 필요한가. 실측으로 확인된 사실인데, 실패의 원인은 "회전"이 아니라
++ * **프레임 크기**였다(§3.17). 2048x1536 프레임에 128px짜리 DataMatrix를
++ * 놓고 0~90도를 5도 간격으로 돌려보면 55도 이상은 전부 실패한다. 그런데
++ * 같은 이미지에서 코드 주변만 205x200 ~ 665x660으로 잘라내면
++ * **각도 불문 전부 읽힌다** — 회전을 한 번도 하지 않고.
++ *
++ *   angle=90  풀프레임 2048x1536 -> 0개
++ *             여백 10 크롭 205x200 -> "VSCAN-SWEEP-01"
++ *
++ * 즉 zxing은 그 각도의 코드를 못 읽는 게 아니라, 큰 프레임 안에서 작은
++ * 코드를 **못 찾는** 것이다. 그래서 필요한 건 더 많은 회전 시도가 아니라
++ * "어디를 보라"고 알려주는 것 — 이게 산업용 리더기가 회전각과 무관하게
++ * 10~20ms로 일정한 이유이기도 하다(찾기 + 작은 ROI 디코드는 각도에
++ * 비례해 늘어나는 비용이 아니다).
++ *
++ * findDeskewCandidate()로는 안 되나. 안 된다. 그건 1D 전용이라
++ * coherence(그래디언트 방향 일관성) > 0.55인 타일만 후보로 친다. 1D
++ * 바코드는 막대가 전부 같은 방향이라 coherence가 높지만, QR/DataMatrix는
++ * 사방으로 엣지가 뻗어 있어 coherence가 낮다 — 그래서 2D 코드에서는
++ * 솔리드 L-파인더 가장자리 몇 타일만 걸리고 본체가 통째로 빠진다(실측:
++ * 128x128 코드에 대해 256x128짜리 엉뚱한 bbox가 나왔다).
++ *
++ * 여기서는 방향을 아예 안 본다. **그래디언트 에너지만** 본다:
++ * 바코드는 종류를 불문하고 주변 배경보다 단위 면적당 엣지가 압도적으로
++ * 많다. 방향 조건을 빼는 것만으로 1D/2D/DPM 전부에 같은 탐지기가 쓰인다.
++ */
++struct CodeRegion {
++    Rect bbox;      // 원본 프레임 좌표 (패딩 없음)
++    float energy;   // 영역 내 그래디언트 에너지 합 — 정렬 기준
++
++    /*
++     * 영역의 지배적 기울기 추정값(도), 범위 (-45, 45].
++     * rotateAroundPoint()에 -angleDeg를 넘기면 막대가 축에 정렬된다.
++     *
++     * 왜 findDeskewCandidate()의 추정값을 안 쓰나. 그건 후보 타일을
++     * coherence > 0.55 && 에너지 상위 10%로 거른 **다음** 그 타일들만
++     * 합산한다 — 1D 전용 필터라, 이미 영역을 알고 있는 상황에서는
++     * 오히려 영역의 일부만 보게 된다. 실측: PDF417 크롭에서 20/30/60/75/80도
++     * 전부 "추정 불가"(coherence < 0.25)가 나왔는데, 정작 그 각도들은
++     * 전부 정확한 각도 한 번의 회전으로 읽혔다(각각 +20 / +30 / -30 /
++     * -15 / -10도). 즉 정보가 없던 게 아니라 필터가 버린 것이다.
++     * 여기서는 그 영역에 속한 hot 타일 전체의 텐서를 합산한다.
++     *
++     * 2D 행렬코드(QR/DataMatrix)는 사방으로 엣지가 뻗어 방향성이 없어
++     * kAngleUnknown이 나오는 게 정상이다 — 그런 코드는 애초에 회전이
++     * 필요 없다(ROI로 자르기만 하면 전 각도가 읽힌다).
++     */
++    static constexpr float kAngleUnknown = 1e9f;
++    float angleDeg = kAngleUnknown;
++};
++
++/*
++ * 에너지가 큰 순으로 최대 maxRegions개의 후보 영역을 돌려준다.
++ *
++ * tileSize/downscale은 findDeskewCandidate()와 같은 뜻이다(기본
++ * 32 x 4배 = 원본 128px 타일). 이 크기는 "코드 하나가 타일 몇 개에
++ * 걸치느냐"만 좌우하고, 인접 타일을 연결해서 덩어리를 만들기 때문에
++ * 코드가 타일보다 크든 작든 상관없다.
++ *
++ * energyRatio: 프레임 내 최대 타일 에너지 대비 몇 배 이상이면 후보로
++ * 볼지. 절대 임계값을 안 쓰는 이유는 노출/대비가 프레임마다 다르기
++ * 때문 — 상대값이라 자동으로 적응한다.
++ */
++std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions = 4,
++                                        int tileSize = 32, int downscale = 4,
++                                        float energyRatio = 0.20f);
++
++} // namespace vscan
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 9f0d35e..a13b895 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -91,12 +91,67 @@ struct PipelineConfig {
+     // 작은 코드만 나오는 배치에서 매 프레임 헛수고하는 것을 막는다.
+     int coarseMaxConsecutiveMisses = 3;
+ 
+-    // [1D 바코드 회전 구제] §3.2.15/16 참고. 20~75도 부근 회전 1D
+-    // 바코드는 zxing이 풀옵션으로도 못 읽는데, 이 최종 5단계가 그걸
+-    // 구제한다. 기본 ON — "언제든 나올 수 있는 환경"이 배치 목표라면
+-    // 항상 켜두는 게 맞고, 실패한 프레임에서만 도는 비용이라 정상
+-    // 프레임에는 영향이 없다. 걱정되면 false로 끌 것.
+-    bool enable1DDeskewRescue = true;
++    /*
++     * [1D 바코드 회전 구제 — 아래 enableRegionRescue로 대체됨, 기본 OFF]
++     *
++     * 원래 §3.2.15/16의 "20~75도 회전 1D는 zxing이 풀옵션으로도 못 읽는다"를
++     * 구제하려고 만든 최종 단계였다. 지금은 영역 구제가 같은 일을 더 잘한다:
++     *
++     *   - 후보 탐지가 1D 전용(coherence > 0.55)이 아니라 에너지 기반이라
++     *     2D 행렬코드도 찾는다. 그래서 DataMatrix 55~90도 같은, 이 단계가
++     *     원리적으로 못 잡던 케이스까지 커버한다(0/8 -> 8/8).
++     *   - 회전 전에 "자르기만 하고" 한 번 본다. 실패 원인의 상당수는 각도가
++     *     아니라 탐색 면적이라, 그것만으로 걸리는 경우가 많다(회전 없이
++     *     DataMatrix 19/19).
++     *
++     * 실측 비교(단일 코드 300장, mixed):
++     *                     text_ok   평균     p50      p95
++     *   1D 회전 구제만     59.3%   165.5ms  85.4ms  688.8ms
++     *   영역 구제만        60.8%   166.2ms  54.3ms  760.1ms
++     *   둘 다              61.3%   195.2ms  58.1ms  888.9ms
++     * 검출은 영역 구제 쪽이 위고 평균은 같은데 중앙값이 36% 낮다. 둘 다
++     * 켜면 검출이 0.5%p 더 붙지만 평균이 18% 오른다 — 같은 일을 두 번
++     * 하는 값으로는 비싸다. 고정 40종 게이트는 영역 구제만으로도 37/40으로
++     * 동일하다(45도 1D인 39번 포함).
++     *
++     * 코드와 스위치는 남겨둔다 — 특정 배치에서 마지막 0.5%p가 절실하면
++     * 켤 수 있게. 기본은 OFF.
++     */
++    bool enable1DDeskewRescue = false;
++
++    /*
++     * [영역 구제] 풀프레임 풀옵션이 빈손일 때, 그래디언트 에너지로 코드
++     * 후보 영역을 찾아 그 주변만 잘라서 다시 디코드한다.
++     *
++     * 근거(§3.17): 실패의 원인은 회전이 아니라 **프레임 크기**였다.
++     * 2048x1536 프레임의 128px DataMatrix는 55~90도에서 전부 실패하는데,
++     * 코드 주변 205x200만 잘라내면 회전을 한 번도 안 하고 전 각도가
++     * 읽힌다. zxing이 못 읽는 게 아니라 못 찾는 것이다.
++     *
++     * 1D 회전 구제와 달리 회전/리샘플링이 없고 심볼로지도 안 가린다.
++     * 기본 ON — 실패한 프레임에서만 도는 비용이다.
++     */
++    bool enableRegionRescue = true;
++
++    // 한 프레임에서 시도할 후보 영역 수 상한. 영역 하나당 작은 ROI
++    // 디코드 한 번이라, 늘릴수록 실패 프레임의 비용이 선형으로 는다.
++    int regionRescueMaxRegions = 4;
++
++    /*
++     * 후보 영역에 붙일 여백의 상한(px). 여백은 기본적으로 영역 크기의
++     * 0.35배인데(정지대는 모듈 크기에 비례해야 하므로), 여기서 잘린다.
++     *
++     * 상한이 필요한 이유: 실측상 **크롭이 너무 커도 다시 실패한다**.
++     * 여백 240px 크롭(665x660)은 읽히는데 여백 480px 크롭(1085x1140)은
++     * 다시 실패한 각도가 있었다 — 애초의 실패 원인이 "탐색 면적이 커서"
++     * 였으니 여백을 키우면 그 원인이 되돌아온다.
++     */
++    int regionRescueMaxPadPx = 160;
++
++    // 회전까지 시도할 영역 수 상한(에너지 상위 N개). 회전은 리샘플링이
++    // 들어가 자르기만 하는 것보다 비싸고, 실제로 회전이 필요한 심볼로지는
++    // PDF417/1D뿐이라 상위 몇 개면 충분하다.
++    int regionRescueMaxRotations = 2;
+ 
+     // [DPM/점각인 구제] §6.4 대화 참고. 실물 비교 대상 리더기 대조 검증까지
+     // 완료됨 — 반전->닫힘->재반전으로 점각인 코드의 이진화 실패를
+@@ -278,6 +333,8 @@ private:
+ 
+     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
+     std::vector<Rect> lastPositions_;
++    // 이번 프레임에서 영역 자르기 패스를 이미 돌았는가 (중복 방지).
++    bool regionCropDone_ = false;
+     int framesSinceFullScan_ = 0;
+ 
+     // 프레임 시간 예산 (maxFrameMs). 최상위 호출에서만 시작/해제한다 —
+@@ -326,6 +383,19 @@ private:
+     // processViewTwoStage() 양쪽에서 공유하는 최종 안전망.
+     // 다른 모든 방법이 실패했을 때만 호출되므로 비용은 실패한
+     // 프레임에서만 발생한다.
++    // [영역 구제] 큰 프레임 속 작은 코드를 잘라서 다시 본다.
++    // 1D 회전 구제와 같은 자리(다른 모든 방법이 실패한 뒤)에서 돌지만,
++    // 회전이 없어 더 싸고 심볼로지를 안 가린다. [[vscan-lite-region-rescue]]
++    // 영역 구제는 두 가지 일을 한다: (1) 잘라서 그대로 디코드,
++    // (2) 잘라서 각도만큼 되돌린 뒤 디코드. 둘의 성격이 다르다 —
++    // (1)은 싸고 2D 행렬코드에 잘 듣고, (2)는 리샘플링이 들어가 비싸고
++    // PDF417/1D에만 필요하다. 그래서 파이프라인의 이른 자리(빠른 패스
++    // 직후)에는 (1)만, 마지막 구제 자리에는 (2)만 돌린다 — 안 나누면
++    // 2단계 경로에서 (1)이 두 번 돈다(실측 p95 +50%의 주범).
++    enum class RegionPass { CropOnly, RotateOnly, Both };
++    std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
++                                                 RegionPass pass = RegionPass::Both);
++
+     std::vector<PipelineResult> tryDeskewRescue1D(const GrayView& image, int need);
+ 
+     // processViewTwoStage()의 2단계와 processViewROIs()가 공유하는 실제 작업:
+diff --git a/src/locate.cpp b/src/locate.cpp
+new file mode 100644
+index 0000000..0716f52
+--- /dev/null
++++ b/src/locate.cpp
+@@ -0,0 +1,171 @@
++#include "vscan_internal/locate.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#include <vector>
++
++namespace vscan {
++namespace {
++
++// 임의 배율 박스 다운샘플. deskew1d.cpp에도 같은 함수가 있지만 그쪽은
++// 파일 내부(익명 네임스페이스)라 공유가 안 된다 — 20줄짜리를 헤더로
++// 끌어올리는 것보다 여기 두는 편이 의존 관계가 단순하다.
++void downsampleN(const GrayView& src, int factor, std::vector<uint8_t>& dst, int& dw, int& dh) {
++    dw = src.width / factor;
++    dh = src.height / factor;
++    dst.assign(static_cast<size_t>(dw) * dh, 0);
++    const int stride = src.stride > 0 ? src.stride : src.width;
++    for (int y = 0; y < dh; ++y) {
++        uint8_t* __restrict out = dst.data() + static_cast<size_t>(y) * dw;
++        for (int x = 0; x < dw; ++x) {
++            int sum = 0;
++            for (int j = 0; j < factor; ++j) {
++                const uint8_t* __restrict row =
++                    src.pixels + static_cast<size_t>(y * factor + j) * stride + x * factor;
++                for (int i = 0; i < factor; ++i) sum += row[i];
++            }
++            out[x] = static_cast<uint8_t>(sum / (factor * factor));
++        }
++    }
++}
++
++} // namespace
++
++std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions, int tileSize,
++                                        int downscale, float energyRatio) {
++    std::vector<CodeRegion> out;
++    if (image.empty() || maxRegions <= 0) return out;
++    if (image.width < downscale * tileSize * 2 || image.height < downscale * tileSize * 2) return out;
++
++    std::vector<uint8_t> small;
++    int dw, dh;
++    downsampleN(image, downscale, small, dw, dh);
++
++    const int tilesX = dw / tileSize;
++    const int tilesY = dh / tileSize;
++    if (tilesX < 2 || tilesY < 2) return out;
++
++    // [타일별 에너지] Sobel 배열을 따로 만들지 않고 타일 루프 안에서
++    // 바로 누적한다 — deskew1d는 구조텐서(방향)까지 필요해서 gx/gy를
++    // 프레임 전체 크기로 들고 있어야 했지만, 여기는 스칼라 하나만
++    // 있으면 되므로 중간 버퍼(float 2장 = 다운샘플 픽셀당 8바이트)를
++    // 통째로 없앨 수 있다. 512x384 다운샘플 기준 1.5MB 절약.
++    //
++    // 에너지 척도는 |gx| + |gy| (L1). sqrt를 안 쓰는 이유는 deskew1d와
++    // 같다 — 리덕션 루프 안의 sqrt가 자동 벡터화를 막는다. 여기서는
++    // 타일 간 상대 랭킹만 쓰므로 L1으로 충분하다.
++    // [[vscan-lite-locate-regions]]
++    std::vector<float> energy(static_cast<size_t>(tilesX) * tilesY, 0.0f);
++    // 방향 추정용 구조텐서. 후보 판정에는 안 쓰지만(2D 코드를 걸러내면
++    // 안 되므로) 같은 루프에서 곱셈 세 번이면 나오는 값이라, 나중에
++    // 회전이 필요한 심볼로지(PDF417/1D)를 위해 미리 모아둔다.
++    std::vector<float> tjxx(energy.size(), 0.0f), tjyy(energy.size(), 0.0f), tjxy(energy.size(), 0.0f);
++    float maxEnergy = 0.0f;
++    for (int ty = 0; ty < tilesY; ++ty) {
++        for (int tx = 0; tx < tilesX; ++tx) {
++            const int y0 = ty * tileSize, x0 = tx * tileSize;
++            // Sobel은 3x3이라 다운샘플 이미지 경계 1px을 못 본다.
++            const int ys = std::max(1, y0), ye = std::min(dh - 1, y0 + tileSize);
++            const int xs = std::max(1, x0), xe = std::min(dw - 1, x0 + tileSize);
++            float acc = 0.0f;
++            float jxx = 0.0f, jyy = 0.0f, jxy = 0.0f;
++            for (int y = ys; y < ye; ++y) {
++                const uint8_t* __restrict r0 = small.data() + static_cast<size_t>(y - 1) * dw;
++                const uint8_t* __restrict r1 = small.data() + static_cast<size_t>(y) * dw;
++                const uint8_t* __restrict r2 = small.data() + static_cast<size_t>(y + 1) * dw;
++                for (int x = xs; x < xe; ++x) {
++                    int sx = (r0[x + 1] + 2 * r1[x + 1] + r2[x + 1]) -
++                             (r0[x - 1] + 2 * r1[x - 1] + r2[x - 1]);
++                    int sy = (r2[x - 1] + 2 * r2[x] + r2[x + 1]) -
++                             (r0[x - 1] + 2 * r0[x] + r0[x + 1]);
++                    acc += static_cast<float>(std::abs(sx) + std::abs(sy));
++                    const float fx = static_cast<float>(sx), fy = static_cast<float>(sy);
++                    jxx += fx * fx;
++                    jyy += fy * fy;
++                    jxy += fx * fy;
++                }
++            }
++            float e = acc / static_cast<float>(tileSize * tileSize);
++            const size_t ti = static_cast<size_t>(ty) * tilesX + tx;
++            energy[ti] = e;
++            tjxx[ti] = jxx; tjyy[ti] = jyy; tjxy[ti] = jxy;
++            maxEnergy = std::max(maxEnergy, e);
++        }
++    }
++    if (maxEnergy <= 0.0f) return out;
++
++    const float thresh = maxEnergy * energyRatio;
++    std::vector<uint8_t> hot(energy.size(), 0);
++    for (size_t i = 0; i < energy.size(); ++i) hot[i] = energy[i] >= thresh ? 1 : 0;
++
++    // [연결 성분] 8이웃. 코드가 대각으로 기울어져 있으면 4이웃으로는
++    // 한 덩어리가 여러 조각으로 갈라진다 — 정확히 회전된 코드에서
++    // 문제가 되는 케이스라 대각까지 잇는다.
++    std::vector<uint8_t> visited(energy.size(), 0);
++    std::vector<int> stack;
++    for (int ty = 0; ty < tilesY; ++ty) {
++        for (int tx = 0; tx < tilesX; ++tx) {
++            size_t start = static_cast<size_t>(ty) * tilesX + tx;
++            if (!hot[start] || visited[start]) continue;
++            stack.clear();
++            stack.push_back(static_cast<int>(start));
++            visited[start] = 1;
++            int minX = tx, maxX = tx, minY = ty, maxY = ty;
++            float sum = 0.0f;
++            double sJxx = 0, sJyy = 0, sJxy = 0;
++            while (!stack.empty()) {
++                int cur = stack.back();
++                stack.pop_back();
++                int cx = cur % tilesX, cy = cur / tilesX;
++                sum += energy[cur];
++                sJxx += tjxx[cur]; sJyy += tjyy[cur]; sJxy += tjxy[cur];
++                minX = std::min(minX, cx); maxX = std::max(maxX, cx);
++                minY = std::min(minY, cy); maxY = std::max(maxY, cy);
++                for (int dy = -1; dy <= 1; ++dy) {
++                    for (int dx = -1; dx <= 1; ++dx) {
++                        if (!dx && !dy) continue;
++                        int nx = cx + dx, ny = cy + dy;
++                        if (nx < 0 || nx >= tilesX || ny < 0 || ny >= tilesY) continue;
++                        size_t nidx = static_cast<size_t>(ny) * tilesX + nx;
++                        if (hot[nidx] && !visited[nidx]) {
++                            visited[nidx] = 1;
++                            stack.push_back(static_cast<int>(nidx));
++                        }
++                    }
++                }
++            }
++            const int scale = tileSize * downscale;
++            CodeRegion r;
++            r.bbox.x0 = std::max(0, minX * scale);
++            r.bbox.y0 = std::max(0, minY * scale);
++            r.bbox.x1 = std::min(image.width, (maxX + 1) * scale);
++            r.bbox.y1 = std::min(image.height, (maxY + 1) * scale);
++            r.energy = sum;
++
++            // [방향 추정] 구조텐서의 지배 방향. 그래디언트는 막대에
++            // 수직이므로 theta가 곧 막대의 기울기다. 90도 배수 차이는
++            // zxing의 TryRotate가 처리하므로 (-45, 45]로 접는다.
++            // 임계 0.25는 deskew1d.cpp와 같은 값 — 방향성이 이보다 약하면
++            // 2D 행렬코드이거나 배경이라, 회전해봐야 얻을 게 없다.
++            const double denom = sJxx - sJyy;
++            const double coh = std::sqrt(denom * denom + 4.0 * sJxy * sJxy) / (sJxx + sJyy + 1e-6);
++            if (coh >= 0.25) {
++                double theta = 0.5 * std::atan2(2.0 * sJxy, denom) * 180.0 / 3.14159265358979323846;
++                while (theta > 45.0) theta -= 90.0;
++                while (theta <= -45.0) theta += 90.0;
++                r.angleDeg = static_cast<float>(theta);
++            }
++            out.push_back(r);
++        }
++    }
++
++    // 에너지가 큰 덩어리부터. "면적이 큰 순"이 아닌 이유는, 배경의
++    // 넓고 옅은 텍스처가 면적으로는 코드를 이길 수 있어서다.
++    std::sort(out.begin(), out.end(),
++              [](const CodeRegion& a, const CodeRegion& b) { return a.energy > b.energy; });
++    if (static_cast<int>(out.size()) > maxRegions) out.resize(maxRegions);
++    return out;
++}
++
++} // namespace vscan
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index d5f3bc8..2759fe9 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -2,6 +2,7 @@
+ #include "vscan_internal/decoder_zxing.hpp"
+ #include "vscan_internal/preprocess.hpp"
+ #include "vscan_internal/deskew1d.hpp"
++#include "vscan_internal/locate.hpp"
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -272,6 +273,22 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+         if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dpmHits;
+     }
+ 
++    // [영역 구제 — 큰 프레임 속 작은 코드]
++    // 여기까지 왔다는 건 풀프레임 풀옵션이 빈손이라는 뜻인데, 실측상
++    // 그 실패의 상당수는 "코드가 프레임에 비해 너무 작아서 못 찾은 것"
++    // 이다. 회전이 문제가 아니다 — 2048x1536 프레임의 128px DataMatrix는
++    // 55도 이상에서 전부 실패하지만, 같은 이미지에서 코드 주변만
++    // 205x200으로 잘라내면 **회전 없이** 전 각도가 읽힌다(§3.17).
++    // 그래서 회전을 더 시도하는 대신 "어디를 보라"를 알려준다.
++    // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
++    // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
++    if (cfg_.enableRegionRescue && !budgetExceeded()) {
++        auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
++                                          regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
++        if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
++        if (regionHits.size() > hits.size()) hits = std::move(regionHits);
++    }
++
+     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
+     // Rotate+Invert)으로 돌았는데도 빈손이면, 20~75도 부근 회전 1D
+     // 바코드일 가능성이 있다(§3.2.15~17). 이건 "속도 최적화 편의기능"
+@@ -285,6 +302,128 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     return rescued.empty() ? hits : rescued;
+ }
+ 
++std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int need, RegionPass pass) {
++    // [[vscan-lite-region-rescue]]
++    //
++    // 원리는 헤더(locate.hpp)에 적어둔 실측 그대로다: zxing이 못 읽는 게
++    // 아니라 못 찾는 것이라, 찾아서 잘라주기만 하면 된다.
++    //
++    // 여백(pad)을 영역 크기에 비례해서 주되 상한을 둔다. 크기 비례인 이유는
++    // 정지대(quiet zone)가 모듈 크기에 비례해야 하기 때문이고, 상한을 두는
++    // 이유는 실측상 **크롭이 너무 커도 다시 실패**하기 때문이다 — 애초에
++    // 실패 원인이 "프레임이 커서"였으니 당연하다(여백 240px 크롭 665x660은
++    // 읽히는데 여백 480px 크롭 1085x1140은 다시 실패한 각도가 있었다).
++    const int maxRegions = std::max(1, cfg_.regionRescueMaxRegions);
++    auto regions = findCodeRegions(image, maxRegions);
++    if (regions.empty()) return {};
++
++    // [헛수고 차단] 영역 하나당 코드는 많아야 하나다. 찾은 영역이 요구
++    // 개수보다 적으면 이 단계는 어차피 need를 못 채우고 뒤 단계로 넘어간다 —
++    // 그럴 거면 크롭 디코드를 돌 이유가 없다. locate 자체는 4ms라 여기서
++    // 끊는 비용은 무시할 만하다.
++    // 실측(코드 1~12개가 섞인 300장, need=기대개수): 이 검사가 없으면
++    // 평균 147 -> 235ms(+60%)로 뛰는데 검출은 +1.0%p뿐이었다. 다중 코드
++    // 프레임에서는 영역 4개로 12개를 채울 수 없으니 전부 헛돈 것이다.
++    if ((int)regions.size() < need) return {};
++
++    PipelineConfig roiCfg = cfg_;
++    roiCfg.tileThreads = 1;          // ROI는 작아서 타일링이 손해다
++    // [옵션은 항상 풀옵션] 자르기 패스가 파이프라인 이른 자리에서 도니
++    // 옵션을 아껴야 할 것 같지만, 실측은 반대였다. TryRotate/TryInvert를
++    // 끄면 이 패스의 성공률이 떨어져 뒤의 풀프레임 단계로 더 자주
++    // 넘어가고, 그 단계들이 훨씬 비싸서 총합이 커진다
++    // (단일 코드 300장 p50 59.0 -> 92.7ms, 40종 합계 1593 -> 2076ms).
++    // ROI가 작아서 옵션을 다 켜도 절대 비용이 작다는 점이 핵심이다.
++    roiCfg.tryHarder = true;
++    roiCfg.tryRotate = true;
++    roiCfg.tryInvert = true;
++    roiCfg.enableRegionRescue = false;   // 재귀 방지
++    roiCfg.enable1DDeskewRescue = false;
++    roiCfg.enableDPMRescue = false;
++
++    // 영역마다 크기가 달라서 pad도 달라진다 — decodeRegionsParallel()은
++    // 단일 pad만 받으므로, 여기서 미리 여백을 먹인 rect를 만들어 넘기고
++    // pad 인자는 0으로 준다.
++    std::vector<Rect> rects;
++    rects.reserve(regions.size());
++    for (const auto& r : regions) {
++        const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
++        if (w < 16 || h < 16) continue;
++        int pad = static_cast<int>(0.35f * std::max(w, h));
++        pad = std::min(pad, cfg_.regionRescueMaxPadPx);
++        Rect rc{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
++                std::min(image.width, r.bbox.x1 + pad), std::min(image.height, r.bbox.y1 + pad)};
++        rects.push_back(rc);
++    }
++    if (rects.empty()) return {};
++
++    std::vector<PipelineResult> hits;
++    if (pass != RegionPass::RotateOnly) {
++        hits = decodeRegionsParallel(image, rects, 0, roiCfg);
++        if ((int)hits.size() >= need) return hits;
++    }
++    if (pass == RegionPass::CropOnly) return hits;
++
++    // [2차: 영역을 각도만큼 되돌려 다시] 여기까지 오면 자르는 것만으로는
++    // 부족한 심볼로지다 — 실측상 PDF417과 1D가 그렇다. 2D 행렬코드는
++    // 자르기만 하면 전 각도가 읽히므로(DataMatrix 0~90도 19/19) 여기까지
++    // 내려오지 않는다.
++    //
++    // 각도는 findCodeRegions()가 영역별로 이미 준다. 실측(PDF417 module 8,
++    // 0~90도): 잘라내기만 하면 0/19였는데, 영역 추정각으로 한 번 되돌리니
++    // 10/11이 살아났다(5/10/20/40/45/50/60/70/75/80도 성공, 30도만 추정
++    // 오차 3도로 실패).
++    //
++    // 회전은 리샘플링이 들어가 영역 디코드보다 비싸므로, 방향이 뚜렷한
++    // (angleDeg가 있는) 영역에만, 그리고 상위 몇 개에만 건다.
++    const int rotLimit = std::min<int>(cfg_.regionRescueMaxRotations, (int)regions.size());
++    for (int i = 0; i < rotLimit; ++i) {
++        if (budgetExceeded()) break;
++        if (regions[i].angleDeg >= CodeRegion::kAngleUnknown) continue;
++        if (i >= (int)rects.size()) break;
++        const Rect& rc = rects[i];
++        const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
++        if (rw < 32 || rh < 32) continue;
++
++        GrayImage crop;
++        crop.width = rw;
++        crop.height = rh;
++        crop.pixels.resize(static_cast<size_t>(rw) * rh);
++        const int srcStride = image.stride > 0 ? image.stride : image.width;
++        for (int r = 0; r < rh; ++r)
++            std::memcpy(crop.pixels.data() + static_cast<size_t>(r) * rw,
++                        image.pixels + static_cast<size_t>(rc.y0 + r) * srcStride + rc.x0, rw);
++
++        GrayImage rotated;
++        rotateAroundPoint(GrayView(crop), -regions[i].angleDeg,
++                          static_cast<float>(rw) / 2.0f, static_cast<float>(rh) / 2.0f, rotated);
++        Pipeline roiPipe(roiCfg);
++        auto rotHits = roiPipe.processViewCore(GrayView(rotated));
++        if (!rotHits.empty()) {
++            // [좌표 되돌리기] zxing이 준 건 회전된 크롭의 좌표라 그대로
++            // 쓰면 안 된다. rotateAroundPoint()의 목적지->원본 매핑을
++            // 그대로 한 번 더 적용하면 원본 크롭 좌표가 나온다
++            // (그 함수가 쓰는 각이 -degrees인 것까지 같이 맞춰야 한다).
++            // 위치를 뭉개서 대표점 하나로 주면 안 되는 이유: dedup()이
++            // 넓이 기반이라 4점이 한 점으로 겹치면 넓이가 0이 되어
++            // 중복 판정이 통째로 무력화된다(실측: 중복 반환 2건).
++            const float rad = regions[i].angleDeg * 3.14159265358979323846f / 180.0f;
++            const float cc = std::cos(rad), ss = std::sin(rad);
++            const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
++            for (auto& r : rotHits)
++                for (auto& pt : r.symbol.position) {
++                    const float dx = static_cast<float>(pt.first) - px;
++                    const float dy = static_cast<float>(pt.second) - py;
++                    pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
++                    pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
++                }
++            if ((int)rotHits.size() >= need) return rotHits;
++            if (rotHits.size() > hits.size()) hits = std::move(rotHits);
++        }
++    }
++    return hits;
++}
++
+ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, int need) {
+     // 여기까지 왔다는 건 zxing의 카디널 회전 허용범위(실측 ±21도 부근,
+     // §3.2.15/16) 밖에 있는 1D 바코드일 가능성이 있다는 뜻이다.
+@@ -387,6 +526,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     if (image.empty()) return {};
+     BudgetGuard budget(this);
+     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
++    regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
+     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
+ 
+     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
+@@ -454,6 +594,29 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     Pipeline fast(fastCfg);
+     auto hits = fast.processViewCore(image);
+     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
++
++    // [1.5단계 — 위치부터 찾고 그 자리만 본다]
++    // 빠른 풀프레임 패스가 빈손일 때 가장 흔한 이유는 "코드가 프레임에 비해
++    // 작아서 못 찾은 것"이다(§3.17). 그런데 그 다음에 오는 2/3/4단계는
++    // 전부 **같은 크기의 프레임을 더 열심히** 다시 보는 것이라, 원인이
++    // 면적이면 아무리 옵션을 켜도 잘 안 걸린다 — 대신 시간만 100~250ms 쓴다.
++    //
++    // 여기서 그래디언트 에너지로 코드 후보 영역을 먼저 찾고(수 ms) 그
++    // 영역만 풀옵션으로 본다. 실측(§3.17): 2048x1536 프레임의 128px
++    // DataMatrix는 55~90도 전 구간이 실패하는데, 이 단계만 넣으면 회전을
++    // 한 번도 안 하고 19/19가 된다.
++    //
++    // 이게 산업용 리더기가 회전각과 무관하게 10~20ms로 일정한 이유이기도
++    // 하다 — "찾기 + 작은 ROI 디코드"는 각도에 비례해 늘어나는 비용이 아니다.
++    // 실패했을 때의 추가 비용은 locate 몇 ms + 작은 크롭 디코드뿐이고,
++    // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
++    // [[vscan-lite-region-first]]
++    if (cfg_.enableRegionRescue && !budgetExceeded()) {
++        regionCropDone_ = true;
++        auto roiHits = tryRegionRescue(image, need, RegionPass::CropOnly);
++        if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
++        if (roiHits.size() > hits.size()) hits = std::move(roiHits);
++    }
+     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
+     // "부분 검출이라도 제때"가 "완벽하지만 늦음"보다 나은 배치를 위한 것 —
+     // 기본값(maxFrameMs=0)에서는 이 검사가 전부 무효라 동작이 동일하다.
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index babba63..af498f6 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -101,12 +101,14 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->min_expected_codes > 1) pcfg.minExpectedCodes = cfg->min_expected_codes;
+         if (cfg->disable_coarse_locate) pcfg.coarseLocate = false;
+         if (cfg->coarse_factor == 2) pcfg.coarseFactor = 2;
++        if (cfg->enable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = true;
+         if (cfg->disable_1d_deskew_rescue) pcfg.enable1DDeskewRescue = false;
+         if (cfg->enable_dpm_rescue) pcfg.enableDPMRescue = true;
+         if (cfg->max_frame_ms > 0) pcfg.maxFrameMs = cfg->max_frame_ms;
+         if (cfg->disable_blank_frame_skip) pcfg.disableBlankFrameSkip = 1;
+         if (cfg->disable_denoise_rescue) pcfg.disableDenoiseRescue = 1;
+         if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
++        if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+diff --git a/tools/verify_accuracy.cpp b/tools/verify_accuracy.cpp
+index e64f781..6aba063 100644
+--- a/tools/verify_accuracy.cpp
++++ b/tools/verify_accuracy.cpp
+@@ -202,6 +202,7 @@ static void usage(const char* argv0) {
+         "  --no-deskew      1D 회전 구제 끔 (구제 비용 분리 측정용)\n"
+         "  --no-blank-skip  빈 프레임 조기 종료 끔 (효과 분리 측정용)\n"
+         "  --no-denoise     노이즈 구제 끔 (효과 분리 측정용)\n"
++        "  --no-region      영역(ROI) 구제 끔 (효과/비용 분리 측정용)\n"
+         "  --adaptive       적응형 배치 프로파일 켜고 파이프라인을 프레임 간 재사용\n"
+         "                   (실제 워커 구조와 같은 조건. min_expected_codes=0 강제)\n"
+         "  --dump-mismatch  정답과 다른 디코딩 결과를 기대/실제로 출력 (오디코딩 추적)\n"
+@@ -220,7 +221,7 @@ int main(int argc, char** argv) {
+     std::string labelPath, csvPath, pathSel = "full,2stage,2stage-fast";
+     int reps = 0, limit = 0, stride = 1, overlap = 500;
+     int verbose = -1, useTags = 1, useText = 1, useMinExp = 1, dpmRescue = 0, dumpMismatch = 0;
+-    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0;
++    int stdinMode = 0, tagSortName = 0, maxFrameMs = 0, noDeskew = 0, noBlankSkip = 0, noDenoise = 0, adaptive = 0, noRegion = 0;
+ 
+     for (int i = dir.empty() ? 1 : 2; i < argc; ++i) {
+         std::string a = argv[i];
+@@ -244,6 +245,7 @@ int main(int argc, char** argv) {
+         else if (a == "--no-deskew") noDeskew = 1;
+         else if (a == "--no-blank-skip") noBlankSkip = 1;
+         else if (a == "--no-denoise") noDenoise = 1;
++        else if (a == "--no-region") noRegion = 1;
+         else if (a == "--adaptive") { adaptive = 1; useMinExp = 0; }
+         else if (a == "--dump-mismatch") dumpMismatch = 1;
+         else if (a == "--stdin") stdinMode = 1;
+@@ -343,6 +345,7 @@ int main(int argc, char** argv) {
+             c.disable_1d_deskew_rescue = noDeskew;
+             c.disable_blank_frame_skip = noBlankSkip;
+             c.disable_denoise_rescue = noDenoise;
++            c.disable_region_rescue = noRegion;
+             c.enable_adaptive_profile = 1;
+             c.min_expected_codes = 0;
+             shared[i] = vscan_create(&c);
+@@ -366,6 +369,7 @@ int main(int argc, char** argv) {
+             cfg.disable_1d_deskew_rescue = noDeskew;
+             cfg.disable_blank_frame_skip = noBlankSkip;
+             cfg.disable_denoise_rescue = noDenoise;
++            cfg.disable_region_rescue = noRegion;
+             // "아이템당 코드 개수를 아는 현장" 사용법: 빠른 경로가 이 개수를
+             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
+             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
+-- 
+2.43.0
+
