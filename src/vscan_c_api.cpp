@@ -97,6 +97,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         pcfg.tileThreads = cfg->tile_threads;
         if (cfg->tile_overlap_px) pcfg.tileOverlapPx = cfg->tile_overlap_px;
         wantZbar = cfg->enable_zbar_fastpath != 0;
+        pcfg.enableZBar = wantZbar;
         pcfg.formatMask = cfg->symbology_mask;
         if (cfg->min_expected_codes > 1) pcfg.minExpectedCodes = cfg->min_expected_codes;
         if (cfg->disable_coarse_locate) pcfg.coarseLocate = false;
@@ -125,13 +126,10 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
 
     auto* p = new vscan_pipeline(pcfg);
 
-#ifdef VSCAN_HAVE_ZBAR
-    if (wantZbar) {
-        p->impl.addDecoder(std::make_unique<vscan::ZBarDecoder>());
-    }
-#else
+    // ZBar 등록은 PipelineConfig::enableZBar가 처리한다 — 내부 임시
+    // 파이프라인들이 설정을 복사하므로 그래야 모든 경로에 일관되게 붙는다.
+    // [[vscan-lite-zbar-in-subpipelines]]
     (void)wantZbar;
-#endif
 
     return p;
 }

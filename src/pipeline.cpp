@@ -3,6 +3,9 @@
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
 #include "vscan_internal/locate.hpp"
+#ifdef VSCAN_HAVE_ZBAR
+#include "vscan_internal/decoder_zbar.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +24,12 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
                                                          cfg_.tryDownscale, cfg_.tryCode39ExtendedMode,
                                                          cfg_.minLineCount, cfg_.validateITFCheckSum,
                                                          cfg_.downscaleThreshold));
+#ifdef VSCAN_HAVE_ZBAR
+    // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
+    // cfg_를 복사하므로 자동으로 같이 따라간다.
+    // [[vscan-lite-zbar-in-subpipelines]]
+    if (cfg_.enableZBar) decoders_.push_back(std::make_unique<ZBarDecoder>());
+#endif
 }
 
 Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {

@@ -68,6 +68,22 @@ struct PipelineConfig {
      */
     bool validateITFCheckSum = false;
 
+    /*
+     * [ZBar 보조 디코더] 기본 OFF.
+     *
+     * 왜 addDecoder()가 아니라 설정 항목인가. 파이프라인은 내부에서
+     * **임시 Pipeline을 여러 개 만든다** — 2단계의 빠른 패스, coarse
+     * locate, TryHarder 단계, ROI 디코드, 각종 구제. 전부 cfg_를 복사해서
+     * 생성하는데, addDecoder()로 붙인 디코더는 그 복사본에 안 따라온다.
+     * 그래서 예전에는 vscan_create(enable_zbar_fastpath=1)로 켜도
+     * 최상위 processViewCore()에서만 ZBar가 돌고, ROI/구제 경로에서는
+     * 조용히 빠졌다 — 같은 프레임인데 경로에 따라 결과가 달라진다.
+     * 설정 항목으로 두면 복사본이 자동으로 물려받는다.
+     * 영역 구제가 ROI 디코드를 주 경로로 쓰기 시작하면서 이 차이가
+     * 실제로 결과에 영향을 주는 자리가 됐다. [[vscan-lite-zbar-in-subpipelines]]
+     */
+    bool enableZBar = false;
+
     // --- 2단계 locate-then-refine 디코드의 1단계 전용 설정 ---
     // 1단계는 "위치만 빠르게 찾기"가 목적이라 옵션을 좁힐 수 있는데,
     // 좁힐수록 검출력이 떨어진다. 8종 테스트 이미지 실측 결과
