@@ -981,16 +981,26 @@ std::vector<PipelineResult> Pipeline::decodeRegionsParallel(const GrayView& imag
         // 걸쳐 표현돼서 언샤프가 되살릴 여지가 생긴다. 대신 픽셀 수가
         // 배율 제곱으로 늘어 6배는 3배의 4배 비용이라, 3배로 되는
         // 코드까지 6배를 물릴 이유는 없다.
+        // 대비를 편 판본도 같이 시도한다. 확대·언샤프는 **경계의 기울기**를
+        // 세우는 것이고 대비 스트레칭은 **흑백의 간격**을 벌리는 것이라,
+        // 저대비 + 저해상도가 겹친 코드에서는 둘 다 필요할 수 있다.
+        // 이미 계조를 다 쓰고 있으면 stretchContrast()가 false를 돌려주므로
+        // 그때는 시도가 하나로 줄어 비용이 안 는다.
+        GrayImage boosted;
+        const bool hasBoost = stretchContrast(GrayView(packed), boosted);
         for (int f : {f0, f0 * 2}) {
             if (budgetExceeded()) break;
-            GrayImage big;
-            upscaleSharpen(GrayView(packed), f, big, regionCfg.smallRoiSharpen);
-            if (big.pixels.empty()) continue;
-            auto up = pipe.processViewCore(GrayView(big));
-            if (up.empty()) continue;
-            for (auto& r : up)
-                for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
-            return up;
+            for (int pass = 0; pass < (hasBoost ? 2 : 1); ++pass) {
+                const GrayView srcView = pass == 0 ? GrayView(packed) : GrayView(boosted);
+                GrayImage big;
+                upscaleSharpen(srcView, f, big, regionCfg.smallRoiSharpen);
+                if (big.pixels.empty()) continue;
+                auto up = pipe.processViewCore(GrayView(big));
+                if (up.empty()) continue;
+                for (auto& r : up)
+                    for (auto& pt : r.symbol.position) { pt.first /= f; pt.second /= f; }
+                return up;
+            }
         }
         return hits;
     };

@@ -375,37 +375,100 @@ void upscaleSharpen(const GrayView& src, int factor, GrayImage& out, int amount)
     const int stride = src.stride > 0 ? src.stride : W;
     const int dw = W * factor, dh = H * factor;
 
-    // 1) 쌍선형 확대. 최근접으로 키우면 계단이 그대로 남아 아래 언샤프가
-    //    그 계단을 강조해버린다(모듈 경계가 아니라 픽셀 경계를 세운다).
+    /*
+     * 1) Lanczos-3 확대 (분리형).
+     *
+     * 쌍선형으로 시작했다가 실측에서 갈렸다 — 파인더로 찾은 8곳을
+     * 확대+언샤프로 디코드했을 때 **쌍선형 6곳 / Lanczos 8곳**이었다.
+     * 쌍선형은 이웃 두 픽셀의 선형 보간이라 원본에 없던 고주파를 못 만들고
+     * 오히려 통과대역을 깎는다. 모듈이 2px대면 모듈 경계가 바로 그
+     * 통과대역 끝에 있어서, 깎이면 언샤프로도 되살릴 게 남지 않는다.
+     * Lanczos-3은 sinc 근사라 그 대역을 유지한다.
+     *
+     * 정수배 확대라 출력 픽셀의 소수부 위상이 factor개로 순환한다.
+     * 위상별 6탭 가중치를 미리 계산해두면 픽셀마다 sinc를 부를 일이 없다.
+     */
+    constexpr int kA = 3;                 // Lanczos 창 반경
+    constexpr int kTaps = 2 * kA;         // 6탭
+    std::vector<float> wtab(static_cast<size_t>(factor) * kTaps);
+    for (int ph = 0; ph < factor; ++ph) {
+        // 출력 x가 ph일 때의 소스 좌표 소수부
+        const float sx = (static_cast<float>(ph) + 0.5f) / static_cast<float>(factor) - 0.5f;
+        const int base = static_cast<int>(std::floor(sx)) - kA + 1;
+        float sum = 0.0f;
+        for (int t = 0; t < kTaps; ++t) {
+            const float d = sx - static_cast<float>(base + t);
+            float w;
+            if (std::fabs(d) < 1e-6f) {
+                w = 1.0f;
+            } else if (std::fabs(d) >= static_cast<float>(kA)) {
+                w = 0.0f;
+            } else {
+                const float pd = 3.14159265358979323846f * d;
+                w = std::sin(pd) / pd * std::sin(pd / kA) / (pd / kA);
+            }
+            wtab[static_cast<size_t>(ph) * kTaps + t] = w;
+            sum += w;
+        }
+        // 정규화 — 안 하면 밝기가 위상마다 미세하게 출렁인다.
+        if (std::fabs(sum) > 1e-6f)
+            for (int t = 0; t < kTaps; ++t) wtab[static_cast<size_t>(ph) * kTaps + t] /= sum;
+    }
+
+    auto clampi = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+
+    // 가로 확대 -> 세로 확대 (분리형이라 6탭 x 2회)
+    std::vector<float> mid(static_cast<size_t>(dw) * H);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        float* __restrict o = mid.data() + static_cast<size_t>(y) * dw;
+        for (int x = 0; x < dw; ++x) {
+            const int ix = x / factor, ph = x % factor;
+            const int base = ix + (static_cast<int>(std::floor((static_cast<float>(ph) + 0.5f) /
+                                                              static_cast<float>(factor) - 0.5f)) -
+                                   kA + 1);
+            const float* __restrict w = wtab.data() + static_cast<size_t>(ph) * kTaps;
+            float acc = 0.0f;
+            for (int t = 0; t < kTaps; ++t) acc += w[t] * row[clampi(base + t, 0, W - 1)];
+            o[x] = acc;
+        }
+    }
+
     GrayImage up;
     up.width = dw;
     up.height = dh;
     up.pixels.resize(static_cast<size_t>(dw) * dh);
-    const float inv = 1.0f / static_cast<float>(factor);
     for (int y = 0; y < dh; ++y) {
-        const float sy = (static_cast<float>(y) + 0.5f) * inv - 0.5f;
-        int iy = static_cast<int>(sy < 0 ? 0 : sy);
-        if (iy > H - 2) iy = H - 2;
-        const float fy = sy - static_cast<float>(iy);
-        const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(iy) * stride;
-        const uint8_t* __restrict r1 = r0 + stride;
+        const int iy = y / factor, ph = y % factor;
+        const int base = iy + (static_cast<int>(std::floor((static_cast<float>(ph) + 0.5f) /
+                                                          static_cast<float>(factor) - 0.5f)) -
+                               kA + 1);
+        const float* __restrict w = wtab.data() + static_cast<size_t>(ph) * kTaps;
         uint8_t* __restrict o = up.pixels.data() + static_cast<size_t>(y) * dw;
         for (int x = 0; x < dw; ++x) {
-            const float sx = (static_cast<float>(x) + 0.5f) * inv - 0.5f;
-            int ix = static_cast<int>(sx < 0 ? 0 : sx);
-            if (ix > W - 2) ix = W - 2;
-            const float fx = sx - static_cast<float>(ix);
-            const float top = r0[ix] + (r0[ix + 1] - r0[ix]) * fx;
-            const float bot = r1[ix] + (r1[ix + 1] - r1[ix]) * fx;
-            o[x] = static_cast<uint8_t>(top + (bot - top) * fy + 0.5f);
+            float acc = 0.0f;
+            for (int t = 0; t < kTaps; ++t)
+                acc += w[t] * mid[static_cast<size_t>(clampi(base + t, 0, H - 1)) * dw + x];
+            const int v = static_cast<int>(acc + 0.5f);
+            o[x] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
         }
     }
 
-    // 2) 언샤프: out = up + amount% * (up - blur(up)).
-    //    블러를 factor번 겹쳐 반경을 확대 배율에 맞춘다 — 원본 1픽셀이
-    //    확대본에서 factor픽셀이 되므로 그 스케일의 고주파를 되살려야 한다.
+    /*
+     * 2) 언샤프: out = up + amount% * (up - blur(up)).
+     *
+     * 블러 반경이 핵심이다. 되살리려는 건 "원본 1픽셀" 크기의 구조이고
+     * 그건 확대본에서 factor픽셀이므로, 블러의 시그마가 factor 정도라야
+     * 그 대역이 차분에 남는다.
+     *
+     * 3x3 박스 블러를 n번 겹치면 시그마는 sqrt(n * 8/12) = sqrt(2n/3)이다.
+     * 이걸 factor로 맞추려면 n = 1.5 * factor^2 — 처음에 n = factor로 뒀다가
+     * (3배 확대에서 시그마 1.41, 목표 3.0) 판독이 8곳 중 6곳에 그쳤다.
+     * ROI가 작아서 반복 비용은 감당된다.
+     */
+    const int blurIters = std::min(64, std::max(1, static_cast<int>(1.5f * factor * factor + 0.5f)));
     GrayImage blurred = up;
-    for (int i = 0; i < factor; ++i) {
+    for (int i = 0; i < blurIters; ++i) {
         GrayImage tmp;
         boxBlur3x3(GrayView(blurred), tmp);
         blurred = std::move(tmp);

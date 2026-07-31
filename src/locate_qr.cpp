@@ -118,6 +118,25 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
     for (int y = 0; y < image.height; y += std::max(1, rowStep))
         scanRow(bw.data() + static_cast<size_t>(y) * image.width, image.width, y, minModulePx,
                 maxModulePx, hits);
+
+    // [세로도 훑는다] 파인더는 상하좌우 대칭이라 세로로 잘라도 1:1:3:1:1이다.
+    // 가로만 보면, 흐림이 방향에 따라 다르거나(렌즈 수차·모션) 코드가
+    // 조금 기울어졌을 때 통과하는 행이 하나도 없는 파인더가 생긴다.
+    // 세로 스캔은 같은 파인더를 다른 축에서 다시 잡아주므로 그런 것들을
+    // 건진다. 두 축의 결과는 아래에서 같은 자리로 뭉쳐지므로 중복은
+    // 표(votes)만 늘릴 뿐이다.
+    {
+        std::vector<uint8_t> col(static_cast<size_t>(image.height));
+        std::vector<FinderHit> vhits;
+        for (int x = 0; x < image.width; x += std::max(1, rowStep)) {
+            for (int y = 0; y < image.height; ++y)
+                col[y] = bw[static_cast<size_t>(y) * image.width + x];
+            vhits.clear();
+            scanRow(col.data(), image.height, x, minModulePx, maxModulePx, vhits);
+            // scanRow는 "행" 기준이라 (cx, cy)가 (세로위치, x)로 나온다. 되돌린다.
+            for (auto& h : vhits) { const float t = h.cx; h.cx = h.cy; h.cy = t; hits.push_back(h); }
+        }
+    }
     if (hits.size() < 3) return out;
 
     // [뭉치기] 같은 파인더는 인접한 여러 행에서 거의 같은 x로 나온다.
@@ -140,9 +159,11 @@ std::vector<QrCandidate> findQrCandidates(const GrayView& image, int maxCandidat
         }
         if (!merged) pts.push_back({h.cx, h.cy, h.module, 1});
     }
-    // 한 행에서만 나온 것은 잡음이다 — 파인더는 세로로도 7모듈이라
-    // 반드시 여러 행에 걸린다.
-    pts.erase(std::remove_if(pts.begin(), pts.end(), [](const FinderPoint& p) { return p.votes < 2; }),
+    // 표가 적은 것은 잡음이다 — 파인더는 가로 7모듈 x 세로 7모듈이라
+    // 가로 스캔에서도 세로 스캔에서도 여러 번 걸린다. 임계 3은 실측값:
+    // 2로 두면 후보가 9곳 나오는데 그중 하나가 가짜였고(ROI 디코드를
+    // 헛돌린다), 3이면 8곳 전부 진짜였다.
+    pts.erase(std::remove_if(pts.begin(), pts.end(), [](const FinderPoint& p) { return p.votes < 3; }),
               pts.end());
     if (pts.size() < 3) return out;
 
