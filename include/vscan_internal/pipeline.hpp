@@ -342,6 +342,25 @@ struct PipelineConfig {
     int disableDenoiseRescue = 0;
 
     /*
+     * [S1 — 사전 노이즈 측정 후 선(先) 디노이즈] 1 = 켬(기본), 0 = 끔.
+     *
+     * 위 disableDenoiseRescue의 노이즈 구제는 **모든 게 실패한 뒤**에 돈다.
+     * 그런데 노이즈가 심한 프레임에서는 그 앞의 단계들이 실패할 것이
+     * 처음부터 정해져 있다. 실측(Code128 module 8, 노이즈 시그마 40,
+     * 2단계 경로): zxing 호출 16회 / 652ms인데, 같은 프레임에 3x3 블러를
+     * **먼저** 먹이면 호출 2회 / 24.1ms다 — fast 패스에서 바로 붙는다.
+     * 35배 차이이고, 없는 기능을 만드는 게 아니라 순서만 바꾼 것이다
+     * (회전에 대해 §3.24에서 이미 증명한 구조).
+     *
+     * 함부로 뭉개면 안 되므로 estimateNoise()로 재고 나서 정한다. 임계
+     * 12는 실측에서 왔다 — 깨끗 3.5 / 모듈 2px 4.0 / 실물 3.1MP 차트 0.0
+     * vs 노이즈 시그마 20에서 20.0. 5배 여유가 있다.
+     * [[vscan-lite-pre-denoise]]
+     */
+    int autoDenoise = 1;
+    float autoDenoiseNoise = 12.0f;
+
+    /*
      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
      *
      * 심볼로지 마스크를 좁히면 zxing의 포맷별 탐색 비용이 그만큼 준다
@@ -472,6 +491,23 @@ private:
     int coarseMisses_ = 0;      // 연속 실패 횟수
     int coarseSkipLeft_ = 0;    // 남은 스킵 프레임 수
     GrayImage coarseBuf_;       // 절반 해상도 버퍼 (프레임마다 재사용)
+
+    // [S1] 선 디노이즈 상태. 버퍼는 프레임마다 재사용한다.
+    GrayImage denoiseBuf_;
+    bool preDenoised_ = false;
+    // 최상위 호출 깊이. 2단계 경로가 마지막에 processView()를 부르므로,
+    // "이번 프레임에서 이미 뭉갰는가"를 중첩 호출이 지우지 않게 한다.
+    int frameDepth_ = 0;
+    struct FrameGuard {
+        Pipeline* p;
+        explicit FrameGuard(Pipeline* pp) : p(pp) {
+            if (p->frameDepth_++ == 0) p->preDenoised_ = false;
+        }
+        ~FrameGuard() { --p->frameDepth_; }
+    };
+    // 노이즈를 재서, 필요하면 뭉갠 사본을 가리키는 뷰를 돌려준다.
+    // 필요 없으면 입력을 그대로 돌려준다(복사 없음).
+    GrayView preprocessFrame(const GrayView& image);
 
     std::vector<PipelineResult> decodeTile(const GrayView& tile, int yOffset);
     static std::vector<PipelineResult> dedup(std::vector<PipelineResult> in);

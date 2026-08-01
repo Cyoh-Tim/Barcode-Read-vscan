@@ -249,19 +249,46 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
     return dedup(std::move(merged));
 }
 
+GrayView Pipeline::preprocessFrame(const GrayView& image) {
+    // [[vscan-lite-pre-denoise]]
+    //
+    // 파이프라인에 넣기 전에 프레임 상태를 재고, 지금 상태로는 통과할 수
+    // 없는 것이 확실할 때만 고쳐서 넣는다. 근거는 pipeline.hpp의
+    // autoDenoise 주석(노이즈 40에서 652 -> 24.1ms).
+    // 이미 이번 프레임에서 뭉갰으면 두 번 하지 않는다. 2단계 경로가
+    // 마지막에 processView()를 부르는데, 거기서 또 재고 또 뭉개면 서로
+    // 다른 필터(블러의 블러)가 되어 작은 모듈이 사라진다.
+    if (preDenoised_) return image;
+    if (!cfg_.autoDenoise || image.empty()) return image;
+    // 너무 작은 프레임은 ROI 재귀에서 온 것일 수 있다. 거기서 또 뭉개면
+    // 이미 뭉갠 것을 두 번 뭉개게 되므로 손대지 않는다.
+    if (image.width < 256 || image.height < 256) return image;
+
+    const float noise = estimateNoise(image);
+    if (noise < cfg_.autoDenoiseNoise) return image;
+
+    boxBlur3x3(image, denoiseBuf_);
+    preDenoised_ = true;
+    return GrayView(denoiseBuf_);
+}
+
 std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     BudgetGuard budget(this);
     // 코드가 물리적으로 존재할 수 없는 프레임(컨베이어 아이템 사이 등)은
     // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
     if (!frameHasStructure(image)) return {};
-    auto hits = processViewCore(image);
+    FrameGuard frameGuard(this);
+    // [S1] 조건을 먼저 재고, 필요하면 고쳐서 넣는다. 아래 단계들은 전부
+    // 이 뷰를 쓴다 — 원본이 아니라.
+    const GrayView view = preprocessFrame(image);
+    auto hits = processViewCore(view);
     if (!hits.empty()) { adaptiveObserve(hits); return hits; }
 
     // 좁힌 마스크로 빈손이면 새 심볼로지일 수 있다 — 전체 마스크로 되돌려
     // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
     if (adaptiveNarrowed_) {
         adaptiveWiden();
-        hits = processViewCore(image);
+        hits = processViewCore(view);
         if (!hits.empty()) { adaptiveObserve(hits); return hits; }
     }
 
@@ -272,9 +299,9 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
     // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
     // 가장 싸고, 실측상 가장 자주 걸린다(§3.14). [[vscan-lite-denoise-rescue]]
-    if (!cfg_.disableDenoiseRescue && !budgetExceeded()) {
+    if (!cfg_.disableDenoiseRescue && !preDenoised_ && !budgetExceeded()) {
         GrayImage smoothed;
-        boxBlur3x3(image, smoothed);
+        boxBlur3x3(view, smoothed);
         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
         PipelineConfig dnCfg = cfg_;
@@ -291,7 +318,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [[vscan-lite-dpm-rescue]]
     if (cfg_.enableDPMRescue) {
         GrayImage closed;
-        morphologicalCloseInverted(image, cfg_.dpmKernelSize, closed);
+        morphologicalCloseInverted(view, cfg_.dpmKernelSize, closed);
         auto dpmHits = processViewCore(GrayView(closed));
         if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dpmHits;
     }
@@ -309,7 +336,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
         // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
         if (regionCropDone_ && regionRotDone_) return hits;
-        auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
+        auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
@@ -320,7 +347,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
     // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
     if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
-        auto qrHits = tryQrFinderRescue(image, std::max(1, cfg_.minExpectedCodes));
+        auto qrHits = tryQrFinderRescue(view, std::max(1, cfg_.minExpectedCodes));
         if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) return qrHits;
         if (qrHits.size() > hits.size()) hits = std::move(qrHits);
     }
@@ -334,7 +361,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [[vscan-lite-1d-deskew-rescue]]
     if (!cfg_.enable1DDeskewRescue || budgetExceeded()) return hits;
     int need = std::max(1, cfg_.minExpectedCodes);
-    auto rescued = tryDeskewRescue1D(image, need);
+    auto rescued = tryDeskewRescue1D(view, need);
     return rescued.empty() ? hits : rescued;
 }
 
@@ -811,9 +838,15 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     if (image.empty()) return {};
     BudgetGuard budget(this);
     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
+    FrameGuard frameGuard(this);
     regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
     regionRotDone_ = false;
     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
+
+    // [S1] 조건을 먼저 재고, 지금 상태로는 통과할 수 없는 것이 확실하면
+    // 고쳐서 넣는다. 아래 모든 단계가 이 뷰를 쓴다 — 원본이 아니라.
+    // [[vscan-lite-pre-denoise]]
+    const GrayView view = preprocessFrame(image);
 
     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
     //
@@ -853,12 +886,12 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 이진화가 locate 비용의 대부분이고 픽셀 수에 비례하므로 1/4이 된다.
     // 실패하면 아래 풀해상도 단계로 자연스럽게 내려간다(검출력 손실 없음).
     // [[vscan-lite-coarse-locate]]
-    if (cfg_.coarseLocate && image.width >= 768 && image.height >= 768) {
+    if (cfg_.coarseLocate && view.width >= 768 && view.height >= 768) {
         if (coarseSkipLeft_ > 0) {
             --coarseSkipLeft_;
         } else {
             const int cf = (cfg_.coarseFactor == 2) ? 2 : 3;
-            downsampleBox(image, coarseBuf_, cf);
+            downsampleBox(view, coarseBuf_, cf);
             Pipeline coarse(fastCfg);
             auto ch = coarse.processViewCore(GrayView(coarseBuf_));
             if ((int)ch.size() >= need) {
@@ -878,7 +911,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     }
 
     Pipeline fast(fastCfg);
-    auto hits = fast.processViewCore(image);
+    auto hits = fast.processViewCore(view);
     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
 
     // [1.5단계 — 위치부터 찾고 그 자리만 본다]
@@ -911,7 +944,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
         const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
         regionCropDone_ = true;
         regionRotDone_ = earlyRotate;
-        auto roiHits = tryRegionRescue(image, need,
+        auto roiHits = tryRegionRescue(view, need,
                                        earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
         if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
@@ -938,7 +971,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     harderCfg.tryRotate = false;
     harderCfg.tryInvert = false;
     Pipeline harder(harderCfg);
-    auto hardHits = harder.processViewCore(image);
+    auto hardHits = harder.processViewCore(view);
     if ((int)hardHits.size() >= need) return hardHits;
     if (hardHits.size() > hits.size()) hits = std::move(hardHits);
     if (budgetExceeded()) return hits;
@@ -962,7 +995,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     hiCfg.tryRotate = false;
     hiCfg.tryInvert = true;
     Pipeline hi(hiCfg);
-    auto hiHits = hi.processViewCore(image);
+    auto hiHits = hi.processViewCore(view);
     if ((int)hiHits.size() >= need) return hiHits;
     if (hiHits.size() > hits.size()) hits = std::move(hiHits);
     if (budgetExceeded()) return hits;
@@ -972,7 +1005,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 까지 자체적으로 시도하므로 여기서 따로 또 부를 필요는 없다 —
     // 그래서 이 최종 호출 하나가 사실상 4~5단계를 전부 커버한다.
     // [[vscan-lite-two-stage-fallback]]
-    auto full = processView(image);
+    auto full = processView(view);
     return full.size() >= hits.size() ? full : hits;
 }
 

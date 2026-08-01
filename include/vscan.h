@@ -306,6 +306,19 @@ typedef struct {
      * 코드가 화면에서 50px 안팎으로 작게 잡히는 배치에서만 켤 것.
      */
     int enable_qr_finder_rescue;
+
+    /*
+     * [S1 — 사전 노이즈 측정 후 선(先) 디노이즈] 0 = 기본(켜짐), 1 = 끔.
+     *
+     * 프레임을 디코더에 넣기 전에 노이즈를 재고(0.5ms 남짓), 임계를 넘으면
+     * 3x3 블러를 한 번 먹여서 넣는다. 노이즈 구제가 체인 끝에 있던 것을
+     * 앞으로 옮긴 것이다 — 실측(Code128 module 8, 노이즈 시그마 40):
+     * zxing 호출 16회 652ms -> 2회 24.1ms.
+     *
+     * 끌 이유는 거의 없지만, 입력이 이미 디노이즈된 파이프라인이거나
+     * 모듈이 2px 미만이라 어떤 블러도 손해인 배치를 위해 열어둔다.
+     */
+    int disable_auto_denoise;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

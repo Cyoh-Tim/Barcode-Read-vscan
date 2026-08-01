@@ -111,6 +111,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
         if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
         if (cfg->enable_qr_finder_rescue) pcfg.enableQrFinderRescue = true;
+        if (cfg->disable_auto_denoise) pcfg.autoDenoise = 0;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

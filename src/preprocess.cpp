@@ -333,6 +333,47 @@ void boxBlur3x3(const GrayView& src, GrayImage& out) {
     }
 }
 
+float estimateNoise(const GrayView& src, int rowStep, int colStep) {
+    const int W = src.width, H = src.height;
+    if (W < 8 || H < 8) return 0.0f;
+    const int stride = src.stride > 0 ? src.stride : W;
+    if (rowStep < 1) rowStep = 1;
+    if (colStep < 1) colStep = 1;
+
+    // 라플라시안 응답 |2v - 좌 - 우| + |2v - 상 - 하|. 최대 4*255*2이지만
+    // 노이즈 판정에 쓸 범위는 아래쪽뿐이라 1020에서 자른 히스토그램이면
+    // 충분하다(그 위는 전부 "엣지"라 어차피 백분위수 밖이다).
+    constexpr int kBins = 1021;
+    std::vector<int> hist(kBins, 0);
+    long total = 0;
+    for (int y = 1; y < H - 1; y += rowStep) {
+        const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(y - 1) * stride;
+        const uint8_t* __restrict r1 = src.pixels + static_cast<size_t>(y) * stride;
+        const uint8_t* __restrict r2 = src.pixels + static_cast<size_t>(y + 1) * stride;
+        for (int x = 1; x < W - 1; x += colStep) {
+            const int c = 2 * r1[x];
+            const int lx = std::abs(c - r1[x - 1] - r1[x + 1]);
+            const int ly = std::abs(c - r0[x] - r2[x]);
+            int v = lx + ly;
+            if (v >= kBins) v = kBins - 1;
+            ++hist[v];
+            ++total;
+        }
+    }
+    if (total <= 0) return 0.0f;
+
+    const long cut = total / 4;   // 하위 25%
+    long acc = 0;
+    int p25 = 0;
+    for (int i = 0; i < kBins; ++i) {
+        acc += hist[i];
+        if (acc >= cut) { p25 = i; break; }
+    }
+    // 라플라시안 응답 두 방향 합이라 진폭 환산은 /2. 절대 눈금이 아니라
+    // 임계와 비교하기 위한 값이므로 이 정도 근사로 충분하다.
+    return static_cast<float>(p25) * 0.5f;
+}
+
 bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     const int W = src.width, H = src.height;
     if (W <= 0 || H <= 0) return false;
