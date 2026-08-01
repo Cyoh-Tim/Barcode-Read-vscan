@@ -66,6 +66,15 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& 
 void boxBlur3x3(const GrayView& src, GrayImage& out);
 
 /*
+ * [반경 지정 박스 블러] 분리형 이동합이라 반경과 무관하게 화소당 상수
+ * 시간이다. radius=1이면 boxBlur3x3과 같다.
+ *
+ * 노이즈 구제의 2단에서 쓴다. 3x3을 여러 번 겹치는 것보다 낫다 — 같은
+ * 세기를 내는 데 필터 통과가 한 번뿐이다(3x3 네 번 ≈ 반경 2 한 번).
+ */
+void boxBlur(const GrayView& src, int radius, GrayImage& out);
+
+/*
  * [세로 이동평균] 열마다 위아래 radius 픽셀을 평균한다. 가로 방향은
  * 손대지 않는다.
  *

@@ -434,6 +434,41 @@ void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
     }
 }
 
+void boxBlur(const GrayView& src, int radius, GrayImage& out) {
+    const int W = src.width, H = src.height;
+    out.width = W;
+    out.height = H;
+    out.pixels.assign(static_cast<size_t>(W) * H, 0);
+    if (W <= 0 || H <= 0) return;
+    const int stride = src.stride > 0 ? src.stride : W;
+    const int r = std::max(1, std::min(radius, std::min(W, H) / 2));
+    const int n = 2 * r + 1;
+
+    std::vector<int> tmp(static_cast<size_t>(W) * H);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        auto px = [&](int x) { return static_cast<int>(row[std::min(W - 1, std::max(0, x))]); };
+        int acc = 0;
+        for (int x = -r; x <= r; ++x) acc += px(x);
+        int* __restrict o = tmp.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) {
+            o[x] = acc / n;
+            acc -= px(x - r);
+            acc += px(x + r + 1);
+        }
+    }
+    for (int x = 0; x < W; ++x) {
+        auto py = [&](int y) { return tmp[static_cast<size_t>(std::min(H - 1, std::max(0, y))) * W + x]; };
+        int acc = 0;
+        for (int y = -r; y <= r; ++y) acc += py(y);
+        for (int y = 0; y < H; ++y) {
+            out.pixels[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(acc / n);
+            acc -= py(y - r);
+            acc += py(y + r + 1);
+        }
+    }
+}
+
 bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
     const int W = src.width, H = src.height;
     if (W < 16 || H < 4 || pct <= 0 || pct >= 50) return false;

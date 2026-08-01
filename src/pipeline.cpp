@@ -316,18 +316,19 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 프레임 하나를 통째로 다시 도는 값이라 p95에 그대로 실린다 —
     // 코퍼스 300장 p95: 임계 없음 525ms / 노이즈 30 이상 525ms /
     // 노이즈 45 이상 431ms(= 이 단계가 없을 때와 같다). 검출은 셋 다 같다.
-    // 세 번이 필요했던 PDF417 프레임의 측정 노이즈가 46이라 45로 둔다.
-    // 한 번 뭉갠 것을 딱 한 번 더 뭉개는 중간 단계는 실측상 얻는 게 없어
-    // 두지 않는다(3x3 두 번으로는 넷 다 안 열렸다).
+    //
+    // 세기는 3x3을 겹치는 대신 반경 2 박스 한 번으로 준다. 실측(PDF417
+    // module 8, 노이즈 40~60 다섯 단, 앞단 3x3 뒤에):
+    //   3x3 한 번 더  -> 40만
+    //   3x3 두 번 더  -> 55 빼고
+    //   3x3 세 번 더  -> 다섯 다 (= 반경 2와 같은 세기)
+    //   반경 2 한 번  -> 다섯 다   <- 필터 통과가 한 번뿐
+    //   반경 4 한 번  -> 45만 (너무 세다)
     const bool dnAgain = preDenoised_ && frameNoise_ >= 45.0f;
     if (!cfg_.disableDenoiseRescue && (!preDenoised_ || dnAgain) && !budgetExceeded()) {
         GrayImage smoothed;
-        boxBlur3x3(view, smoothed);
-        if (dnAgain) {
-            GrayImage more;
-            boxBlur3x3(GrayView(smoothed), more);
-            smoothed = std::move(more);
-        }
+        if (dnAgain) boxBlur(view, 2, smoothed);
+        else boxBlur3x3(view, smoothed);
         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
         PipelineConfig dnCfg = cfg_;
