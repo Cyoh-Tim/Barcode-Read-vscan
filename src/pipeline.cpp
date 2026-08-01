@@ -410,12 +410,43 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     // 영역마다 크기가 달라서 pad도 달라진다 — decodeRegionsParallel()은
     // 단일 pad만 받으므로, 여기서 미리 여백을 먹인 rect를 만들어 넘기고
     // pad 인자는 0으로 준다.
-    std::vector<Rect> rects;
+    // [S2 — 상자를 원본 해상도로 다시 재서 좁힌다]
+    // 축소본 상자는 타일 격자(원본 128px) 단위라 늘 헐렁하다. 그 헐렁함이
+    // 그대로 시간이 된다 — 실측(대비 0.10): 영역 크롭 985k px(프레임의
+    // 31%)의 풀옵션 디코드가 13.6~27.2ms인데, 실제 코드 크기인 408k px는
+    // 13.1ms다. 여기서 한 번 좁히면 자르기/대비/회전 패스가 전부 같은
+    // rect를 쓰므로 이득이 모든 구제 단계에 곱해진다.
+    // [[vscan-lite-region-box-refine]]
+    //
+    // 다만 **회전 패스는 이 상자를 쓰면 안 된다.** 기울어진 1D 코드는
+    // 축정렬 상자 안에서 마름모꼴로 놓여 모서리 쪽 에너지가 옅어지는데,
+    // 프로파일 임계가 그 꼬리를 잘라낸다. 실측(Code128 module 8, 45도):
+    // 상자가 768 -> 699로 좁아지자 되돌린 뒤 코드의 양끝이 잘려 검출
+    // 자체가 실패했다(22ms 성공 -> 190ms 실패). 되돌린 다음에는 어차피
+    // tightenToContent()가 다시 좁히므로, 회전 쪽은 넉넉한 상자가 맞다.
+    // 그래서 상자를 두 벌 만든다.
+    std::vector<Rect> rects, rotRects;
     rects.reserve(regions.size());
-    for (const auto& r : regions) {
+    rotRects.reserve(regions.size());
+    for (auto& r : regions) {
+        const int cw = r.bbox.x1 - r.bbox.x0, ch = r.bbox.y1 - r.bbox.y0;
+        if (cw < 16 || ch < 16) continue;
+        {   // 회전용: 예전 그대로 넉넉하게
+            int pad = std::min(static_cast<int>(0.35f * std::max(cw, ch)), cfg_.regionRescueMaxPadPx);
+            rotRects.push_back(Rect{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
+                                    std::min(image.width, r.bbox.x1 + pad),
+                                    std::min(image.height, r.bbox.y1 + pad)});
+        }
+        const Rect tight = refineRegionBox(image, r.bbox);
+        if (tight.x1 - tight.x0 >= 16 && tight.y1 - tight.y0 >= 16) r.bbox = tight;
         const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
         if (w < 16 || h < 16) continue;
-        int pad = static_cast<int>(0.35f * std::max(w, h));
+        // [여백] 정지대는 모듈 크기에 비례해야 하는데 모듈을 모르므로
+        // 상자 크기에 비례시킨다. 상자가 이제 코드에 딱 맞으므로 비율을
+        // 예전(0.35)만큼 크게 줄 이유가 없다 — 그 값은 헐렁한 상자를
+        // 전제로 정해진 것이었다. 작은 코드에서 정지대가 모자라지 않도록
+        // 하한을 둔다.
+        int pad = std::max(24, static_cast<int>(0.12f * std::max(w, h)));
         pad = std::min(pad, cfg_.regionRescueMaxPadPx);
         Rect rc{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
                 std::min(image.width, r.bbox.x1 + pad), std::min(image.height, r.bbox.y1 + pad)};
@@ -565,8 +596,8 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     for (int i = 0; i < rotLimit; ++i) {
         if (budgetExceeded()) break;
         if (regions[i].angleDeg >= CodeRegion::kAngleUnknown) continue;
-        if (i >= (int)rects.size()) break;
-        const Rect& rc = rects[i];
+        if (i >= (int)rotRects.size()) break;
+        const Rect& rc = rotRects[i];
         const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
         if (rw < 32 || rh < 32) continue;
 
