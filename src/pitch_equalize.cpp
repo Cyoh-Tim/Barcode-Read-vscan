@@ -7,6 +7,57 @@
 
 namespace vscan {
 
+float pitchVariation(const GrayView& src) {
+    const int W = src.width, H = src.height;
+    if (W < 96 || H < 24) return 0.0f;
+    const int stride = src.stride > 0 ? src.stride : W;
+
+    int hist[256] = {0};
+    for (int y = 0; y < H; y += 4) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < W; x += 2) ++hist[row[x]];
+    }
+    long total = 0;
+    for (int v : hist) total += v;
+    if (total <= 0) return 0.0f;
+    const long cut = total / 50;
+    int lo = 0, hi = 255;
+    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
+    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
+    if (hi - lo < 24) return 0.0f;
+    const int thr = (lo + hi) / 2;
+
+    // 코드가 있는 행 몇 개에서 런 길이를 모아 좌/우 1/3으로 나눈다.
+    std::vector<float> left, right;
+    for (int i = 0; i < 5; ++i) {
+        const int y = H * (25 + i * 12) / 100;
+        if (y < 0 || y >= H) continue;
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        int start = -1;
+        bool prev = false;
+        for (int x = 0; x < W; ++x) {
+            const bool d = row[x] < thr;
+            if (start < 0) { start = x; prev = d; continue; }
+            if (d != prev) {
+                const float len = static_cast<float>(x - start);
+                const int mid = (x + start) / 2;
+                if (mid < W / 3) left.push_back(len);
+                else if (mid > 2 * W / 3) right.push_back(len);
+                start = x;
+                prev = d;
+            }
+        }
+    }
+    if (left.size() < 6 || right.size() < 6) return 0.0f;
+    auto lowPct = [](std::vector<float>& v) {
+        const size_t k = v.size() / 4;
+        std::nth_element(v.begin(), v.begin() + k, v.end());
+        return std::max(1.0f, v[k]);
+    };
+    const float a = lowPct(left), b = lowPct(right);
+    return (a > b) ? a / b : b / a;
+}
+
 bool pitchEqualize(const GrayView& src, GrayImage& out, PitchMap* map,
                    int rows, int winRuns, int pct, float outModule) {
     const int W = src.width, H = src.height;

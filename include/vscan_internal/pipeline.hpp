@@ -312,6 +312,50 @@ struct PipelineConfig {
     int maxFrameMs = 0;
 
     /*
+     * [스스로 재는 예산] 첫 풀프레임 패스가 걸린 시간의 몇 배까지 쓸지.
+     * 0이면 끔. 기본 3.0 — "이 프레임을 한 번 훑는 데 든 값"의 3배 안에
+     * 끝낸다는 뜻이다.
+     *
+     * maxFrameMs가 좋은 장치인데 쓰기 어려웠다. 적정값이 해상도/하드웨어/
+     * 프레임 내용에 다 걸려 있어서 배치마다 다시 재야 한다. 그런데 그
+     * "다시 재야 하는 값"은 사실 파이프라인이 이미 알고 있다 — **첫 패스
+     * 시간**이 곧 이 프레임을 이 기계에서 한 번 훑는 값이다. 그걸 기준으로
+     * 삼으면 상수를 배치마다 고칠 일이 없다.
+     *
+     * 실측(2048x1536, x86 4코어): 열화 없는 프레임 p50 30ms, 난수 혼합
+     * 프레임은 p90 196 / p95 380 / 최대 1111ms까지 갔다. 3배로 걸면
+     * 꼬리가 잘리는 대신 검출을 조금 잃는다 — 얼마인지는 §3.47 표 참고.
+     *
+     * maxFrameMs와 함께 쓰면 **둘 중 이른 쪽**이 마감이다.
+     */
+    float frameBudgetXFirstPass = 3.0f;
+
+    /*
+     * [예산 하한] 배수로만 잡으면 **첫 패스가 싼 프레임이 부당하게 손해**다.
+     * 배경이 거의 비어 있고 코드 하나만 있는 프레임은 첫 패스가 14ms라
+     * 3배가 42ms인데, 그런 프레임의 구제(회전 45도 1D, DPM 도트각인)는
+     * 110~145ms를 쓴다 — 절대값으로는 전혀 과하지 않은데 배수에 걸린다.
+     * 실측(고정 40종): 하한 없이 3배만 걸면 4장을 잃는다(40 -> 36).
+     *
+     * 하한은 "이 정도 절대 시간은 어느 프레임에나 허용한다"는 뜻이다.
+     * 꼬리는 배수가 정하므로(첫 패스가 비싼 프레임은 하한보다 훨씬 큰
+     * 예산을 받는다) 하한을 둬도 최악값은 거의 안 움직인다.
+     */
+    int frameBudgetFloorMs = 150;
+
+    /*
+     * [첫 영역 가산] 가장 유력한 영역 하나는 이 배수까지 봐준다.
+     * 예산을 프레임 전체에 균일하게 걸면 **영역이 하나뿐인 프레임**이
+     * 손해다 — 그런 프레임에서 사다리는 원래 한 벌만 돌고, 그 한 벌이
+     * 깊은 구제(회전 45도 1D, DPM, 대비 0.05)를 담고 있다. 실측:
+     * 균일 예산이면 고정 40종이 39/40, 축 스윕이 99.29%까지 떨어진다.
+     * 반대로 첫 영역을 무제한으로 두면 한 영역이 1.9초를 쓴 프레임이
+     * 나온다(총/첫패스 비율 14배).
+     * 그래서 첫 영역만 별도 마감을 준다 — 무제한이 아니라 더 큰 배수로.
+     */
+    float frameBudgetXFirstRegion = 4.5f;
+
+    /*
      * [빈 프레임 조기 종료] 0 = 켜짐(기본), 1 = 끔.
      *
      * 컨베이어는 아이템 사이에 **아무것도 없는 프레임**이 계속 들어온다.
@@ -499,6 +543,8 @@ private:
     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
     std::vector<Rect> lastPositions_;
     // 이번 프레임에서 영역 자르기/회전 패스를 이미 돌았는가 (중복 방지).
+    // 첫 풀프레임 패스가 끝난 뒤 마감을 다시 잡는다(자기 보정 예산).
+    void armSelfBudget(double firstPassMs);
     bool regionCropDone_ = false;
     bool regionRotDone_ = false;
     int framesSinceFullScan_ = 0;
@@ -507,6 +553,12 @@ private:
     // 폴백이 processView()를 다시 부를 때 예산이 리셋되면 안 되기 때문.
     std::chrono::steady_clock::time_point deadline_{};
     bool deadlineActive_ = false;
+    // 이번 프레임의 마감을 누가 소유하는가(최상위 호출 한 곳). 자기 보정
+    // 예산이 프레임 끝에서 반드시 해제되게 하려고 따로 둔다.
+    bool deadlineOwned_ = false;
+    // 첫 영역 전용(더 넉넉한) 마감과 그 구간 표시. 아래 armSelfBudget 주석 참고.
+    std::chrono::steady_clock::time_point deadlineFirst_{};
+    bool firstRectActive_ = false;
     // 예산을 시작하고 스코프를 벗어날 때 해제하는 가드. 이미 활성이면(=중첩
     // 호출이면) 아무것도 하지 않는다.
     struct BudgetGuard {
@@ -564,7 +616,7 @@ private:
     // "속도 최적화 전용 편의기능"이 아니라 "진짜로 새로 얻은 검출
     // 능력"이라 순수 풀옵션 경로에도 있어야 맞다).
     // [[vscan-lite-1d-deskew-rescue]]
-    std::vector<PipelineResult> processViewCore(const GrayView& image);
+    std::vector<PipelineResult> processViewCore(const GrayView& image, bool tileFallback = true);
 
     // [1D 바코드 회전 구제] §3.2.15~17 참고. processView()와
     // processViewTwoStage() 양쪽에서 공유하는 최종 안전망.
@@ -597,6 +649,19 @@ private:
     // 원본 좌표계로 보정 후 병합.
     std::vector<PipelineResult> decodeRegionsParallel(const GrayView& image, const std::vector<Rect>& rects,
                                                        int padPx, const PipelineConfig& regionCfg);
+
+    /*
+     * [고친 판본은 프레임째 다시 풀지 않는다]
+     * 노이즈/조명 구제는 "고친 뷰"를 만든다. 예전에는 그 뷰를 통째로
+     * 다시 디코드했는데, 그게 프레임 시간의 대부분이었다 — 실측(코퍼스
+     * 140장): 평탄화본 풀디코드 78ms/회, 뭉갠본 47ms/회. 깨끗한 프레임
+     * 전체가 15ms인데 구제 하나가 그 3~5배다.
+     *
+     * 고친 뷰가 필요한 이유는 대개 **찾기**다(그림자에서 상자가 반쪽만
+     * 잡히는 것처럼). 찾고 나면 디코드는 크롭만 하면 된다. 그래서
+     * 고친 뷰에서 영역을 찾고 그 크롭만 푼다.
+     */
+    std::vector<PipelineResult> locateAndDecode(const GrayView& view);
 };
 
 } // namespace vscan

@@ -1,4 +1,6 @@
 #include "vscan_internal/pipeline.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include "vscan_internal/decoder_zxing.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
@@ -42,18 +44,84 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
 #endif
 }
 
+// [마감은 최상위 호출이 소유한다]
+// 예전에는 maxFrameMs가 켜져 있을 때만 소유권을 잡았다. 그런데 자기 보정
+// 예산(armSelfBudget)이 생기면서 maxFrameMs가 꺼져 있어도 마감이 켜진다 —
+// 그 경우 소유자가 없어서 프레임이 끝나도 해제되지 않았다. 파이프라인을
+// 재사용하는 호출자(연속 프레임)에서는 **두 번째 프레임부터 이미 지난
+// 마감을 들고 시작**해서 모든 구제가 즉시 잘렸다. 실측으로 40종이 한 장씩
+// 따로 돌리면 40/40인데 한 번에 돌리면 36/40이었다.
 Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
-    if (p->cfg_.maxFrameMs > 0 && !p->deadlineActive_) {
+    if (p->deadlineOwned_) return;              // 중첩 호출(ROI 서브 파이프라인 등)
+    p->deadlineOwned_ = true;
+    owner = true;
+    p->deadlineActive_ = false;
+    if (p->cfg_.maxFrameMs > 0) {
         p->deadline_ = std::chrono::steady_clock::now() +
                        std::chrono::milliseconds(p->cfg_.maxFrameMs);
         p->deadlineActive_ = true;
-        owner = true;
     }
 }
-Pipeline::BudgetGuard::~BudgetGuard() { if (owner) p->deadlineActive_ = false; }
+Pipeline::BudgetGuard::~BudgetGuard() {
+    if (owner) { p->deadlineActive_ = false; p->deadlineOwned_ = false; p->firstRectActive_ = false; }
+}
+
+// 첫 패스 시간을 재고 나서 마감을 잡는다. 이미 maxFrameMs로 잡힌 마감이
+// 있으면 **더 이른 쪽**을 쓴다.
+void Pipeline::armSelfBudget(double firstPassMs) {
+    if (cfg_.frameBudgetXFirstPass <= 0.0f || firstPassMs <= 0.0) return;
+    const double total = std::max(firstPassMs * cfg_.frameBudgetXFirstPass,
+                                  static_cast<double>(cfg_.frameBudgetFloorMs));
+    const auto self = std::chrono::steady_clock::now() +
+                      std::chrono::microseconds(static_cast<long long>(
+                          std::max(0.0, total - firstPassMs) * 1000.0));
+    if (!deadlineActive_ || self < deadline_) { deadline_ = self; deadlineActive_ = true; }
+    // 첫 영역용 마감은 더 멀리 잡는다(위 frameBudgetXFirstRegion 주석).
+    const double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
+                                                              cfg_.frameBudgetXFirstPass),
+                                       static_cast<double>(cfg_.frameBudgetFloorMs));
+    deadlineFirst_ = std::chrono::steady_clock::now() +
+                     std::chrono::microseconds(static_cast<long long>(
+                         std::max(0.0, totalFirst - firstPassMs) * 1000.0));
+}
+
+namespace {
+// [프로파일] VSPROF=1 이면 단계별 누적 시간을 프레임 끝에 stderr로 뱉는다.
+// 개발용 계측이며 환경변수가 없으면 clock 호출조차 안 한다.
+struct Prof {
+    bool on = false;
+    std::vector<std::pair<const char*, double>> rows;
+    void add(const char* k, double ms) {
+        if (!on) return;
+        for (auto& r : rows) if (r.first == k) { r.second += ms; return; }
+        rows.push_back({k, ms});
+    }
+    void dump(const char* tag) {
+        if (!on) return;
+        double t = 0; for (auto& r : rows) t += r.second;
+        fprintf(stderr, "[prof] %s 합계 %.1fms |", tag, t);
+        for (auto& r : rows) fprintf(stderr, " %s=%.1f", r.first, r.second);
+        fprintf(stderr, "\n");
+        rows.clear();
+    }
+};
+Prof& prof() { static thread_local Prof p{getenv("VSPROF") != nullptr, {}}; return p; }
+struct Stage {
+    const char* key;
+    std::chrono::steady_clock::time_point t0;
+    explicit Stage(const char* k) : key(k), t0(std::chrono::steady_clock::now()) {}
+    ~Stage() {
+        if (!prof().on) return;
+        prof().add(key, std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0).count());
+    }
+};
+}  // namespace
 
 bool Pipeline::budgetExceeded() const {
-    return deadlineActive_ && std::chrono::steady_clock::now() >= deadline_;
+    if (!deadlineActive_) return false;
+    const auto now = std::chrono::steady_clock::now();
+    return now >= (firstRectActive_ ? deadlineFirst_ : deadline_);
 }
 
 namespace {
@@ -198,7 +266,7 @@ std::vector<PipelineResult> Pipeline::decodeTile(const GrayView& tile, int yOffs
     return out;
 }
 
-std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
+std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image, bool tileFallback) {
     if (image.empty()) return {};
 
     unsigned nThreads = cfg_.tileThreads ? cfg_.tileThreads
@@ -232,7 +300,7 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
         merged.insert(merged.end(), part.begin(), part.end());
     }
 
-    if (merged.empty()) {
+    if (merged.empty() && tileFallback) {
         // 타일 병렬 스캔이 빈손이면 타일링 없이 한 번 더 본다.
         //
         // 타일링은 코드가 타일 하나 안에 온전히 들어와야 동작한다.
@@ -245,6 +313,13 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
         // 병렬 이득은 서로 상충한다.
         // 그래서 overlap을 과하게 키우는 대신 이 폴백을 둔다.
         // 비용은 "아무것도 못 찾은 프레임"에서만 발생한다.
+        //
+        // [최상위 호출은 이걸 끈다] 실패 프레임에서 타일 + 풀프레임을
+        // 둘 다 도는 것이 첫 패스 시간을 두 배로 만든다 — 실측(난수 혼합
+        // 코퍼스): core p99가 55(easy)에서 99ms(mixed)로 뛴 주범이다.
+        // 자기 보정 예산은 첫 패스 시간을 기준으로 잡으므로, 첫 패스가
+        // 부풀면 예산도 같이 부푼다. 그래서 processView()는 이 폴백을
+        // 끄고 **구제 사다리의 한 칸으로** 따로 돌린다(예산 안에서).
         // [[vscan-lite-tile-large-code]]
         return dedup(decodeTile(image, 0));
     }
@@ -284,9 +359,31 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     FrameGuard frameGuard(this);
     // [S1] 조건을 먼저 재고, 필요하면 고쳐서 넣는다. 아래 단계들은 전부
     // 이 뷰를 쓴다 — 원본이 아니라.
-    const GrayView view = preprocessFrame(image);
-    auto hits = processViewCore(view);
-    if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+    GrayView view;
+    { Stage st("pre"); view = preprocessFrame(image); }
+    std::vector<PipelineResult> hits;
+    const auto coreT0 = std::chrono::steady_clock::now();
+    { Stage st("core"); hits = processViewCore(view, /*tileFallback=*/false); }
+    const double coreMs = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - coreT0).count();
+    if (!hits.empty()) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
+    // [큰 코드 폴백] 타일보다 큰 코드는 어느 타일에도 온전히 안 들어간다.
+    // 예전에는 processViewCore() 안에 있었는데, 여기로 뺀 이유는 예산
+    // 기준을 정직하게 만들기 위해서다 — 아래 참고.
+    {
+        Stage st("tilefb");
+        auto big = dedup(decodeTile(view, 0));
+        if (!big.empty()) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
+    }
+
+    // [자기 보정 예산] "이 프레임을 한 번 제대로 훑는 값"을 기준으로 잡는다.
+    // 실패 프레임에서 그 값은 타일 패스 + 큰 코드 폴백을 합친 것이다 —
+    // 둘 다 프레임 전체를 보는 패스이고, 여기까지가 구제 이전의 정상 비용이다.
+    // 타일 패스만으로 기준을 잡으면 예산이 실제보다 작아져서 구제가 과하게
+    // 잘린다(실측: 검출 67.6 -> 65.6%). 폴백까지 포함하면 시간은 그대로면서
+    // 검출이 돌아온다.
+    armSelfBudget(std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - coreT0).count());
 
     // 좁힌 마스크로 빈손이면 새 심볼로지일 수 있다 — 전체 마스크로 되돌려
     // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
@@ -325,17 +422,19 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     //   반경 2 한 번  -> 다섯 다   <- 필터 통과가 한 번뿐
     //   반경 4 한 번  -> 45만 (너무 세다)
     const bool dnAgain = preDenoised_ && frameNoise_ >= 45.0f;
-    if (!cfg_.disableDenoiseRescue && (!preDenoised_ || dnAgain) && !budgetExceeded()) {
+    // 프레임 단위 구제(뭉개기/평탄화)는 예산으로 자르지 않는다. 각각
+    // 필터 한 번 + 찾기 한 번이라 비용이 정해져 있고, 자르면 노이즈/그림자
+    // 축이 바로 깎인다. 예산은 **영역을 여러 개 도는 값**을 자르는 데 쓴다.
+    if (!cfg_.disableDenoiseRescue && (!preDenoised_ || dnAgain)) {
         GrayImage smoothed;
-        if (dnAgain) boxBlur(view, 2, smoothed);
-        else boxBlur3x3(view, smoothed);
+        { Stage st("dn:filter");
+          if (dnAgain) boxBlur(view, 2, smoothed);
+          else boxBlur3x3(view, smoothed); }
+        Stage st("dn:decode");
         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
-        PipelineConfig dnCfg = cfg_;
-        dnCfg.zbarAsRescue = false;
-        Pipeline dn(dnCfg);
-        auto dnHits = dn.processViewCore(GrayView(smoothed));
-        if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
+        auto dnHits = locateAndDecode(GrayView(smoothed));
+        if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:denoise"); return dnHits; }
     }
 
     // [조명 평탄화 구제] 그림자가 코드를 가로지르면 한 프레임 안에서
@@ -351,14 +450,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 배경이 이미 평평하면 flattenIllumination()이 false를 돌려주므로
     // (뭉갠 판본의 상하위 2% 차이가 40 미만) 그림자 없는 프레임에서는
     // 뭉개기 한 번 값만 든다. [[vscan-lite-flatten-illumination]]
-    if (!budgetExceeded()) {
+    {
         GrayImage flat;
-        if (flattenIllumination(view, 32, flat)) {
-            PipelineConfig ffCfg = cfg_;
-            ffCfg.zbarAsRescue = false;
-            Pipeline ff(ffCfg);
-            auto ffHits = ff.processViewCore(GrayView(flat));
-            if ((int)ffHits.size() >= std::max(1, cfg_.minExpectedCodes)) return ffHits;
+        bool flatOk;
+        { Stage st("ff:filter"); flatOk = flattenIllumination(view, 32, flat); }
+        if (flatOk) {
+            Stage st("ff:decode");
+            auto ffHits = locateAndDecode(GrayView(flat));
+            if ((int)ffHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:flatten"); return ffHits; }
         }
     }
 
@@ -383,13 +482,16 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 그래서 회전을 더 시도하는 대신 "어디를 보라"를 알려준다.
     // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
     // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
-    if (cfg_.enableRegionRescue && !budgetExceeded()) {
+    if (cfg_.enableRegionRescue) {
         // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
         // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
-        if (regionCropDone_ && regionRotDone_) return hits;
+        if (regionCropDone_ && regionRotDone_) { prof().dump("실패:region건너뜀"); return hits; }
+        const auto rgT0 = std::chrono::steady_clock::now();
         auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
-        if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
+        prof().add("region", std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - rgT0).count());
+        if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:region"); return regionHits; }
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
     }
 
@@ -605,7 +707,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     };
 
     auto cropPass = [&]() -> bool {
-        if (take(decodeRegionsParallel(image, rects, 0, roiCfg))) return true;
+        { Stage st("rg:crop"); if (take(decodeRegionsParallel(image, rects, 0, roiCfg))) return true; }
 
         // [저대비 ROI 구제] 자르기만으로 안 되면 ROI 안에서 대비를 편다.
         // 심볼로지마다 끊기는 대비가 다른데 EAN/UPC 계열만 유독 높다
@@ -631,6 +733,8 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
             int rectIdx = -1;
             for (const Rect& rc : rects) {
                 ++rectIdx;
+                // 첫 영역 구간 표시 — budgetExceeded()가 더 넉넉한 마감을 본다.
+                firstRectActive_ = (rectIdx == 0);
                 if (budgetExceeded()) break;
                 const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
                 if (rw < 16 || rh < 16) continue;
@@ -646,6 +750,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                 Pipeline roiPipe(roiCfg);
                 std::vector<PipelineResult> sHits;
                 GrayImage boosted;
+                Stage stC("rg:contrast");
                 if (stretchContrast(GrayView(crop), boosted)) {
                     // [펴고 나서 뭉갠 판본을 **먼저** 본다]
                     // 스트레칭은 신호와 노이즈를 같이 증폭한다. 대비가
@@ -664,8 +769,10 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     // 경우가 그쪽이다).
                     GrayImage smoothed;
                     boxBlur3x3(GrayView(boosted), smoothed);
+                    if (budgetExceeded()) break;
                     sHits = roiPipe.processViewCore(GrayView(smoothed));
                     if (sHits.empty())
+                        if (budgetExceeded()) break;
                         sHits = roiPipe.processViewCore(GrayView(boosted));
                 }
                 // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
@@ -706,6 +813,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                         GrayImage tight;
                         const bool tightened =
                             tightenToContent(GrayView(localized), tight, 24, &tx, &ty);
+                        if (budgetExceeded()) break;
                         sHits = roiPipe.processViewCore(
                             GrayView(tightened ? tight : localized));
                         if (tightened)
@@ -758,8 +866,10 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                             if (!stretchContrast(GrayView(tcrop), tboost)) continue;
                             GrayImage tsm;
                             boxBlur3x3(GrayView(tboost), tsm);
+                            if (budgetExceeded()) break;
                             sHits = roiPipe.processViewCore(GrayView(tsm));
                             if (sHits.empty())
+                                if (budgetExceeded()) break;
                                 sHits = roiPipe.processViewCore(GrayView(tboost));
                             // [세로평균 + 행 단위 이진화]
                             // 대비 0.05에서도 **코드 행의 런 개수는 대비 1.0과
@@ -813,6 +923,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                     ok = localAdaptiveBinarize(GrayView(zs), vbin, false, 48);
                                 }
                                 if (ok) {
+                                    if (budgetExceeded()) break;
                                     sHits = roiPipe.processViewCore(GrayView(vbin));
                                     for (auto& r : sHits)
                                         for (auto& pt : r.symbol.position) {
@@ -831,6 +942,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     }
                 }
                 if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                    Stage stP("rg:persp");
                     // [원근 보정] 회전은 축 하나면 되지만(§3.24) 원근은
                     // 코드 **안에서** 배율이 달라져서 한 스캔 행 안의 모듈
                     // 폭이 계속 변한다. 네 변을 직선으로 맞춰 사각형을 잡고
@@ -840,6 +952,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     GrayImage rect;
                     RectifyMap rmap{};
                     if (perspectiveRectify(GrayView(crop), rect, 48, &rmap)) {
+                        if (budgetExceeded()) break;
                         sHits = roiPipe.processViewCore(GrayView(rect));
                         // [좌표 되돌리기] 편 좌표를 그대로 두면 dedup이
                         // 엉뚱한 자리의 상자끼리 비교하게 되어 중복이
@@ -854,6 +967,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     }
                 }
                 if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                    Stage stPi("rg:pitch");
                     // [곡면(원통) 보정] 원통 라벨은 상자가 직사각형 그대로라
                     // 호모그래피로는 못 편다 — 가로 좌표만 비선형으로 밀린다.
                     // 국소 바 피치를 균등하게 다시 샘플링한다.
@@ -894,6 +1008,16 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     // 하나도 안 열렸다 — 2모듈 런을 1모듈로 착각하기 때문인데,
                     // 이진화된 뒤에는 런 길이가 정확하다).
                     // 실측: PDF417 곡면 0.1이 여기서만 열린다.
+                    // [곡면이 아니면 아예 안 든다] 이 단계는 모수 네 벌 x
+                    // 영역 두 개까지 도는 자리라 실패 프레임에서 100ms 가까이
+                    // 쓴다(실측 97ms/프레임). 그런데 그 대부분은 애초에 곡면이
+                    // 아닌 프레임이다. 왼쪽 1/3과 오른쪽 1/3의 1모듈 픽셀 수를
+                    // 비교하면(런 한 줄 훑는 값) 배율이 실제로 변하는지 바로
+                    // 알 수 있다. 실측(곡면 축): 왜곡 없음 1.00~1.20,
+                    // 0.6 이하 1.40~2.33. 1.25로 가른다.
+                    // 0을 돌려주면 못 잰 것이므로 거르지 않는다.
+                    const float pv = pitchVariation(GrayView(crop));
+                    const bool curved = !(pv > 0.0f && pv < 1.25f);
                     struct PitchTry { int rows, win, pct; bool rowbin; };
                     static constexpr PitchTry kTries[] = {
                         {1, 13, 10, false}, {9, 21, 5, false}, {9, 13, 10, false},
@@ -902,6 +1026,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     GrayImage rbCrop;
                     bool rbDone = false, rbOk = false;
                     for (const PitchTry& t : kTries) {
+                        if (!curved) break;
                         if (&t != kTries && budgetExceeded()) break;
                         const GrayImage* srcImg = &crop;
                         if (t.rowbin) {
@@ -923,6 +1048,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                         GrayImage eq;
                         PitchMap pmap;
                         if (!pitchEqualize(GrayView(*srcImg), eq, &pmap, t.rows, t.win, t.pct)) continue;
+                        if (budgetExceeded()) break;
                         sHits = roiPipe.processViewCore(GrayView(eq));
                         if (sHits.empty()) continue;
                         // 가로만 바뀌었으므로 x는 역사상, y는 여백만 뺀다.
@@ -937,6 +1063,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     }
                 }
                 if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
+                    Stage stI("rg:invert");
                     // [흑백 반전 판본] zxing의 TryInvert는 **1D와 PDF417에
                     // 대해서는 아무 일도 하지 않는다.** 소스를 보면
                     // MultiFormatReader가 반전된 비트맵에서 리더를 이렇게
@@ -968,6 +1095,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     flipped.pixels.resize(static_cast<size_t>(rw) * rh);
                     for (size_t k = 0; k < flipped.pixels.size(); ++k)
                         flipped.pixels[k] = static_cast<uint8_t>(255 - crop.pixels[k]);
+                    if (budgetExceeded()) break;
                     sHits = roiPipe.processViewCore(GrayView(flipped));
                 }
                 for (auto& r : sHits)
@@ -1281,7 +1409,8 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
         if ((int)hits.size() >= need) {
             for (auto& r : hits)
                 for (auto& pt : r.symbol.position) { pt.first += x0; pt.second += y0; }
-            return hits;
+            prof().dump("실패");
+    return hits;
         }
     }
     return {};
@@ -1515,6 +1644,30 @@ std::vector<PipelineResult> Pipeline::processViewROIs(const GrayView& image, con
     regionCfg.zbarAsRescue = false;      // ROI 디코드에는 ZBar를 붙인다
 
     return decodeRegionsParallel(image, rects, padPx, regionCfg);
+}
+
+std::vector<PipelineResult> Pipeline::locateAndDecode(const GrayView& view) {
+    auto regions = findCodeRegions(view);
+    if (regions.empty()) return {};
+    std::vector<Rect> rects;
+    rects.reserve(regions.size());
+    for (const auto& r : regions) {
+        const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
+        if (w < 16 || h < 16) continue;
+        const int pad = std::min(static_cast<int>(0.35f * std::max(w, h)), cfg_.regionRescueMaxPadPx);
+        rects.push_back(Rect{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
+                             std::min(view.width, r.bbox.x1 + pad),
+                             std::min(view.height, r.bbox.y1 + pad)});
+    }
+    if (rects.empty()) return {};
+    PipelineConfig roiCfg = cfg_;
+    roiCfg.tileThreads = 1;
+    roiCfg.enableRegionRescue = false;   // 재귀 방지
+    roiCfg.zbarAsRescue = false;
+    roiCfg.enable1DDeskewRescue = false;
+    roiCfg.enableDPMRescue = false;
+    roiCfg.autoDenoise = 0;              // 이미 고친 뷰다
+    return dedup(decodeRegionsParallel(view, rects, 0, roiCfg));
 }
 
 std::vector<PipelineResult> Pipeline::processViewTracked(const GrayView& image, int trackPadPx,
@@ -2063,7 +2216,42 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
         in = dedupOnce(std::move(in));
         if (in.size() == before) break;
     }
-    return in;
+
+    /*
+     * [서로 어긋나는 쌍둥이 밴드는 **둘 다** 버린다]
+     *
+     * 같은 심볼을 두 줄로 스쳐 지나간 밴드 한 쌍인데(isTwinBand) 내용이
+     * 다르고 한쪽이 다른 쪽의 부분 문자열도 아니면, 둘 다 어긋난 시작
+     * 위치에서 읽힌 것이다 — 적어도 하나는 틀렸고 어느 쪽인지 알 방법이
+     * 없다. 실측(난수 코퍼스, 곡면 ITF): 정답 "52934743425562"인데
+     *   "52934743"   (507,952)-(833,960)  두께 8
+     *   "4743425562" (400,1199)-(826,1202) 두께 3
+     * 이 나왔다. 둘 다 정답의 부분 문자열이지만 서로는 포함 관계가 아니다.
+     *
+     * 하나를 골라 돌려주면 **없는 품번을 만들어내는 것**이고, 그건 이
+     * 프로젝트가 일관되게 미검출보다 나쁘다고 본 것이다(§3.18). 그래서
+     * 둘 다 버린다 — 이 프레임은 미검출로 끝난다.
+     * [[vscan-lite-dedup-conflicting-twins]]
+     */
+    std::vector<char> drop(in.size(), 0);
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (drop[i]) continue;
+        for (size_t j = i + 1; j < in.size(); ++j) {
+            if (drop[j]) continue;
+            if (in[i].symbol.symbology != in[j].symbol.symbology) continue;
+            const std::string& a = in[i].symbol.text;
+            const std::string& b = in[j].symbol.text;
+            if (a == b || textContains(a, b) || textContains(b, a)) continue;
+            const auto ba = bboxOf(in[i].symbol), bb = bboxOf(in[j].symbol);
+            if (!isTwinBand(ba, bb)) continue;
+            drop[i] = drop[j] = 1;
+        }
+    }
+    std::vector<PipelineResult> out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i)
+        if (!drop[i]) out.push_back(std::move(in[i]));
+    return out;
 }
 
 } // namespace vscan

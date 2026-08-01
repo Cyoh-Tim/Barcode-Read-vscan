@@ -68,6 +68,19 @@ struct PitchMap {
     int marginX = 0, marginY = 0;
 };
 
+/*
+ * [피치가 실제로 변하는가] 왼쪽 1/3과 오른쪽 1/3에서 각각 1모듈이 몇
+ * 픽셀인지 재서 비율을 돌려준다(항상 >= 1.0). 1.0에 가까우면 배율이
+ * 일정하다는 뜻이고, 그러면 평준화해봐야 같은 그림이 나온다.
+ *
+ * 구제 사다리 끝의 피치 단계는 모수 네 벌 x 영역 두 개까지 도는 자리라
+ * 실패 프레임에서 100ms 가까이 쓴다(실측 97ms/프레임). 그 대부분이
+ * "애초에 곡면이 아닌" 프레임이다. 런 길이 한 줄 훑는 값으로 거를 수 있다.
+ *
+ * 못 재면 0을 돌려준다(그 경우 호출자는 거르지 말 것 — 판단 근거가 없다).
+ */
+float pitchVariation(const GrayView& src);
+
 bool pitchEqualize(const GrayView& src, GrayImage& out, PitchMap* map = nullptr,
                    int rows = 1, int winRuns = 13, int pct = 10, float outModule = 8.0f);
 

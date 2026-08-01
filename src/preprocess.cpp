@@ -420,17 +420,21 @@ void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
     const int stride = src.stride > 0 ? src.stride : W;
     const int r = std::max(1, std::min(radius, H / 2));
     const int n = 2 * r + 1;
-    auto at = [&](int y, int x) -> int {
-        return src.pixels[static_cast<size_t>(std::min(H - 1, std::max(0, y))) * stride + x];
+    // 열 단위로 훑으면 캐시가 죽는다(boxBlur의 세로 패스 주석 참고).
+    auto rowAt = [&](int y) {
+        return src.pixels + static_cast<size_t>(std::min(H - 1, std::max(0, y))) * stride;
     };
-    for (int x = 0; x < W; ++x) {
-        int acc = 0;
-        for (int y = -r; y <= r; ++y) acc += at(y, x);
-        for (int y = 0; y < H; ++y) {
-            out.pixels[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(acc / n);
-            acc -= at(y - r, x);
-            acc += at(y + r + 1, x);
-        }
+    std::vector<int> colSum(static_cast<size_t>(W), 0);
+    for (int y = -r; y <= r; ++y) {
+        const uint8_t* __restrict in = rowAt(y);
+        for (int x = 0; x < W; ++x) colSum[x] += in[x];
+    }
+    for (int y = 0; y < H; ++y) {
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) o[x] = static_cast<uint8_t>(colSum[x] / n);
+        const uint8_t* __restrict sub = rowAt(y - r);
+        const uint8_t* __restrict add = rowAt(y + r + 1);
+        for (int x = 0; x < W; ++x) colSum[x] += static_cast<int>(add[x]) - static_cast<int>(sub[x]);
     }
 }
 
@@ -457,28 +461,46 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
             acc += px(x + r + 1);
         }
     }
-    for (int x = 0; x < W; ++x) {
-        auto py = [&](int y) { return tmp[static_cast<size_t>(std::min(H - 1, std::max(0, y))) * W + x]; };
-        int acc = 0;
-        for (int y = -r; y <= r; ++y) acc += py(y);
-        for (int y = 0; y < H; ++y) {
-            out.pixels[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(acc / n);
-            acc -= py(y - r);
-            acc += py(y + r + 1);
-        }
+    // [세로 패스는 행 단위로] 열을 하나씩 세로로 훑으면 매 접근이 다른
+    // 캐시 라인이라(스트라이드 W) 반경과 무관하게 느려진다 — 실측
+    // (2048x1536, 반경 32): 열 단위 57ms. 열별 누적합을 한 줄 배열에
+    // 들고 y를 바깥 루프로 돌리면 안쪽이 순차 접근이 된다.
+    std::vector<int> colSum(static_cast<size_t>(W), 0);
+    auto rowAt = [&](int y) { return tmp.data() + static_cast<size_t>(std::min(H - 1, std::max(0, y))) * W; };
+    for (int y = -r; y <= r; ++y) {
+        const int* __restrict in = rowAt(y);
+        for (int x = 0; x < W; ++x) colSum[x] += in[x];
+    }
+    for (int y = 0; y < H; ++y) {
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) o[x] = static_cast<uint8_t>(colSum[x] / n);
+        const int* __restrict sub = rowAt(y - r);
+        const int* __restrict add = rowAt(y + r + 1);
+        for (int x = 0; x < W; ++x) colSum[x] += add[x] - sub[x];
     }
 }
 
 bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int minSpread) {
     const int W = src.width, H = src.height;
     if (W < 32 || H < 32) return false;
-    GrayImage bg;
-    boxBlur(src, radius, bg);
+
+    // [배경은 축소본에서 낸다] 배경 추정은 정의상 저주파라 원본 해상도가
+    // 필요 없다. 절반으로 줄이면 화소가 1/4이고 반경도 절반으로 줄어든다 —
+    // 실측(2048x1536, 반경 32): 원본 해상도 29ms -> 축소본 8ms.
+    // (downsampleBox는 배율 2와 3만 받는다. 4를 넘기면 조용히 2가 되므로
+    //  여기 상수와 어긋나 배경을 엉뚱한 자리에서 읽는다 — 한 번 당했다.)
+    // 되돌릴 때는 **쌍선형**이어야 한다. 최근접으로 했더니 배경이 4px
+    // 격자로 계단이 지고, 그 계단이 나눗셈에 그대로 실려 모듈 4~8px짜리
+    // 막대 구조를 부숴버렸다 — 그림자 축이 도로 열 종 실패로 돌아갔다.
+    constexpr int kDown = 2;
+    GrayImage small, sbg;
+    downsampleBox(src, small, kDown);
+    boxBlur(GrayView(small), std::max(1, radius / kDown), sbg);
 
     // 배경이 이미 평평하면 할 일이 없다. 상하위 2% 백분위수로 본다 —
     // 최소/최대는 먼지 한 점이 정한다.
     int hist[256] = {0};
-    for (size_t i = 0; i < bg.pixels.size(); i += 7) ++hist[bg.pixels[i]];
+    for (size_t i = 0; i < sbg.pixels.size(); ++i) ++hist[sbg.pixels[i]];
     long total = 0;
     for (int v : hist) total += v;
     if (total <= 0) return false;
@@ -492,12 +514,36 @@ bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int mi
     out.width = W;
     out.height = H;
     out.pixels.resize(static_cast<size_t>(W) * H);
+    // 되살리는 루프는 화소당 도는 자리라 정수 고정소수점으로 간다.
+    // x 사상은 y와 무관하므로 한 번만 만들어 쓴다(부동소수 floor/clamp를
+    // 화소마다 돌렸더니 축소로 번 것을 그대로 까먹었다 — 40ms).
+    const int sw = sbg.width, sh = sbg.height;
+    std::vector<int> mx0(static_cast<size_t>(W)), mx1(static_cast<size_t>(W)), mtx(static_cast<size_t>(W));
+    for (int x = 0; x < W; ++x) {
+        const int num = (2 * x + 1) * 256 / (2 * kDown) - 128;   // (x+0.5)/k - 0.5, 8비트 소수
+        int i0 = num >> 8;
+        const int t = num & 255;
+        i0 = std::max(0, std::min(sw - 1, i0));
+        mx0[static_cast<size_t>(x)] = i0;
+        mx1[static_cast<size_t>(x)] = std::max(0, std::min(sw - 1, i0 + 1));
+        mtx[static_cast<size_t>(x)] = (num < 0) ? 0 : t;
+    }
     for (int y = 0; y < H; ++y) {
+        const int numY = (2 * y + 1) * 256 / (2 * kDown) - 128;
+        int j0 = numY >> 8;
+        const int ty = (numY < 0) ? 0 : (numY & 255);
+        j0 = std::max(0, std::min(sh - 1, j0));
+        const int j1 = std::max(0, std::min(sh - 1, j0 + 1));
+        const uint8_t* __restrict r0 = sbg.pixels.data() + static_cast<size_t>(j0) * sw;
+        const uint8_t* __restrict r1 = sbg.pixels.data() + static_cast<size_t>(j1) * sw;
         const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
-        const uint8_t* __restrict b = bg.pixels.data() + static_cast<size_t>(y) * W;
         uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
         for (int x = 0; x < W; ++x) {
-            const int d = b[x] < 1 ? 1 : b[x];
+            const int i0 = mx0[static_cast<size_t>(x)], i1 = mx1[static_cast<size_t>(x)];
+            const int tx = mtx[static_cast<size_t>(x)];
+            const int a = r0[i0] + (((r0[i1] - r0[i0]) * tx) >> 8);
+            const int b2 = r1[i0] + (((r1[i1] - r1[i0]) * tx) >> 8);
+            const int d = std::max(1, a + (((b2 - a) * ty) >> 8));
             o[x] = static_cast<uint8_t>(std::min(255, 128 * static_cast<int>(in[x]) / d));
         }
     }
