@@ -98,6 +98,7 @@ set(VSCAN_SOURCES
   src/deskew1d.cpp
   src/locate.cpp
   src/locate_qr.cpp
+  src/deskew_persp.cpp
   src/decoder_zxing.cpp
   src/pipeline.cpp
   src/gs1.cpp

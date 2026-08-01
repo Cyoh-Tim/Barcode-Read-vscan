@@ -388,6 +388,19 @@ struct PipelineConfig {
     int invertRescueMaxRegions = 2;
 
     /*
+     * [원근 보정 ROI 구제] 영역 몇 개까지 사각형 보정을 시도할지.
+     *
+     * 원근은 코드 안에서 배율이 달라져 한 스캔 행 안의 모듈 폭이 계속
+     * 변한다 — 회전과 달리 각도 하나로는 못 되돌린다. 실측(module 8,
+     * 원근 축이 끊기는 지점): PDF417 0.15 / UPCE 0.30 / DataBar 0.30 /
+     * EAN8 0.40. 시제품 검증에서 그 구간의 8/12가 살아났다.
+     *
+     * 사각형이 이미 직사각형에 가까우면 perspectiveRectify()가 아무것도
+     * 안 하고 false를 돌려주므로, 정상 프레임의 비용은 윤곽 추정뿐이다.
+     */
+    int perspRescueMaxRegions = 2;
+
+    /*
      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
      *
      * 심볼로지 마스크를 좁히면 zxing의 포맷별 탐색 비용이 그만큼 준다

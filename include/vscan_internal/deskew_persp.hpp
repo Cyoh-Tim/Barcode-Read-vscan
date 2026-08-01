@@ -1,0 +1,58 @@
+#pragma once
+#include "vscan_internal/frame.hpp"
+
+namespace vscan {
+
+/*
+ * [원근 보정 — ROI의 사각형을 잡아 직사각형으로 편다]
+ *
+ * 왜 필요한가. 회전은 되돌리는 축이 하나뿐이라 구조텐서 각도 하나면
+ * 되지만(§3.24), 원근은 코드 **안에서** 배율이 달라진다. 한 스캔 행
+ * 안에서 모듈 폭이 계속 변하므로 zxing의 1D 리더가 폭 비율을 못 맞춘다.
+ *
+ * 실측(module 8, 원근 축을 0.05 간격으로, 각 심볼로지가 끊기는 지점):
+ *
+ *   PDF417  0.15 | UPCE 0.30 | DataBar 0.30 | EAN8 0.40 | QR 0.50
+ *   Code128 / Code39 / Codabar / Code93 / DataMatrix / EAN13 / UPCA / ITF
+ *   / DataBarExp 는 버킷 상한(모듈이 2px 아래로 내려가는 지점)까지 100%
+ *
+ * 즉 원근에 약한 것은 다섯 종이고, 그 다섯 종은 자기 구조가 촘촘하거나
+ * (PDF417, DataBar) 코드가 짧아 정규화 근거가 적다(EAN8, UPCE).
+ *
+ * 방법은 네 변을 직선으로 맞춰 교점(사각형)을 잡고 호모그래피로 펴는
+ * 것이다. 이진 마스크의 열마다 최상/최하, 행마다 최좌/최우 점을 모아
+ * **반복 절단 총최소자승**으로 맞춘다. 절단이 핵심이다 — EAN/UPC의
+ * 가드바는 본체보다 아래로 삐져나오고 DataBar는 아래쪽에 보조 패턴이
+ * 있어서, 단순 최소자승으로는 아래 변이 그쪽으로 끌려간다.
+ *
+ * 시제품 검증(원래 실패하던 12개 케이스): 8개가 읽혔다.
+ *   DataBar 0.30/0.45, EAN8 0.40/0.60, UPCE 0.30/0.45, PDF417 0.15/0.30
+ * QR은 안 열렸다 — zxing이 이미 파인더로 자체 원근 보정을 하므로
+ * 여기서 한 번 더 펴봐야 얻는 게 없다.
+ *
+ * marginPx: 편 뒤 사방에 붙일 정지대. 사각형이 코드에 딱 맞으므로
+ * 여백이 없으면 정지대가 0이 된다.
+ *
+ * 사각형이 이미 직사각형에 가까우면(변끼리 평행하고 각이 직각) 아무것도
+ * 하지 않고 false를 돌려준다 — 펴봐야 결과가 같은데 리샘플 비용만 든다.
+ * [[vscan-lite-perspective-rectify]]
+ */
+/*
+ * 편 좌표를 원본 크롭 좌표로 되돌리기 위한 사상. 호출부가 zxing이 준
+ * 위치를 반드시 이걸로 되돌려야 한다 — 안 그러면 dedup이 넓이/겹침
+ * 기반이라 엉뚱한 자리의 상자끼리 비교하게 되어 중복이 통과한다
+ * (실측: 이걸 빼먹었더니 UPCE 원근 축에서 중복 5건이 나왔다).
+ */
+struct RectifyMap {
+    double a, b, c, d, e, f, g, h;   // 단위 정사각형 -> 원본 사각형
+    int margin;                      // 결과 이미지에 붙인 여백
+    int dw, dh;                      // 여백을 뺀 본체 크기
+};
+
+// 편 이미지의 (x, y) -> 원본 크롭 좌표
+void rectifyMapBack(const RectifyMap& m, double x, double y, double& sx, double& sy);
+
+bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx = 48,
+                        RectifyMap* map = nullptr);
+
+} // namespace vscan

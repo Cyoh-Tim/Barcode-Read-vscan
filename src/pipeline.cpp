@@ -4,6 +4,7 @@
 #include "vscan_internal/deskew1d.hpp"
 #include <cstdlib>
 #include "vscan_internal/locate.hpp"
+#include "vscan_internal/deskew_persp.hpp"
 #include "vscan_internal/locate_qr.hpp"
 #ifdef VSCAN_HAVE_ZBAR
 #include "vscan_internal/decoder_zbar.hpp"
@@ -626,6 +627,29 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                             for (auto& r : sHits)
                                 for (auto& pt : r.symbol.position) { pt.first += tx; pt.second += ty; }
                     }
+                    }
+                }
+                if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                    // [원근 보정] 회전은 축 하나면 되지만(§3.24) 원근은
+                    // 코드 **안에서** 배율이 달라져서 한 스캔 행 안의 모듈
+                    // 폭이 계속 변한다. 네 변을 직선으로 맞춰 사각형을 잡고
+                    // 직사각형으로 편다. 이미 직사각형에 가까우면 함수가
+                    // false를 돌려주므로 정상 프레임에서는 비용이 윤곽
+                    // 추정뿐이다. [[vscan-lite-perspective-rectify]]
+                    GrayImage rect;
+                    RectifyMap rmap{};
+                    if (perspectiveRectify(GrayView(crop), rect, 48, &rmap)) {
+                        sHits = roiPipe.processViewCore(GrayView(rect));
+                        // [좌표 되돌리기] 편 좌표를 그대로 두면 dedup이
+                        // 엉뚱한 자리의 상자끼리 비교하게 되어 중복이
+                        // 통과한다(실측: 빼먹었더니 UPCE 원근 축 중복 5건).
+                        for (auto& r : sHits)
+                            for (auto& pt : r.symbol.position) {
+                                double sx = 0, sy = 0;
+                                rectifyMapBack(rmap, pt.first, pt.second, sx, sy);
+                                pt.first = static_cast<int>(sx);
+                                pt.second = static_cast<int>(sy);
+                            }
                     }
                 }
                 if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
@@ -1493,9 +1517,21 @@ bool isStackedBand(const BBox& a, const BBox& b) {
                       double cLo, double cHi, double dLo, double dHi) { // 정렬돼야 하는 축
         const double gap = std::max(aLo, bLo) - std::min(aHi, bHi);
         const double combined = std::max(aHi, bHi) - std::min(aLo, bLo);
-        if (gap >= 0.10 * combined) return false;
         const double ov = std::min(cHi, dHi) - std::max(cLo, dLo);
-        return ov >= 0.70 * std::min(cHi - cLo, dHi - dLo);
+        const double minAlign = std::min(cHi - cLo, dHi - dLo);
+        if (minAlign <= 0) return false;
+        // 간격이 아주 작으면(결합 길이의 10% 미만) 정렬 조건을 느슨하게,
+        // 간격이 그보다 벌어지면 정렬을 더 엄격히 요구한다.
+        //
+        // 두 번째 조건을 넣은 이유: 원근 보정을 붙이고 나서 같은 코드의
+        // 서로 다른 스캔 밴드가 둘 다 반환되는 경우가 생겼다 — 실측
+        // (UPCE persp 0.45): (80,725)-(831,817)과 (46,848)-(772,900).
+        // 간격 31px이 결합 높이 175의 18%라 10% 문턱을 못 넘었다.
+        // 그냥 문턱만 넓히면 "박스에 붙은 같은 라벨 2장"을 깨뜨리므로,
+        // 넓힌 구간에서는 긴 축 정렬을 0.70 -> 0.90으로 올려서 받는다.
+        if (gap < 0.10 * combined) return ov >= 0.70 * minAlign;
+        if (gap < 0.25 * combined) return ov >= 0.90 * minAlign;
+        return false;
     };
     return stacked(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1) ||
            stacked(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1);
