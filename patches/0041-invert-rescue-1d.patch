@@ -1,0 +1,171 @@
+From 8301545f505c7e51dfc00745f58abb698124f98e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 04:47:09 +0000
+Subject: [PATCH] =?UTF-8?q?=EB=B0=98=EC=A0=84(=ED=9D=91=EB=B0=B1=20?=
+ =?UTF-8?q?=EC=97=AD=EC=83=81)=20=EC=BD=94=EB=93=9C=20=EA=B5=AC=EC=A0=9C:?=
+ =?UTF-8?q?=2014=EC=A2=85=20=EC=A4=91=202=EC=A2=85=20->=2013=EC=A2=85?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+코퍼스 태그별 검출률에서 'inverted'가 가장 약한 큰 덩어리였다(76장,
+50.0%, 평균 196ms — 가장 느린 태그이기도 했다). 전용 축을 만들어
+재보니 실제로는 훨씬 심각했다: **module 8 반전본에서 QR/DataMatrix만
+읽히고 나머지 12종이 전부 0/1**이었고, 그러면서 120~190ms를 썼다
+(폴백 체인을 끝까지 돌기 때문).
+
+원인은 zxing 쪽에 있었다. MultiFormatReader가 반전된 비트맵에서
+
+    if (image.inverted() && !reader->supportsInversion) continue;
+
+로 리더를 거르는데, supportsInversion=true로 만들어지는 건
+QR / DataMatrix / Aztec 셋뿐이다. 게다가 BinaryBitmap::invert()는 2D가
+쓰는 BitMatrix만 뒤집고 1D가 쓰는 getPatternRow()는 휘도에서 직접
+계산하므로 반전이 반영되지도 않는다 — 즉 TryInvert 옵션으로는 1D와
+PDF417이 원리적으로 열리지 않는다.
+
+그래서 ROI 사다리에 뒤집은 판본을 한 칸 추가했다. 극성을 미리 재보려
+했지만(정지대 링 밝기 대 내부 밝기) 심볼로지마다 값이 뒤죽박죽이라
+신뢰할 수 없었다(ITF 반전본은 링과 내부 차이가 0). 판정 대신 사다리
+한 칸이 오판 위험이 없고, 다른 모든 시도가 실패한 뒤에만 돈다.
+영역 상한 2개(invertRescueMaxRegions)로 비용을 묶었다.
+
+결과 (module 8, 반전 축, 2단계): 13종이 0/1 -> 1/1, 시간 120~190ms ->
+21~43ms. 남은 ITF는 극성 문제가 아니라 정지대 문제였다 — 어두운
+정지대를 8/40px로 주면 실패하고 120px면 읽힌다(ITF 규격은 좁은 모듈의
+10배 = module 8에서 80px). 코퍼스 생성기의 반전 여백이 코드 높이의 6%
+라 가로로 짧은 ITF에서 8px밖에 안 붙는다.
+
+곁들여 generate_corpus.py에 invert 스윕 축을 추가했다.
+
+게이트: 코퍼스 검출 63.3 -> 65.8%, 평균(기준 작업량 대비) 94.5 -> 100.3,
+p95 236.7 -> 264.6, 오디코딩 2 / 중복 1 유지, 40종 38/38/38,
+14종 x 19각도 100%.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/pipeline.hpp | 13 +++++++++++
+ src/pipeline.cpp                    | 36 +++++++++++++++++++++++++++++
+ tools/generate_corpus.py            | 12 +++++++++-
+ 3 files changed, 60 insertions(+), 1 deletion(-)
+
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index ab07b27..30d77e7 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -374,6 +374,19 @@ struct PipelineConfig {
+      */
+     int lowContrastRange = 100;
+ 
++    /*
++     * [흑백 반전 ROI 구제] 영역 몇 개까지 반전 판본을 시도할지.
++     *
++     * zxing의 TryInvert는 1D와 PDF417에 대해서는 아무 일도 하지 않는다 —
++     * MultiFormatReader가 반전 비트맵에서 supportsInversion이 아닌 리더를
++     * 건너뛰는데, true인 건 QR/DataMatrix/Aztec 셋뿐이다. 그래서 우리가
++     * 뒤집어서 넣는다(실측: 14종 중 2종만 읽히던 것이 13종으로).
++     *
++     * 다른 모든 시도가 실패한 뒤에만 도는 자리지만, 영역마다 디코드가
++     * 한 번씩 더 붙으므로 상한을 둔다.
++     */
++    int invertRescueMaxRegions = 2;
++
+     /*
+      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+      *
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index de8b749..b5f7ac7 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -542,7 +542,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+         if (!budgetExceeded()) {
+             std::vector<PipelineResult> stretched;
+             const int srcStride = image.stride > 0 ? image.stride : image.width;
++            int rectIdx = -1;
+             for (const Rect& rc : rects) {
++                ++rectIdx;
+                 if (budgetExceeded()) break;
+                 const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
+                 if (rw < 16 || rh < 16) continue;
+@@ -626,6 +628,40 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                     }
+                     }
+                 }
++                if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
++                    // [흑백 반전 판본] zxing의 TryInvert는 **1D와 PDF417에
++                    // 대해서는 아무 일도 하지 않는다.** 소스를 보면
++                    // MultiFormatReader가 반전된 비트맵에서 리더를 이렇게
++                    // 거른다:
++                    //
++                    //   if (image.inverted() && !reader->supportsInversion) continue;
++                    //
++                    // 그런데 supportsInversion=true로 만들어지는 건 QR /
++                    // DataMatrix / Aztec 셋뿐이다. 게다가 BinaryBitmap::
++                    // invert()는 2D가 쓰는 BitMatrix만 뒤집고, 1D가 쓰는
++                    // getPatternRow()는 휘도에서 직접 계산하므로 애초에
++                    // 반전이 반영되지도 않는다. 즉 zxing 쪽 설정으로는
++                    // 원리적으로 열리지 않는다.
++                    //
++                    // 실측(module 8, 반전 축): QR/DataMatrix만 읽히고
++                    // **나머지 12종이 전부 0/1**이었다(그러면서 120~190ms를
++                    // 썼다 — 폴백 체인을 끝까지 돌기 때문).
++                    //
++                    // 그래서 우리가 뒤집어서 넣는다. 극성을 미리 재보려
++                    // 했지만(정지대 링의 밝기 대 내부 밝기) 심볼로지마다
++                    // 값이 뒤죽박죽이라 신뢰할 수 없었다 — ITF 반전본은
++                    // 링과 내부의 차이가 0이었다. 판정 대신 사다리에 한
++                    // 칸 더 두는 편이 오판 위험이 없다. 다른 모든 시도가
++                    // 실패한 뒤에만 도는 자리다.
++                    // [[vscan-lite-roi-invert]]
++                    GrayImage flipped;
++                    flipped.width = rw;
++                    flipped.height = rh;
++                    flipped.pixels.resize(static_cast<size_t>(rw) * rh);
++                    for (size_t k = 0; k < flipped.pixels.size(); ++k)
++                        flipped.pixels[k] = static_cast<uint8_t>(255 - crop.pixels[k]);
++                    sHits = roiPipe.processViewCore(GrayView(flipped));
++                }
+                 for (auto& r : sHits)
+                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
+                 stretched.insert(stretched.end(), sHits.begin(), sHits.end());
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index e9d3b78..21bc64a 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -980,7 +980,7 @@ def build_one(index, cfg):
+ SWEEP_BASE = {
+     "sym": "QR", "ec": "M", "count": 1, "module": 4.0, "angle": 0.0,
+     "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
+-    "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0,
++    "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0, "invert": 0.0,
+ }
+ SWEEP_HELP = {
+     "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
+@@ -990,6 +990,8 @@ SWEEP_HELP = {
+     "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
+     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
+     "shadow": "그림자 밝기 배율 (1.0=없음)",
++    "invert": "흑백 반전 (0=없음, 1=반전). 반전 전에 흰 여백을 덧대므로 "
++              "반전 후 어두운 정지대가 남는다 — '정지대 파괴'가 아닌 순수 반전 케이스",
+ }
+ _SWEEP_PAYLOAD = {
+     "QR": "VSCAN-SWEEP-0001", "DATAMATRIX": "VSCAN-SWEEP-01", "PDF417": "VSCAN-SWEEP-01",
+@@ -1117,6 +1119,14 @@ def build_sweep(index, combo, cfg):
+                                 (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
+                                  -sym.height * v * 0.10, v * 0.0011, v * 0.00035),
+                                 resample=Image.BICUBIC, fillcolor=255)
++        if float(p["invert"]) >= 0.5:
++            # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
++            # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
++            # "정지대 파괴" 케이스가 된다.
++            a2 = np.array(sym).astype(np.uint8)
++            pad = max(8, int(min(a2.shape) * 0.06))
++            a2 = np.pad(a2, pad, mode="constant", constant_values=255)
++            sym = Image.fromarray(255 - a2, mode="L")
+         if p["angle"]:
+             sym = sym.rotate(float(p["angle"]), expand=True, fillcolor=255,
+                              resample=Image.BICUBIC)
+-- 
+2.43.0
+
