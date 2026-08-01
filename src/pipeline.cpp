@@ -734,19 +734,26 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                             // 같은 값이 반복되므로 세로로만 평균하면 잡음만
                             // 줄고 막대 경계는 그대로다 — 그 위에서 국소
                             // 이진화를 하면 임계가 흔들리지 않는다.
-                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패):
-                            // Code39는 여백 12px 상자에서 세로평균+평균임계로,
-                            // DataBar는 여백 0 상자에서 세로평균+중간값임계로
-                            // 열린다. 세로평균 반경 0에서는 둘 다 안 열린다.
+                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패,
+                            // 여백 12px 상자): 세로평균 반경 1을 앞에 넣고
+                            //   블록 16 + 평균임계   -> Code39, PDF417
+                            //   블록 24 + 중간값임계 -> DataBar
+                            // 세로평균 반경 0에서는 셋 다 안 열린다 — 이
+                            // 단계가 결정적이다. 반경은 1~32에서 결과가 같아
+                            // 가장 싼 1로 둔다. 블록 크기는 갈린다(Code39/
+                            // PDF417은 16에서만, DataBar는 24/48에서만).
+                            static constexpr struct { int block; bool mid; } kBin[] = {
+                                {16, false}, {24, true},
+                            };
                             if (sHits.empty() && !budgetExceeded()) {
                                 GrayImage vb;
-                                verticalBlur(GrayView(tcrop), 4, vb);
+                                verticalBlur(GrayView(tcrop), 1, vb);
                                 GrayImage vst;
                                 if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
                                 GrayImage vbin;
-                                for (bool mid : {false, true}) {
+                                for (const auto& bp : kBin) {
                                     if (!sHits.empty() || budgetExceeded()) break;
-                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, mid)) continue;
+                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, bp.mid, bp.block)) continue;
                                     sHits = roiPipe.processViewCore(GrayView(vbin));
                                 }
                             }
