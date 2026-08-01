@@ -1,0 +1,502 @@
+From 22e137c87daa34c0f54ac6fe50947b4fa3e72795 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 07:41:46 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=9B=90=EA=B7=BC=20=EB=B3=B4=EC=A0=95:=20ROI?=
+ =?UTF-8?q?=EC=9D=98=20=EC=82=AC=EA=B0=81=ED=98=95=EC=9D=84=20=EC=9E=A1?=
+ =?UTF-8?q?=EC=95=84=20=ED=98=B8=EB=AA=A8=EA=B7=B8=EB=9E=98=ED=94=BC?=
+ =?UTF-8?q?=EB=A1=9C=20=ED=8E=B8=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+하네스를 정직하게 만들고 나니(§3.30) 원근의 진짜 격차가 보였다 —
+PDF417 0.15 / UPCE 0.30 / DataBar 0.30 / EAN8 0.40 / QR 0.50에서 끊긴다.
+회전은 축 하나면 되지만 원근은 코드 안에서 배율이 달라져 한 스캔 행
+안의 모듈 폭이 계속 변한다.
+
+perspectiveRectify()가 네 변을 직선으로 맞춰 사각형을 잡고 편다.
+세 가지가 필요했고 셋 다 처음엔 틀렸다:
+
+ - 반복 절단 총최소자승. 단순 최소자승은 EAN/UPC 가드바와 DataBar 보조
+   패턴에 아래 변이 끌려간다. 총최소자승을 쓰는 이유는 세로에 가까운
+   좌/우 변을 y=f(x)로 맞추면 발산하기 때문(2x2라 닫힌 해가 있다).
+ - 모서리 제외 폭을 기울기에서 계산. 위/아래 변 표본은 모서리 근처
+   열에서 좌/우 변 위에 놓인다. 고정 5%로는 전단이 큰 코드에서 모자라
+   교점이 x=-3547로 튀었다(PDF417 persp 0.3, 크롭 1098x221). 좌/우 변을
+   먼저 맞추고 그 기울기 x 코드 높이만큼을 제외한다.
+ - 좌표 역매핑. 빼먹었더니 dedup이 엉뚱한 자리끼리 비교해 UPCE 원근
+   축에서 중복 5건이 났다.
+
+곁들여 적층 밴드 dedup을 손봤다. 같은 코드의 두 스캔 밴드가 간격 18%로
+벌어져 기존 10% 문턱을 못 넘었다. 문턱만 넓히면 "같은 라벨 2장"을
+깨뜨리므로, 넓힌 구간(10~25%)에서는 긴 축 정렬 요구를 0.70 -> 0.90으로
+올려서 받는다.
+
+결과 (원근 축): DataBar 60 -> 100%, UPCE 50 -> 100%, EAN8 50 -> 75%,
+QR 47.6 -> 57.1%. 원근 축 11종이 100%.
+14종 x 8축: 오디코딩 0 유지, 중복 3 -> 2. 코퍼스 72.2 -> 72.5%,
+오디코딩 0 / 중복 1 유지, 40종 38/38/38.
+
+PDF417은 보정기가 아니라 상류 문제였다 — ROI 크롭이 1120x201로 영역
+상자 높이가 89px밖에 안 잡힌다(적층 코드인데). refineRegionBox()가
+기울어진 PDF417의 높이를 잘라먹는 별개 문제다.
+
+PROJECT_NOTES §3.31
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ CMakeLists.txt                          |   1 +
+ PROJECT_NOTES.md                        |   2 +-
+ include/vscan_internal/deskew_persp.hpp |  58 ++++++
+ include/vscan_internal/pipeline.hpp     |  13 ++
+ src/deskew_persp.cpp                    | 256 ++++++++++++++++++++++++
+ src/pipeline.cpp                        |  40 +++-
+ 6 files changed, 367 insertions(+), 3 deletions(-)
+ create mode 100644 include/vscan_internal/deskew_persp.hpp
+ create mode 100644 src/deskew_persp.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fc22842..70482b9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -98,6 +98,7 @@ set(VSCAN_SOURCES
+   src/deskew1d.cpp
+   src/locate.cpp
+   src/locate_qr.cpp
++  src/deskew_persp.cpp
+   src/decoder_zxing.cpp
+   src/pipeline.cpp
+   src/gs1.cpp
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 78c7465..e4af11d 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.30 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정: 원근 10/14가 100%** | 무엇부터 할지 정할 때 |
++| §3.14~3.31 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/include/vscan_internal/deskew_persp.hpp b/include/vscan_internal/deskew_persp.hpp
+new file mode 100644
+index 0000000..41d6b16
+--- /dev/null
++++ b/include/vscan_internal/deskew_persp.hpp
+@@ -0,0 +1,58 @@
++#pragma once
++#include "vscan_internal/frame.hpp"
++
++namespace vscan {
++
++/*
++ * [원근 보정 — ROI의 사각형을 잡아 직사각형으로 편다]
++ *
++ * 왜 필요한가. 회전은 되돌리는 축이 하나뿐이라 구조텐서 각도 하나면
++ * 되지만(§3.24), 원근은 코드 **안에서** 배율이 달라진다. 한 스캔 행
++ * 안에서 모듈 폭이 계속 변하므로 zxing의 1D 리더가 폭 비율을 못 맞춘다.
++ *
++ * 실측(module 8, 원근 축을 0.05 간격으로, 각 심볼로지가 끊기는 지점):
++ *
++ *   PDF417  0.15 | UPCE 0.30 | DataBar 0.30 | EAN8 0.40 | QR 0.50
++ *   Code128 / Code39 / Codabar / Code93 / DataMatrix / EAN13 / UPCA / ITF
++ *   / DataBarExp 는 버킷 상한(모듈이 2px 아래로 내려가는 지점)까지 100%
++ *
++ * 즉 원근에 약한 것은 다섯 종이고, 그 다섯 종은 자기 구조가 촘촘하거나
++ * (PDF417, DataBar) 코드가 짧아 정규화 근거가 적다(EAN8, UPCE).
++ *
++ * 방법은 네 변을 직선으로 맞춰 교점(사각형)을 잡고 호모그래피로 펴는
++ * 것이다. 이진 마스크의 열마다 최상/최하, 행마다 최좌/최우 점을 모아
++ * **반복 절단 총최소자승**으로 맞춘다. 절단이 핵심이다 — EAN/UPC의
++ * 가드바는 본체보다 아래로 삐져나오고 DataBar는 아래쪽에 보조 패턴이
++ * 있어서, 단순 최소자승으로는 아래 변이 그쪽으로 끌려간다.
++ *
++ * 시제품 검증(원래 실패하던 12개 케이스): 8개가 읽혔다.
++ *   DataBar 0.30/0.45, EAN8 0.40/0.60, UPCE 0.30/0.45, PDF417 0.15/0.30
++ * QR은 안 열렸다 — zxing이 이미 파인더로 자체 원근 보정을 하므로
++ * 여기서 한 번 더 펴봐야 얻는 게 없다.
++ *
++ * marginPx: 편 뒤 사방에 붙일 정지대. 사각형이 코드에 딱 맞으므로
++ * 여백이 없으면 정지대가 0이 된다.
++ *
++ * 사각형이 이미 직사각형에 가까우면(변끼리 평행하고 각이 직각) 아무것도
++ * 하지 않고 false를 돌려준다 — 펴봐야 결과가 같은데 리샘플 비용만 든다.
++ * [[vscan-lite-perspective-rectify]]
++ */
++/*
++ * 편 좌표를 원본 크롭 좌표로 되돌리기 위한 사상. 호출부가 zxing이 준
++ * 위치를 반드시 이걸로 되돌려야 한다 — 안 그러면 dedup이 넓이/겹침
++ * 기반이라 엉뚱한 자리의 상자끼리 비교하게 되어 중복이 통과한다
++ * (실측: 이걸 빼먹었더니 UPCE 원근 축에서 중복 5건이 나왔다).
++ */
++struct RectifyMap {
++    double a, b, c, d, e, f, g, h;   // 단위 정사각형 -> 원본 사각형
++    int margin;                      // 결과 이미지에 붙인 여백
++    int dw, dh;                      // 여백을 뺀 본체 크기
++};
++
++// 편 이미지의 (x, y) -> 원본 크롭 좌표
++void rectifyMapBack(const RectifyMap& m, double x, double y, double& sx, double& sy);
++
++bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx = 48,
++                        RectifyMap* map = nullptr);
++
++} // namespace vscan
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 30d77e7..d4df1e9 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -387,6 +387,19 @@ struct PipelineConfig {
+      */
+     int invertRescueMaxRegions = 2;
+ 
++    /*
++     * [원근 보정 ROI 구제] 영역 몇 개까지 사각형 보정을 시도할지.
++     *
++     * 원근은 코드 안에서 배율이 달라져 한 스캔 행 안의 모듈 폭이 계속
++     * 변한다 — 회전과 달리 각도 하나로는 못 되돌린다. 실측(module 8,
++     * 원근 축이 끊기는 지점): PDF417 0.15 / UPCE 0.30 / DataBar 0.30 /
++     * EAN8 0.40. 시제품 검증에서 그 구간의 8/12가 살아났다.
++     *
++     * 사각형이 이미 직사각형에 가까우면 perspectiveRectify()가 아무것도
++     * 안 하고 false를 돌려주므로, 정상 프레임의 비용은 윤곽 추정뿐이다.
++     */
++    int perspRescueMaxRegions = 2;
++
+     /*
+      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+      *
+diff --git a/src/deskew_persp.cpp b/src/deskew_persp.cpp
+new file mode 100644
+index 0000000..c0743ac
+--- /dev/null
++++ b/src/deskew_persp.cpp
+@@ -0,0 +1,256 @@
++#include "vscan_internal/deskew_persp.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <vector>
++
++namespace vscan {
++namespace {
++
++struct Line { double a, b, c; };   // a*x + b*y + c = 0, (a,b)는 단위 법선
++struct Pt { double x, y; };
++
++/*
++ * 반복 절단 총최소자승 직선 맞춤.
++ *
++ * 총최소자승(직교거리 최소화)을 쓰는 이유: 세로에 가까운 변(좌/우)을
++ * y = f(x)로 맞추면 발산한다. 공분산 행렬의 작은 고유값에 대응하는
++ * 고유벡터가 법선이고, 2x2라 닫힌 해가 있다(SVD 필요 없음).
++ *
++ * 절단이 핵심이다. EAN/UPC의 가드바는 본체보다 아래로 삐져나오고
++ * DataBar는 아래쪽에 보조 패턴이 있어서, 단순 최소자승이면 아래 변이
++ * 그 소수 점들에 끌려간다. 잔차 상위 25%를 버리고 다시 맞추기를
++ * 네 번 반복한다.
++ */
++bool fitLineRobust(std::vector<Pt> pts, Line& out) {
++    if (pts.size() < 8) return false;
++    for (int iter = 0; iter < 5; ++iter) {
++        double mx = 0, my = 0;
++        for (const Pt& p : pts) { mx += p.x; my += p.y; }
++        mx /= static_cast<double>(pts.size());
++        my /= static_cast<double>(pts.size());
++
++        double sxx = 0, syy = 0, sxy = 0;
++        for (const Pt& p : pts) {
++            const double dx = p.x - mx, dy = p.y - my;
++            sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
++        }
++        // 2x2 대칭행렬의 작은 고유값에 대응하는 고유벡터 = 법선
++        const double tr = sxx + syy;
++        const double det = sxx * syy - sxy * sxy;
++        double disc = tr * tr / 4.0 - det;
++        if (disc < 0) disc = 0;
++        const double lmin = tr / 2.0 - std::sqrt(disc);
++        double nx, ny;
++        if (std::fabs(sxy) > 1e-9) { nx = lmin - syy; ny = sxy; }
++        else if (sxx <= syy)       { nx = 1.0; ny = 0.0; }
++        else                       { nx = 0.0; ny = 1.0; }
++        const double nn = std::hypot(nx, ny);
++        if (nn < 1e-12) return false;
++        nx /= nn; ny /= nn;
++        out.a = nx; out.b = ny; out.c = -(nx * mx + ny * my);
++
++        if (iter == 4 || pts.size() < 16) break;
++        // 잔차 상위 25% 절단
++        std::vector<double> d;
++        d.reserve(pts.size());
++        for (const Pt& p : pts) d.push_back(std::fabs(nx * p.x + ny * p.y + out.c));
++        std::vector<double> sorted = d;
++        const size_t keep = sorted.size() * 3 / 4;
++        std::nth_element(sorted.begin(), sorted.begin() + keep, sorted.end());
++        const double thr = std::max(sorted[keep], 1e-6);
++        std::vector<Pt> next;
++        next.reserve(keep + 1);
++        for (size_t i = 0; i < pts.size(); ++i)
++            if (d[i] <= thr) next.push_back(pts[i]);
++        if (next.size() < 8) break;
++        pts.swap(next);
++    }
++    return true;
++}
++
++bool intersect(const Line& l1, const Line& l2, Pt& out) {
++    const double det = l1.a * l2.b - l2.a * l1.b;
++    if (std::fabs(det) < 1e-9) return false;   // 평행
++    out.x = (-l1.c * l2.b + l2.c * l1.b) / det;
++    out.y = (-l1.a * l2.c + l2.a * l1.c) / det;
++    return true;
++}
++
++} // namespace
++
++bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, RectifyMap* map) {
++    const int W = src.width, H = src.height;
++    if (W < 48 || H < 24) return false;
++    const int stride = src.stride > 0 ? src.stride : W;
++
++    // [임계] 크롭 자신의 명암에서 잡는다 — 노출이 프레임마다 다르므로
++    // 고정 상수를 쓸 수 없다(tightenToContent와 같은 이유).
++    int hist[256] = {0};
++    for (int y = 0; y < H; y += 2) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        for (int x = 0; x < W; x += 2) ++hist[row[x]];
++    }
++    long total = 0;
++    for (int v : hist) total += v;
++    if (total <= 0) return false;
++    const long cut = total / 50;   // 하위/상위 2%
++    int lo = 0, hi = 255;
++    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
++    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
++    if (hi - lo < 24) return false;             // 명암이 없으면 윤곽도 없다
++    const int thr = (lo + hi) / 2;
++
++    auto dark = [&](int x, int y) -> bool {
++        return src.pixels[static_cast<size_t>(y) * stride + x] < thr;
++    };
++
++    // 열/행마다 가장자리 점을 모은다. 양끝 5%는 빼둔다 — 모서리 근처는
++    // 두 변이 만나는 자리라 어느 변에 속하는지 애매하다.
++    std::vector<Pt> top, bot, left, right;
++    top.reserve(W); bot.reserve(W); left.reserve(H); right.reserve(H);
++    int cx0 = W, cx1 = -1, cy0 = H, cy1 = -1;
++    for (int x = 0; x < W; ++x)
++        for (int y = 0; y < H; ++y)
++            if (dark(x, y)) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; break; }
++    for (int y = 0; y < H; ++y)
++        for (int x = 0; x < W; ++x)
++            if (dark(x, y)) { if (y < cy0) cy0 = y; if (y > cy1) cy1 = y; break; }
++    if (cx1 - cx0 < 40 || cy1 - cy0 < 16) return false;
++
++    // [좌/우 변을 먼저] 행마다의 최좌/최우 점은 볼록한 도형에서 항상
++    // 좌/우 변 위에 있으므로 신뢰할 수 있다. 위/아래 변은 그렇지 않다 —
++    // 모서리 근처 열에서는 최상/최하 점이 **좌우 변** 위에 놓인다.
++    const int my = std::max(2, (cy1 - cy0) / 20);
++    for (int y = cy0 + my; y <= cy1 - my; ++y) {
++        int xl = -1, xr = -1;
++        for (int x = 0; x < W; ++x) if (dark(x, y)) { xl = x; break; }
++        for (int x = W - 1; x >= 0; --x) if (dark(x, y)) { xr = x; break; }
++        if (xl >= 0) left.push_back({static_cast<double>(xl), static_cast<double>(y)});
++        if (xr >= 0) right.push_back({static_cast<double>(xr), static_cast<double>(y)});
++    }
++    Line ll, lr;
++    if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
++
++    // [모서리 제외 폭을 기울기에서 계산한다]
++    // 평행사변형에서 좌변이 높이 Hc에 걸쳐 가로로 |dx/dy| * Hc 만큼
++    // 움직이면, 그 폭만큼의 열에서는 최상단 점이 좌변 위에 있다.
++    // 고정 5%로 잘랐더니 전단이 큰 코드에서 위 변 표본에 좌우 변이 섞여
++    // 직선 맞춤이 무너졌다 — 실측(PDF417 persp 0.3, 크롭 1098x221):
++    // 모서리 교점이 x=-3547로 나와 사각형 추정이 통째로 실패했다.
++    auto slopeOf = [](const Line& L) {
++        return (std::fabs(L.a) < 1e-9) ? 1e9 : std::fabs(L.b / L.a);
++    };
++    const int codeH = cy1 - cy0, codeW = cx1 - cx0;
++    const double sl = std::min(slopeOf(ll), slopeOf(lr));
++    int mx = static_cast<int>(sl * codeH) + std::max(2, codeW / 20);
++    mx = std::min(mx, static_cast<int>(codeW * 0.45));
++    for (int x = cx0 + mx; x <= cx1 - mx; ++x) {
++        int ytop = -1, ybot = -1;
++        for (int y = 0; y < H; ++y) if (dark(x, y)) { ytop = y; break; }
++        for (int y = H - 1; y >= 0; --y) if (dark(x, y)) { ybot = y; break; }
++        if (ytop >= 0) top.push_back({static_cast<double>(x), static_cast<double>(ytop)});
++        if (ybot >= 0) bot.push_back({static_cast<double>(x), static_cast<double>(ybot)});
++    }
++
++    Line lt, lb;
++    if (!fitLineRobust(top, lt) || !fitLineRobust(bot, lb)) return false;
++
++    Pt TL, TR, BR, BL;
++    if (!intersect(lt, ll, TL) || !intersect(lt, lr, TR) ||
++        !intersect(lb, lr, BR) || !intersect(lb, ll, BL)) return false;
++
++    // 사각형이 크롭 밖으로 크게 벗어나면 변 추정이 실패한 것이다.
++    const double slack = 0.5;
++    for (const Pt& p : {TL, TR, BR, BL}) {
++        if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
++        if (p.x < -slack * W || p.x > W * (1 + slack)) return false;
++        if (p.y < -slack * H || p.y > H * (1 + slack)) return false;
++    }
++
++    const double wTop = std::hypot(TR.x - TL.x, TR.y - TL.y);
++    const double wBot = std::hypot(BR.x - BL.x, BR.y - BL.y);
++    const double hL   = std::hypot(BL.x - TL.x, BL.y - TL.y);
++    const double hR   = std::hypot(BR.x - TR.x, BR.y - TR.y);
++    const int dw = static_cast<int>(std::max(wTop, wBot));
++    const int dh = static_cast<int>(std::max(hL, hR));
++    if (dw < 40 || dh < 16 || dw > 4000 || dh > 4000) return false;
++
++    // [이미 직사각형이면 하지 않는다] 마주보는 변의 길이가 거의 같고
++    // 기울기도 거의 같으면 펴봐야 결과가 그대로다 — 리샘플 비용만 든다.
++    const double wRatio = std::min(wTop, wBot) / std::max(wTop, wBot);
++    const double hRatio = std::min(hL, hR) / std::max(hL, hR);
++    if (wRatio > 0.97 && hRatio > 0.97) return false;
++
++    /*
++     * [호모그래피] 목적지(직사각형) -> 원본(사각형). 목적지가 항상 축
++     * 정렬 직사각형이므로 "단위 정사각형 -> 사각형"의 닫힌 해를 쓰고
++     * 앞에 1/dw, 1/dh 스케일만 곱하면 된다. 일반 8x8 선형해가 필요 없다.
++     */
++    const double x0 = TL.x, y0 = TL.y, x1 = TR.x, y1 = TR.y;
++    const double x2 = BR.x, y2 = BR.y, x3 = BL.x, y3 = BL.y;
++    const double dx1 = x1 - x2, dx2 = x3 - x2, sx = x0 - x1 + x2 - x3;
++    const double dy1 = y1 - y2, dy2 = y3 - y2, sy = y0 - y1 + y2 - y3;
++    double ha, hb, hc, hd, he, hf, hg, hh;
++    const double den = dx1 * dy2 - dx2 * dy1;
++    if (std::fabs(sx) < 1e-9 && std::fabs(sy) < 1e-9) {
++        hg = hh = 0.0;
++        ha = x1 - x0; hb = x3 - x0; hc = x0;
++        hd = y1 - y0; he = y3 - y0; hf = y0;
++    } else {
++        if (std::fabs(den) < 1e-9) return false;
++        hg = (sx * dy2 - dx2 * sy) / den;
++        hh = (dx1 * sy - sx * dy1) / den;
++        ha = x1 - x0 + hg * x1; hb = x3 - x0 + hh * x3; hc = x0;
++        hd = y1 - y0 + hg * y1; he = y3 - y0 + hh * y3; hf = y0;
++    }
++
++    if (map) {
++        map->a = ha; map->b = hb; map->c = hc;
++        map->d = hd; map->e = he; map->f = hf;
++        map->g = hg; map->h = hh;
++        map->margin = marginPx; map->dw = dw; map->dh = dh;
++    }
++
++    const int ow = dw + 2 * marginPx, oh = dh + 2 * marginPx;
++    out.width = ow;
++    out.height = oh;
++    out.pixels.assign(static_cast<size_t>(ow) * oh, 255);
++    const double iw = 1.0 / static_cast<double>(dw), ih = 1.0 / static_cast<double>(dh);
++    for (int y = 0; y < dh; ++y) {
++        const double v = (static_cast<double>(y) + 0.5) * ih;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y + marginPx) * ow + marginPx;
++        for (int x = 0; x < dw; ++x) {
++            const double u = (static_cast<double>(x) + 0.5) * iw;
++            const double w = hg * u + hh * v + 1.0;
++            if (std::fabs(w) < 1e-9) continue;
++            const double sxf = (ha * u + hb * v + hc) / w;
++            const double syf = (hd * u + he * v + hf) / w;
++            const int ix = static_cast<int>(sxf), iy = static_cast<int>(syf);
++            if (static_cast<unsigned>(ix) >= static_cast<unsigned>(W - 1) ||
++                static_cast<unsigned>(iy) >= static_cast<unsigned>(H - 1))
++                continue;
++            // 쌍선형 — 회전 구제와 같은 이유로 최근접은 모듈 폭 비율을
++            // 흔든다([[vscan-lite-rotate-bilinear]]).
++            const double fx = sxf - ix, fy = syf - iy;
++            const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(iy) * stride + ix;
++            const uint8_t* __restrict r1 = r0 + stride;
++            const double t = r0[0] + (r0[1] - r0[0]) * fx;
++            const double b = r1[0] + (r1[1] - r1[0]) * fx;
++            o[x] = static_cast<uint8_t>(t + (b - t) * fy + 0.5);
++        }
++    }
++    return true;
++}
++
++void rectifyMapBack(const RectifyMap& m, double x, double y, double& sx, double& sy) {
++    const double u = (x - m.margin + 0.5) / static_cast<double>(m.dw);
++    const double v = (y - m.margin + 0.5) / static_cast<double>(m.dh);
++    const double w = m.g * u + m.h * v + 1.0;
++    if (std::fabs(w) < 1e-9) { sx = x; sy = y; return; }
++    sx = (m.a * u + m.b * v + m.c) / w;
++    sy = (m.d * u + m.e * v + m.f) / w;
++}
++
++} // namespace vscan
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index b5f7ac7..abbfaab 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -4,6 +4,7 @@
+ #include "vscan_internal/deskew1d.hpp"
+ #include <cstdlib>
+ #include "vscan_internal/locate.hpp"
++#include "vscan_internal/deskew_persp.hpp"
+ #include "vscan_internal/locate_qr.hpp"
+ #ifdef VSCAN_HAVE_ZBAR
+ #include "vscan_internal/decoder_zbar.hpp"
+@@ -628,6 +629,29 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                     }
+                     }
+                 }
++                if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
++                    // [원근 보정] 회전은 축 하나면 되지만(§3.24) 원근은
++                    // 코드 **안에서** 배율이 달라져서 한 스캔 행 안의 모듈
++                    // 폭이 계속 변한다. 네 변을 직선으로 맞춰 사각형을 잡고
++                    // 직사각형으로 편다. 이미 직사각형에 가까우면 함수가
++                    // false를 돌려주므로 정상 프레임에서는 비용이 윤곽
++                    // 추정뿐이다. [[vscan-lite-perspective-rectify]]
++                    GrayImage rect;
++                    RectifyMap rmap{};
++                    if (perspectiveRectify(GrayView(crop), rect, 48, &rmap)) {
++                        sHits = roiPipe.processViewCore(GrayView(rect));
++                        // [좌표 되돌리기] 편 좌표를 그대로 두면 dedup이
++                        // 엉뚱한 자리의 상자끼리 비교하게 되어 중복이
++                        // 통과한다(실측: 빼먹었더니 UPCE 원근 축 중복 5건).
++                        for (auto& r : sHits)
++                            for (auto& pt : r.symbol.position) {
++                                double sx = 0, sy = 0;
++                                rectifyMapBack(rmap, pt.first, pt.second, sx, sy);
++                                pt.first = static_cast<int>(sx);
++                                pt.second = static_cast<int>(sy);
++                            }
++                    }
++                }
+                 if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
+                     // [흑백 반전 판본] zxing의 TryInvert는 **1D와 PDF417에
+                     // 대해서는 아무 일도 하지 않는다.** 소스를 보면
+@@ -1493,9 +1517,21 @@ bool isStackedBand(const BBox& a, const BBox& b) {
+                       double cLo, double cHi, double dLo, double dHi) { // 정렬돼야 하는 축
+         const double gap = std::max(aLo, bLo) - std::min(aHi, bHi);
+         const double combined = std::max(aHi, bHi) - std::min(aLo, bLo);
+-        if (gap >= 0.10 * combined) return false;
+         const double ov = std::min(cHi, dHi) - std::max(cLo, dLo);
+-        return ov >= 0.70 * std::min(cHi - cLo, dHi - dLo);
++        const double minAlign = std::min(cHi - cLo, dHi - dLo);
++        if (minAlign <= 0) return false;
++        // 간격이 아주 작으면(결합 길이의 10% 미만) 정렬 조건을 느슨하게,
++        // 간격이 그보다 벌어지면 정렬을 더 엄격히 요구한다.
++        //
++        // 두 번째 조건을 넣은 이유: 원근 보정을 붙이고 나서 같은 코드의
++        // 서로 다른 스캔 밴드가 둘 다 반환되는 경우가 생겼다 — 실측
++        // (UPCE persp 0.45): (80,725)-(831,817)과 (46,848)-(772,900).
++        // 간격 31px이 결합 높이 175의 18%라 10% 문턱을 못 넘었다.
++        // 그냥 문턱만 넓히면 "박스에 붙은 같은 라벨 2장"을 깨뜨리므로,
++        // 넓힌 구간에서는 긴 축 정렬을 0.70 -> 0.90으로 올려서 받는다.
++        if (gap < 0.10 * combined) return ov >= 0.70 * minAlign;
++        if (gap < 0.25 * combined) return ov >= 0.90 * minAlign;
++        return false;
+     };
+     return stacked(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1) ||
+            stacked(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1);
+-- 
+2.43.0
+
