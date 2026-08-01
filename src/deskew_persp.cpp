@@ -162,25 +162,35 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
         lr.a = 1; lr.b = 0; lr.c = -static_cast<double>(cx1);
     }
 
-    // [모서리 제외 폭을 기울기에서 계산한다]
-    // 평행사변형에서 좌변이 높이 Hc에 걸쳐 가로로 |dx/dy| * Hc 만큼
-    // 움직이면, 그 폭만큼의 열에서는 최상단 점이 좌변 위에 있다.
-    // 고정 5%로 잘랐더니 전단이 큰 코드에서 위 변 표본에 좌우 변이 섞여
-    // 직선 맞춤이 무너졌다 — 실측(PDF417 persp 0.3, 크롭 1098x221):
-    // 모서리 교점이 x=-3547로 나와 사각형 추정이 통째로 실패했다.
-    auto slopeOf = [](const Line& L) {
-        return (std::fabs(L.a) < 1e-9) ? 1e9 : std::fabs(L.b / L.a);
-    };
+    // [모서리 점은 좌/우 변으로부터의 거리로 뺀다]
+    // 모서리 근처 열에서는 최상단/최하단 점이 **좌우 변** 위에 놓인다.
+    // 그걸 열 번호로 잘라내려 했었다(기울기 x 코드 높이만큼 양끝을 제외).
+    // 전단이 크면 그 폭이 코드 폭을 넘어서 상한(45%)에 걸리고, 상한에
+    // 걸리는 순간 좌우 변 점이 그대로 표본에 남는다 — 실측(QR persp 0.6,
+    // 크롭 434x434): 아래 변 표본 39개 중 상당수가 우변 위에 있어서
+    // 맞춤이 **우변으로 넘어갔다**(lb=(-0.898,-0.440)가 ll=(-0.878,-0.478)와
+    // 거의 같은 방향). persp 0.9에서는 lb가 lr과 소수점 셋째 자리까지
+    // 같아졌다. 그러면 마주보는 변이 평행해져 교점이 발산한다
+    // (BL=(1628,-2561)).
+    //
+    // 좌/우 변은 이미 수백 개 표본으로 맞춰져 있고 믿을 만하다(행마다의
+    // 최좌/최우 점은 볼록 도형에서 항상 좌/우 변 위에 있다). 그러니
+    // 열 번호로 어림하지 말고 **그 선에서 얼마나 떨어져 있나**를 직접
+    // 재서 가까운 점을 뺀다. 직선은 정규화돼 있어(a^2+b^2=1) |ax+by+c|가
+    // 곧 거리다. 전단이 아무리 커도 기하가 그대로 성립한다.
     const int codeH = cy1 - cy0, codeW = cx1 - cx0;
-    const double sl = flat ? 0.0 : std::min(slopeOf(ll), slopeOf(lr));
-    int mx = static_cast<int>(sl * codeH) + std::max(2, codeW / 20);
-    mx = std::min(mx, static_cast<int>(codeW * 0.45));
-    for (int x = cx0 + mx; x <= cx1 - mx; ++x) {
+    const double dEdge = std::max(6.0, 0.08 * std::min(codeW, codeH));
+    auto farFromSides = [&](double x, double y) {
+        return std::fabs(ll.a * x + ll.b * y + ll.c) > dEdge &&
+               std::fabs(lr.a * x + lr.b * y + lr.c) > dEdge;
+    };
+    const int endTrim = std::max(2, codeW / 20);
+    for (int x = cx0 + endTrim; x <= cx1 - endTrim; ++x) {
         int ytop = -1, ybot = -1;
         for (int y = 0; y < H; ++y) if (dark(x, y)) { ytop = y; break; }
         for (int y = H - 1; y >= 0; --y) if (dark(x, y)) { ybot = y; break; }
-        if (ytop >= 0) top.push_back({static_cast<double>(x), static_cast<double>(ytop)});
-        if (ybot >= 0) bot.push_back({static_cast<double>(x), static_cast<double>(ybot)});
+        if (ytop >= 0 && farFromSides(x, ytop)) top.push_back({static_cast<double>(x), static_cast<double>(ytop)});
+        if (ybot >= 0 && farFromSides(x, ybot)) bot.push_back({static_cast<double>(x), static_cast<double>(ybot)});
     }
 
     Line lt, lb;
