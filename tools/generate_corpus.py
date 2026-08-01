@@ -567,8 +567,12 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
         w, h = img.size
         coeffs = (1, s * 0.9, -w * s * 0.12, s * 0.35, 1, -h * s * 0.10,
                   s * 0.0011, s * 0.00035)
-        img = img.transform(img.size, Image.PERSPECTIVE, coeffs,
-                            resample=Image.BICUBIC, fillcolor=255)
+        pw0, ph0 = img.size
+        img = _perspective(img, coeffs)
+        if img.width > pw0 or img.height > ph0:
+            k = min(pw0 / img.width, ph0 / img.height)
+            img = img.resize((max(24, int(img.width * k)),
+                              max(24, int(img.height * k))), Image.LANCZOS)
         tags.append("perspective" + ("-strong" if s > 0.2 else ""))
 
     if ang:
@@ -764,6 +768,50 @@ def _motion_blur(a, length, angle_deg):
     for t in range(-half, half + 1):
         acc += np.roll(np.roll(a, int(round(dy * t)), axis=0), int(round(dx * t)), axis=1)
     return acc / (2 * half + 1)
+
+
+
+def _perspective(img, coeffs):
+    """원근 변환 — **캔버스를 넓혀서** 적용한다 (rotate(expand=True)와 같은 취지).
+
+    PIL의 transform(size, PERSPECTIVE, ...)은 출력 크기를 그대로 두므로,
+    전단으로 밀려난 부분이 캔버스 밖으로 잘려 나간다. 바코드에서 그건
+    "왜곡"이 아니라 **코드 일부가 없어지는 것**이라 어떤 리더로도 못 읽는다.
+
+    실측(Code128 module 8, 코드 중앙행의 흑백 런 개수 — 정상은 103개):
+        persp 0     런 103   코드 오른쪽 끝 x=951 (캔버스 여유 있음)
+        persp 0.1   런  97   오른쪽 끝 x=997  <- 캔버스 끝(999)에 붙었다
+        persp 0.3   런  81   오른쪽 끝 x=997
+        persp 0.6   런  65   오른쪽 끝 x=997
+    즉 생성 단계에서 이미 코드가 잘려 있었고, 버킷 분류는 그걸 'ok'로
+    표시하고 있었다 — 리더의 약점이 아니라 테스트 하네스의 결함이었다.
+    (3배 슈퍼샘플링도 해봤지만 런 개수가 한 개도 안 변했다. 리샘플 품질
+    문제가 아니라 잘림 문제라는 확인이다.)
+
+    coeffs는 PIL 규약대로 **목적지 -> 원본** 사상이다. 그 역행렬로 원본
+    네 모서리가 어디로 가는지 구해 출력 상자를 잡고, 그만큼 평행이동을
+    합성해서 전부 담는다.
+    """
+    w, h = img.size
+    M = np.array([[coeffs[0], coeffs[1], coeffs[2]],
+                  [coeffs[3], coeffs[4], coeffs[5]],
+                  [coeffs[6], coeffs[7], 1.0]], dtype=np.float64)
+    F = np.linalg.inv(M)                      # 원본 -> 목적지
+    pts = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], dtype=np.float64).T
+    q = F @ pts
+    q = q[:2] / q[2]
+    x0, y0 = q[0].min(), q[1].min()
+    x1, y1 = q[0].max(), q[1].max()
+    nw = int(math.ceil(x1 - x0))
+    nh = int(math.ceil(y1 - y0))
+    # 지나치게 커지는 경우(강한 왜곡)는 상한을 둔다 — 프레임에 못 넣는다.
+    nw = max(w, min(nw, w * 3))
+    nh = max(h, min(nh, h * 3))
+    T = np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], dtype=np.float64)
+    M2 = M @ T                                # 새 목적지 -> 원본
+    M2 = M2 / M2[2, 2]
+    return img.transform((nw, nh), Image.PERSPECTIVE, tuple(M2.ravel()[:8]),
+                         resample=Image.BICUBIC, fillcolor=255)
 
 
 def _cylinder_warp(a, strength):
@@ -1115,10 +1163,17 @@ def build_sweep(index, combo, cfg):
         sym = Image.fromarray(np.clip(s, 0, 255).astype(np.uint8), mode="L")
         if p["persp"]:
             v = float(p["persp"])
-            sym = sym.transform(sym.size, Image.PERSPECTIVE,
-                                (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
-                                 -sym.height * v * 0.10, v * 0.0011, v * 0.00035),
-                                resample=Image.BICUBIC, fillcolor=255)
+            sym = _perspective(sym, (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
+                                     -sym.height * v * 0.10, v * 0.0011, v * 0.00035))
+            # 캔버스를 넓혔으므로 셀을 넘칠 수 있다. 넘치면 줄여서 담는다 —
+            # 고정 화각 카메라 앞에서 라벨을 기울이면 실제로 그렇게 된다.
+            # 모듈 크기도 같은 비율로 줄어드므로 eff_mod를 함께 환산해야
+            # 판독 가능성 버킷이 정직해진다.
+            if sym.width > cw or sym.height > ch:
+                k = min(cw / sym.width, ch / sym.height)
+                sym = sym.resize((max(24, int(sym.width * k)),
+                                  max(24, int(sym.height * k))), Image.LANCZOS)
+                eff_mod *= k
         if float(p["invert"]) >= 0.5:
             # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
             # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
