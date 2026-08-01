@@ -487,7 +487,7 @@ def _to_dpm(arr, step=5):
     return dot
 
 
-def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
+def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None, mod_px=1.0):
     """코드 이미지 자체에 걸리는 열화(대비/반전/DPM/인쇄불량/손상).
 
     프레임 전체가 아니라 코드별로 적용한다 — 한 프레임에 '깨끗한 코드 +
@@ -507,7 +507,8 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
         # 반전 전에 흰 여백을 덧대야 반전 후에 **어두운 콰이어트존**이 남는다.
         # 안 그러면 반전된 코드가 밝은 배경에 바로 붙어서 콰이어트존이
         # 사라지고, "반전"이 아니라 "콰이어트존 파괴" 케이스가 돼버린다.
-        pad = max(8, int(min(a.shape) * 0.06))
+        # 여백은 모듈 10개 이상 (규격 정지대). 스윕 경로의 같은 자리 주석 참고.
+        pad = max(8, int(round(10 * mod_px)), int(min(a.shape) * 0.06))
         a = np.pad(a, pad, mode="constant", constant_values=255)
         a = 255 - a
         tags.append("inverted")
@@ -1025,7 +1026,8 @@ def build_one(index, cfg):
             continue
         cphys = {}
         sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
-                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys)
+                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys,
+                             mod_px=mod_px)
         sym, ang, gscale = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
                                            p_rot=prof["p_rot"])
         mod_px *= gscale
@@ -1226,8 +1228,15 @@ def build_sweep(index, combo, cfg):
             # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
             # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
             # "정지대 파괴" 케이스가 된다.
+            #
+            # 여백은 **모듈 10개 이상**이어야 한다. 규격이 요구하는 정지대가
+            # 1D 대부분(ITF/Code39/Code128 등)에서 최소 폭 요소의 10배다.
+            # 크기 비율(6%)만 쓰면 코드가 커질수록 모듈 대비 정지대가
+            # 얇아진다 — 실측(ITF module 8, 코드 1012x376): 6%는 20px인데
+            # 규격은 59px을 요구한다. 그 상태로 "읽혀야 정상(ok)"으로
+            # 분류하면 리더가 아니라 하네스가 틀린 것이다.
             a2 = np.array(sym).astype(np.uint8)
-            pad = max(8, int(min(a2.shape) * 0.06))
+            pad = max(8, int(round(10 * eff_mod)), int(min(a2.shape) * 0.06))
             a2 = np.pad(a2, pad, mode="constant", constant_values=255)
             sym = Image.fromarray(255 - a2, mode="L")
         if p["angle"]:
