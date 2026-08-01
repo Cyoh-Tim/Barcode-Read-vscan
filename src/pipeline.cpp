@@ -77,9 +77,12 @@ void Pipeline::armSelfBudget(double firstPassMs) {
                           std::max(0.0, total - firstPassMs) * 1000.0));
     if (!deadlineActive_ || self < deadline_) { deadline_ = self; deadlineActive_ = true; }
     // 첫 영역용 마감은 더 멀리 잡는다(위 frameBudgetXFirstRegion 주석).
-    const double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
-                                                              cfg_.frameBudgetXFirstPass),
-                                       static_cast<double>(cfg_.frameBudgetFloorMs));
+    double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
+                                                        cfg_.frameBudgetXFirstPass),
+                                 static_cast<double>(cfg_.frameBudgetFloorMs));
+    if (cfg_.frameBudgetFirstRegionCapMs > 0)
+        totalFirst = std::min(totalFirst,
+                              firstPassMs + static_cast<double>(cfg_.frameBudgetFirstRegionCapMs));
     deadlineFirst_ = std::chrono::steady_clock::now() +
                      std::chrono::microseconds(static_cast<long long>(
                          std::max(0.0, totalFirst - firstPassMs) * 1000.0));
