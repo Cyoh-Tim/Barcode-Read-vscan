@@ -1,0 +1,156 @@
+From 925b6629100bd0b09f76fca2a3164a29884a4a3a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 08:34:24 +0000
+Subject: [PATCH] =?UTF-8?q?=EB=82=A9=EC=9E=91=ED=95=9C=20=EC=BD=94?=
+ =?UTF-8?q?=EB=93=9C=EC=9D=98=20=EC=82=AC=EA=B0=81=ED=98=95:=20=EC=A2=8C?=
+ =?UTF-8?q?=EC=9A=B0=20=EB=B3=80=20=EB=A7=9E=EC=B6=A4=20=EB=8C=80=EC=8B=A0?=
+ =?UTF-8?q?=20=EC=9C=84/=EC=95=84=EB=9E=98=20=EB=B3=80=EC=9D=98=20?=
+ =?UTF-8?q?=EC=96=91=EB=81=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+§3.31에서 PDF417만 27.3% 그대로였다. 상류(ROI)를 의심했지만 아니었고,
+코드 자체가 949x49로 극단적으로 납작한 것이 원인이었다 — 좌/우 변이
+49px뿐이라 직선 기울기가 흔들리고 그 각도 오차가 사각형을 망가뜨린다
+(persp 0.15/0.3 추정 실패, 0.5에서 1000px 코드에 399x322).
+
+막대 방향을 밖에서 받아 좌/우 변의 방향을 고정하는 방법을 먼저 시도했고
+실패했다. 강한 원근에서는 막대가 소실점을 향해 부채꼴로 벌어져서 좌/우
+변과 나란하지 않다 — 방향을 잘못 고정하면 오프셋 중앙값이 코드 한가운데에
+선을 놓아 폭이 절반으로 나온다(persp 0.3에서 545x143, 0.5에서 292x138).
+
+통한 방법: 높이가 폭의 40% 미만이면 좌/우 변을 아예 맞추지 않고, 위 변과
+아래 변 각각에 대해 "그 선 근처(±6px)에 어두운 픽셀이 있는 가장 왼쪽/
+오른쪽 열"을 찾아 네 점으로 쓴다. 긴 축은 표본이 수백 개라 안정적이고,
+원근 보정에서 실제로 중요한 정보도 그쪽이다 — 한 스캔 행 안의 모듈 폭
+변화는 위/아래 변이 수렴하는 정도에서 나온다.
+
+결과: PDF417 27.3 -> 100%, EAN8 75 -> 87.5%. 원근 축 13종이 100%
+(QR 57.1%만 남음). 14종 x 8축 오디코딩 0 / 중복 2 유지, 코퍼스
+72.5 -> 72.7%, 40종 38/38/38.
+
+PROJECT_NOTES §3.32
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                        |  2 +-
+ include/vscan_internal/deskew_persp.hpp |  9 +++++
+ src/deskew_persp.cpp                    | 53 +++++++++++++++++++++++--
+ 3 files changed, 59 insertions(+), 5 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index e4af11d..72dc23a 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.31 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** | 무엇부터 할지 정할 때 |
++| §3.14~3.32 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/include/vscan_internal/deskew_persp.hpp b/include/vscan_internal/deskew_persp.hpp
+index 41d6b16..5f840f7 100644
+--- a/include/vscan_internal/deskew_persp.hpp
++++ b/include/vscan_internal/deskew_persp.hpp
+@@ -35,6 +35,15 @@ namespace vscan {
+  *
+  * 사각형이 이미 직사각형에 가까우면(변끼리 평행하고 각이 직각) 아무것도
+  * 하지 않고 false를 돌려준다 — 펴봐야 결과가 같은데 리샘플 비용만 든다.
++ *
++ * [납작한 코드는 다른 경로를 탄다] 코드 높이가 폭의 40% 미만이면 좌/우
++ * 변을 직선으로 맞출 세로 길이가 없다 — 실측(PDF417 module 8): 코드가
++ * 949x49라 그 변이 49px뿐이고, 거기 맞춘 기울기 오차가 사각형을 통째로
++ * 망가뜨렸다(persp 0.5에서 1000px 코드에 399x322). 그때는 위/아래 변의
++ * **양끝**을 직접 찾아 네 점으로 쓴다. 위/아래 변은 표본이 수백 개라
++ * 안정적이고, 원근 보정에서 실제로 중요한 정보도 그쪽이다 — 한 스캔 행
++ * 안의 모듈 폭 변화는 위/아래 변의 수렴에서 나온다.
++ * 실측: PDF417 persp 0.15/0.3/0.5가 전부 1086x147로 펴져 읽혔다.
+  * [[vscan-lite-perspective-rectify]]
+  */
+ /*
+diff --git a/src/deskew_persp.cpp b/src/deskew_persp.cpp
+index c0743ac..fc31c95 100644
+--- a/src/deskew_persp.cpp
++++ b/src/deskew_persp.cpp
+@@ -131,7 +131,21 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+         if (xr >= 0) right.push_back({static_cast<double>(xr), static_cast<double>(y)});
+     }
+     Line ll, lr;
+-    if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
++    const bool flat = (cy1 - cy0) < (cx1 - cx0) * 2 / 5;
++    if (!flat) {
++        if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
++    } else {
++        // 납작한 코드에서는 좌/우 변 맞춤을 쓰지 않는다. 변 길이가 너무
++        // 짧아서다 — 실측(PDF417 module 8): 코드가 949x49라 좌/우 변이
++        // 49px뿐이다. 그 구간에 맞춘 기울기 오차가 사각형을 통째로
++        // 망가뜨렸다(persp 0.5에서 1000px 코드에 399x322가 나왔다).
++        //
++        // 막대 방향을 밖에서 받아 고정하는 것도 안 됐다. 강한 원근에서는
++        // 막대가 소실점으로 부채꼴로 벌어져 **좌/우 변과 나란하지 않다**
++        // (persp 0.3에서 545x143). 아래쪽 "위/아래 변의 양끝" 경로를 쓴다.
++        ll.a = 1; ll.b = 0; ll.c = -static_cast<double>(cx0);
++        lr.a = 1; lr.b = 0; lr.c = -static_cast<double>(cx1);
++    }
+ 
+     // [모서리 제외 폭을 기울기에서 계산한다]
+     // 평행사변형에서 좌변이 높이 Hc에 걸쳐 가로로 |dx/dy| * Hc 만큼
+@@ -143,7 +157,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+         return (std::fabs(L.a) < 1e-9) ? 1e9 : std::fabs(L.b / L.a);
+     };
+     const int codeH = cy1 - cy0, codeW = cx1 - cx0;
+-    const double sl = std::min(slopeOf(ll), slopeOf(lr));
++    const double sl = flat ? 0.0 : std::min(slopeOf(ll), slopeOf(lr));
+     int mx = static_cast<int>(sl * codeH) + std::max(2, codeW / 20);
+     mx = std::min(mx, static_cast<int>(codeW * 0.45));
+     for (int x = cx0 + mx; x <= cx1 - mx; ++x) {
+@@ -158,8 +172,39 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+     if (!fitLineRobust(top, lt) || !fitLineRobust(bot, lb)) return false;
+ 
+     Pt TL, TR, BR, BL;
+-    if (!intersect(lt, ll, TL) || !intersect(lt, lr, TR) ||
+-        !intersect(lb, lr, BR) || !intersect(lb, ll, BL)) return false;
++    if (!flat) {
++        if (!intersect(lt, ll, TL) || !intersect(lt, lr, TR) ||
++            !intersect(lb, lr, BR) || !intersect(lb, ll, BL)) return false;
++    } else {
++        /*
++         * [납작한 코드: 위/아래 변의 양끝을 직접 찾는다]
++         *
++         * 좌/우 변을 직선으로 맞출 만한 세로 길이가 없으므로, 위 변과
++         * 아래 변 각각에 대해 "그 선 근처에 어두운 픽셀이 있는 가장
++         * 왼쪽/오른쪽 열"을 찾아 네 점으로 쓴다. 긴 축(위/아래 변)은
++         * 표본이 수백 개라 안정적이고, 그 두 선이 곧 원근 보정에서
++         * 실제로 중요한 정보다 — 한 스캔 행 안의 모듈 폭 변화는 위/아래
++         * 변의 수렴에서 나오기 때문이다.
++         */
++        auto endsOn = [&](const Line& L, Pt& lo, Pt& hi2) -> bool {
++            if (std::fabs(L.b) < 1e-9) return false;
++            int xl = -1, xr = -1;
++            for (int x = cx0; x <= cx1; ++x) {
++                const int ly = static_cast<int>(-(L.a * x + L.c) / L.b);
++                bool near = false;
++                for (int dy = -6; dy <= 6 && !near; ++dy) {
++                    const int y = ly + dy;
++                    if (y >= 0 && y < H && dark(x, y)) near = true;
++                }
++                if (near) { if (xl < 0) xl = x; xr = x; }
++            }
++            if (xl < 0 || xr - xl < 40) return false;
++            lo.x = xl;  lo.y = -(L.a * xl + L.c) / L.b;
++            hi2.x = xr; hi2.y = -(L.a * xr + L.c) / L.b;
++            return true;
++        };
++        if (!endsOn(lt, TL, TR) || !endsOn(lb, BL, BR)) return false;
++    }
+ 
+     // 사각형이 크롭 밖으로 크게 벗어나면 변 추정이 실패한 것이다.
+     const double slack = 0.5;
+-- 
+2.43.0
+
