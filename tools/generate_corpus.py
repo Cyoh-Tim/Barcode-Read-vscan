@@ -685,11 +685,25 @@ def classify_code(mod_px, cphys, fphys):
 
     # 5) 모션 블러 — 이동 길이가 모듈 크기를 크게 넘으면 막대 구분이 사라진다.
     #    다만 블러 **방향**이 막대와 나란하면 거의 손해가 없다(1D는 특히).
-    #    방향을 모른 채 판정하므로 임계값을 넉넉히 잡는다(실측: 2.5*m 기준은
-    #    17%가 읽혀서 난독 분류로 부적합했다).
-    if motion > 5.0 * m:
+    #    [방향을 이제는 안다] 예전에는 "방향을 모른 채 판정하므로" 임계를
+    #    넉넉히 잡았다(5.0*m 난독 / 2.2*m 경계). 그때 2.5*m을 난독으로
+    #    잡았더니 17%가 읽혀서 부적합했는데, 그건 블러가 막대와 나란한
+    #    경우가 섞여 있었기 때문이다. 생성기는 모션을 **항상 x축으로**
+    #    걸고 코드 회전각도 알고 있으므로, 막대에 수직인 성분만 골라낼 수
+    #    있다: 1D는 |L*cos(회전각)|, 2D는 방향과 무관하게 L 전체.
+    #
+    #    수직 성분에 대한 한계는 재서 정했다. 코드 중앙행의 흑백 런 개수가
+    #    L을 키우면서 어디서 무너지는지 본 것이다(14종, module 3~8):
+    #      Code128 1.72배 / Code39 2.00 / PDF417 1.80 / EAN13 2.00 /
+    #      EAN8 2.00 / UPC-A 2.00 / QR 2.00
+    #    즉 **수직 성분이 모듈의 2배**에서 막대 구분이 사라진다. 그 아래
+    #    1.5배부터는 진폭이 크게 깎이므로 경계로 둔다.
+    rot = float(cphys.get("rot", 0.0))
+    is2d = bool(cphys.get("is2d", False))
+    motion_eff = motion if is2d else abs(motion * math.cos(math.radians(rot)))
+    if motion_eff > 2.0 * m:
         mark(2, "x-motion")
-    elif motion > 2.2 * m:
+    elif motion_eff > 1.5 * m:
         mark(1, "b-motion")
 
     # 6) 물리적 결손 — 2D 모서리 결손이 30%에 가까우면 ECC 한계를 넘는다.
@@ -1046,6 +1060,8 @@ def build_one(index, cfg):
 
     # 판독 가능성 분류 — 프레임 열화까지 정해진 뒤에야 판정할 수 있다
     for c in codes:
+        c["phys"]["rot"] = float(c.get("rot", 0.0))
+        c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
         c["bucket"] = b
         c["tags"] = c["tags"] + ["dec-" + b] + reasons
@@ -1280,6 +1296,8 @@ def build_sweep(index, combo, cfg):
              "shadow": float(p["shadow"]), "glare": float(p["glare"]),
              "curve": float(p["curve"])}
     for c in codes:
+        c["phys"]["rot"] = float(c.get("rot", 0.0))
+        c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
         c["bucket"] = b
         c["tags"] = c["tags"] + ["dec-" + b] + reasons

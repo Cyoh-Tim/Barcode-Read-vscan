@@ -469,6 +469,41 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
     }
 }
 
+bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int minSpread) {
+    const int W = src.width, H = src.height;
+    if (W < 32 || H < 32) return false;
+    GrayImage bg;
+    boxBlur(src, radius, bg);
+
+    // 배경이 이미 평평하면 할 일이 없다. 상하위 2% 백분위수로 본다 —
+    // 최소/최대는 먼지 한 점이 정한다.
+    int hist[256] = {0};
+    for (size_t i = 0; i < bg.pixels.size(); i += 7) ++hist[bg.pixels[i]];
+    long total = 0;
+    for (int v : hist) total += v;
+    if (total <= 0) return false;
+    const long cut = total / 50;
+    int lo = 0, hi = 255;
+    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
+    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
+    if (hi - lo < minSpread) return false;
+
+    const int stride = src.stride > 0 ? src.stride : W;
+    out.width = W;
+    out.height = H;
+    out.pixels.resize(static_cast<size_t>(W) * H);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
+        const uint8_t* __restrict b = bg.pixels.data() + static_cast<size_t>(y) * W;
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) {
+            const int d = b[x] < 1 ? 1 : b[x];
+            o[x] = static_cast<uint8_t>(std::min(255, 128 * static_cast<int>(in[x]) / d));
+        }
+    }
+    return true;
+}
+
 bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
     const int W = src.width, H = src.height;
     if (W < 16 || H < 4 || pct <= 0 || pct >= 50) return false;

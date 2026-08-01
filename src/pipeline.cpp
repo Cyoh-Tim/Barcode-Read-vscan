@@ -338,6 +338,30 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
     }
 
+    // [조명 평탄화 구제] 그림자가 코드를 가로지르면 한 프레임 안에서
+    // 밝기가 두 배 넘게 차이 나고, 그러면 에너지 로케이터가 어두운 쪽을
+    // 코드로 안 본다 — 실측(Code128 module 8, 그림자 0.2/0.3): 972px
+    // 코드에서 상자가 왼쪽 절반(465px)만 잡혔다. 그 절반만으로는 아래의
+    // 어떤 ROI 구제도 못 읽는다. 그래서 **영역 구제보다 먼저** 편다.
+    //
+    // 큰 반경으로 뭉갠 판본을 배경으로 보고 나누면 배경이 평평해지고
+    // 막대 구조만 남는다. 실측: 그림자 0.2~0.5 네 단이 전부 평탄화 뒤
+    // 평범한 풀프레임 디코드로 열린다.
+    //
+    // 배경이 이미 평평하면 flattenIllumination()이 false를 돌려주므로
+    // (뭉갠 판본의 상하위 2% 차이가 40 미만) 그림자 없는 프레임에서는
+    // 뭉개기 한 번 값만 든다. [[vscan-lite-flatten-illumination]]
+    if (!budgetExceeded()) {
+        GrayImage flat;
+        if (flattenIllumination(view, 32, flat)) {
+            PipelineConfig ffCfg = cfg_;
+            ffCfg.zbarAsRescue = false;
+            Pipeline ff(ffCfg);
+            auto ffHits = ff.processViewCore(GrayView(flat));
+            if ((int)ffHits.size() >= std::max(1, cfg_.minExpectedCodes)) return ffHits;
+        }
+    }
+
     // [DPM/점각인 구제] processViewCore()가 풀옵션으로도 빈손이면,
     // DPM(레이저 점각인) 코드일 가능성을 본다. 실물 비교 대상 리더기 대조
     // 검증까지 완료된 구제책 — §6.4 대화 참고. 위치 탐색이 필요
@@ -1753,6 +1777,40 @@ bool isThinSlice(const BBox& a, const BBox& b) {
            sliver(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
 }
 
+// 같은 코드를 **두 줄로 스쳐 지나간** 스캔 밴드 한 쌍인가.
+//
+// isThinSlice()는 "한쪽만 얇을 때"를 잡는다. 그런데 둘 다 얇게 나오는
+// 경우가 있다 — 실측(코퍼스 씨드 101, 90도 회전 EAN13, 모션 있음):
+//   "2711660915686" (593,398)-(597,883)  두께 4
+//   "2711660915686" (340,407)-(343,892)  두께 3
+// 정답 상자는 x 334~604이므로 둘 다 코드 **안**이다. 두께비가 1에 가까워
+// isThinSlice에 안 걸리고, 간격 250px이 결합 폭 257의 97%라 밴드 규칙도
+// 못 넘는다.
+//
+// 판정: 둘 다 "두께가 길이의 3% 이하"인 실오라기이고, 긴 축이 90% 이상
+// 겹치고, 간격이 긴 축 길이를 넘지 않으면 같은 심볼의 두 스캔이다.
+// 마지막 조건이 물리적 상한이다 — 한 코드 안의 두 스캔선은 코드 높이보다
+// 멀 수 없고, 1D 코드는 대개 길이가 높이보다 크다.
+//
+// 같은 텍스트일 때만 쓴다. 내용까지 같은 별개 라벨 2장이 이 조건에 걸릴
+// 수는 있는데, 그건 isStackedBand가 이미 안고 있는 것과 같은 대가다.
+// [[vscan-lite-dedup-twin-band]]
+bool isTwinBand(const BBox& a, const BBox& b) {
+    auto twin = [](double aLo, double aHi, double bLo, double bHi,   // 긴 축
+                   double cLo, double cHi, double dLo, double dHi) { // 두께 축
+        const double la = aHi - aLo, lb = bHi - bLo;
+        const double ta = cHi - cLo, tb = dHi - dLo;
+        if (la <= 0 || lb <= 0) return false;
+        if (ta > 0.03 * la || tb > 0.03 * lb) return false;          // 실오라기가 아니다
+        const double ov = std::min(aHi, bHi) - std::max(aLo, bLo);
+        if (ov < 0.90 * std::min(la, lb)) return false;              // 긴 축이 안 맞는다
+        const double gap = std::max(cLo, dLo) - std::min(cHi, dHi);
+        return gap <= std::min(la, lb);
+    };
+    return twin(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
+           twin(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
+}
+
 bool hasDegenerateQuad(const DecodedSymbol& s) {
     for (int i = 0; i < 4; ++i)
         for (int j = i + 1; j < 4; ++j)
@@ -1969,7 +2027,8 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                 hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol) ||
                 (partial && onSameBarcodeBand(candBox, keptBox)) ||
                 (sameText && isStackedBand(candBox, keptBox)) ||
-                (sameText && isThinSlice(candBox, keptBox))) {
+                (sameText && isThinSlice(candBox, keptBox)) ||
+                (sameText && isTwinBand(candBox, keptBox))) {
                 isDup = true;
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
