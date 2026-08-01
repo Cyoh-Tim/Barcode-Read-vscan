@@ -375,6 +375,19 @@ struct PipelineConfig {
     int lowContrastRange = 100;
 
     /*
+     * [흑백 반전 ROI 구제] 영역 몇 개까지 반전 판본을 시도할지.
+     *
+     * zxing의 TryInvert는 1D와 PDF417에 대해서는 아무 일도 하지 않는다 —
+     * MultiFormatReader가 반전 비트맵에서 supportsInversion이 아닌 리더를
+     * 건너뛰는데, true인 건 QR/DataMatrix/Aztec 셋뿐이다. 그래서 우리가
+     * 뒤집어서 넣는다(실측: 14종 중 2종만 읽히던 것이 13종으로).
+     *
+     * 다른 모든 시도가 실패한 뒤에만 도는 자리지만, 영역마다 디코드가
+     * 한 번씩 더 붙으므로 상한을 둔다.
+     */
+    int invertRescueMaxRegions = 2;
+
+    /*
      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
      *
      * 심볼로지 마스크를 좁히면 zxing의 포맷별 탐색 비용이 그만큼 준다

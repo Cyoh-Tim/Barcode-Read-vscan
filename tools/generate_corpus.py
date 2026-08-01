@@ -980,7 +980,7 @@ def build_one(index, cfg):
 SWEEP_BASE = {
     "sym": "QR", "ec": "M", "count": 1, "module": 4.0, "angle": 0.0,
     "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
-    "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0,
+    "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0, "invert": 0.0,
 }
 SWEEP_HELP = {
     "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
@@ -990,6 +990,8 @@ SWEEP_HELP = {
     "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
     "shadow": "그림자 밝기 배율 (1.0=없음)",
+    "invert": "흑백 반전 (0=없음, 1=반전). 반전 전에 흰 여백을 덧대므로 "
+              "반전 후 어두운 정지대가 남는다 — '정지대 파괴'가 아닌 순수 반전 케이스",
 }
 _SWEEP_PAYLOAD = {
     "QR": "VSCAN-SWEEP-0001", "DATAMATRIX": "VSCAN-SWEEP-01", "PDF417": "VSCAN-SWEEP-01",
@@ -1117,6 +1119,14 @@ def build_sweep(index, combo, cfg):
                                 (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
                                  -sym.height * v * 0.10, v * 0.0011, v * 0.00035),
                                 resample=Image.BICUBIC, fillcolor=255)
+        if float(p["invert"]) >= 0.5:
+            # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
+            # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
+            # "정지대 파괴" 케이스가 된다.
+            a2 = np.array(sym).astype(np.uint8)
+            pad = max(8, int(min(a2.shape) * 0.06))
+            a2 = np.pad(a2, pad, mode="constant", constant_values=255)
+            sym = Image.fromarray(255 - a2, mode="L")
         if p["angle"]:
             sym = sym.rotate(float(p["angle"]), expand=True, fillcolor=255,
                              resample=Image.BICUBIC)

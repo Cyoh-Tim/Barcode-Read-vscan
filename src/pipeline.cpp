@@ -542,7 +542,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         if (!budgetExceeded()) {
             std::vector<PipelineResult> stretched;
             const int srcStride = image.stride > 0 ? image.stride : image.width;
+            int rectIdx = -1;
             for (const Rect& rc : rects) {
+                ++rectIdx;
                 if (budgetExceeded()) break;
                 const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
                 if (rw < 16 || rh < 16) continue;
@@ -625,6 +627,40 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                 for (auto& pt : r.symbol.position) { pt.first += tx; pt.second += ty; }
                     }
                     }
+                }
+                if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
+                    // [흑백 반전 판본] zxing의 TryInvert는 **1D와 PDF417에
+                    // 대해서는 아무 일도 하지 않는다.** 소스를 보면
+                    // MultiFormatReader가 반전된 비트맵에서 리더를 이렇게
+                    // 거른다:
+                    //
+                    //   if (image.inverted() && !reader->supportsInversion) continue;
+                    //
+                    // 그런데 supportsInversion=true로 만들어지는 건 QR /
+                    // DataMatrix / Aztec 셋뿐이다. 게다가 BinaryBitmap::
+                    // invert()는 2D가 쓰는 BitMatrix만 뒤집고, 1D가 쓰는
+                    // getPatternRow()는 휘도에서 직접 계산하므로 애초에
+                    // 반전이 반영되지도 않는다. 즉 zxing 쪽 설정으로는
+                    // 원리적으로 열리지 않는다.
+                    //
+                    // 실측(module 8, 반전 축): QR/DataMatrix만 읽히고
+                    // **나머지 12종이 전부 0/1**이었다(그러면서 120~190ms를
+                    // 썼다 — 폴백 체인을 끝까지 돌기 때문).
+                    //
+                    // 그래서 우리가 뒤집어서 넣는다. 극성을 미리 재보려
+                    // 했지만(정지대 링의 밝기 대 내부 밝기) 심볼로지마다
+                    // 값이 뒤죽박죽이라 신뢰할 수 없었다 — ITF 반전본은
+                    // 링과 내부의 차이가 0이었다. 판정 대신 사다리에 한
+                    // 칸 더 두는 편이 오판 위험이 없다. 다른 모든 시도가
+                    // 실패한 뒤에만 도는 자리다.
+                    // [[vscan-lite-roi-invert]]
+                    GrayImage flipped;
+                    flipped.width = rw;
+                    flipped.height = rh;
+                    flipped.pixels.resize(static_cast<size_t>(rw) * rh);
+                    for (size_t k = 0; k < flipped.pixels.size(); ++k)
+                        flipped.pixels[k] = static_cast<uint8_t>(255 - crop.pixels[k]);
+                    sHits = roiPipe.processViewCore(GrayView(flipped));
                 }
                 for (auto& r : sHits)
                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
