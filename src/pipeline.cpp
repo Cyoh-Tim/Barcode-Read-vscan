@@ -729,6 +729,27 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                             sHits = roiPipe.processViewCore(GrayView(tsm));
                             if (sHits.empty())
                                 sHits = roiPipe.processViewCore(GrayView(tboost));
+                            // [세로 평균 + 국소 이진화] 여기까지 왔으면
+                            // 전역 스트레칭으로는 안 되는 대비다. 1D는 세로로
+                            // 같은 값이 반복되므로 세로로만 평균하면 잡음만
+                            // 줄고 막대 경계는 그대로다 — 그 위에서 국소
+                            // 이진화를 하면 임계가 흔들리지 않는다.
+                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패):
+                            // Code39는 여백 12px 상자에서 세로평균+평균임계로,
+                            // DataBar는 여백 0 상자에서 세로평균+중간값임계로
+                            // 열린다. 세로평균 반경 0에서는 둘 다 안 열린다.
+                            if (sHits.empty() && !budgetExceeded()) {
+                                GrayImage vb;
+                                verticalBlur(GrayView(tcrop), 4, vb);
+                                GrayImage vst;
+                                if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
+                                GrayImage vbin;
+                                for (bool mid : {false, true}) {
+                                    if (!sHits.empty() || budgetExceeded()) break;
+                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, mid)) continue;
+                                    sHits = roiPipe.processViewCore(GrayView(vbin));
+                                }
+                            }
                             // 좌표는 이 크롭 기준이므로 원래 크롭 기준으로 옮긴다.
                             for (auto& r : sHits)
                                 for (auto& pt : r.symbol.position) {

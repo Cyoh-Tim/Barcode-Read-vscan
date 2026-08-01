@@ -66,6 +66,23 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage& 
 void boxBlur3x3(const GrayView& src, GrayImage& out);
 
 /*
+ * [세로 이동평균] 열마다 위아래 radius 픽셀을 평균한다. 가로 방향은
+ * 손대지 않는다.
+ *
+ * 1D 바코드는 정보가 **가로에만** 있고 세로로는 같은 값이 반복된다.
+ * 그래서 세로로만 평균하면 잡음 시그마가 sqrt(2r+1)배 줄어드는데 막대
+ * 경계는 그대로다 — 등방 블러처럼 얇은 막대를 뭉개지 않는다.
+ *
+ * 저대비 구제에서 필요했다. 실측(Code39 module 8, 대비 0.05): 여백을
+ * 걷은 크롭에 스트레칭 + 국소 이진화를 걸어도 안 읽히는데, 그 앞에
+ * 세로 평균(반경 2 이상)을 한 번 넣으면 읽힌다. 반경 0에서는 안 된다.
+ *
+ * 기울어진 코드에는 맞지 않는다(막대 방향이 세로가 아니다). 사다리
+ * 끝의 추가 판본으로만 쓸 것.
+ */
+void verticalBlur(const GrayView& src, int radius, GrayImage& out);
+
+/*
  * [프레임 노이즈 추정 — 전처리를 고르기 위한 사전 측정]
  *
  * 왜 필요한가. 지금 파이프라인은 어떤 프레임이든 풀프레임 두 번(coarse +

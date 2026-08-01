@@ -411,6 +411,29 @@ int estimateLocalRange(const GrayView& src, int rowStep, int colStep) {
     return 0;
 }
 
+void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
+    const int W = src.width, H = src.height;
+    out.width = W;
+    out.height = H;
+    out.pixels.assign(static_cast<size_t>(W) * H, 0);
+    if (W <= 0 || H <= 0) return;
+    const int stride = src.stride > 0 ? src.stride : W;
+    const int r = std::max(1, std::min(radius, H / 2));
+    const int n = 2 * r + 1;
+    auto at = [&](int y, int x) -> int {
+        return src.pixels[static_cast<size_t>(std::min(H - 1, std::max(0, y))) * stride + x];
+    };
+    for (int x = 0; x < W; ++x) {
+        int acc = 0;
+        for (int y = -r; y <= r; ++y) acc += at(y, x);
+        for (int y = 0; y < H; ++y) {
+            out.pixels[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(acc / n);
+            acc -= at(y - r, x);
+            acc += at(y + r + 1, x);
+        }
+    }
+}
+
 bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     const int W = src.width, H = src.height;
     if (W <= 0 || H <= 0) return false;
