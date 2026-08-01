@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include "vscan_internal/locate.hpp"
 #include "vscan_internal/deskew_persp.hpp"
+#include "vscan_internal/pitch_equalize.hpp"
 #include "vscan_internal/locate_qr.hpp"
 #ifdef VSCAN_HAVE_ZBAR
 #include "vscan_internal/decoder_zbar.hpp"
@@ -649,6 +650,25 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                 rectifyMapBack(rmap, pt.first, pt.second, sx, sy);
                                 pt.first = static_cast<int>(sx);
                                 pt.second = static_cast<int>(sy);
+                            }
+                    }
+                }
+                if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                    // [곡면(원통) 보정] 원통 라벨은 상자가 직사각형 그대로라
+                    // 호모그래피로는 못 편다 — 가로 좌표만 비선형으로 밀린다.
+                    // 국소 바 피치를 균등하게 다시 샘플링한다.
+                    // [[vscan-lite-pitch-equalize]]
+                    GrayImage eq;
+                    PitchMap pmap;
+                    if (pitchEqualize(GrayView(crop), eq, &pmap)) {
+                        sHits = roiPipe.processViewCore(GrayView(eq));
+                        // 가로만 바뀌었으므로 x는 역사상, y는 여백만 뺀다.
+                        for (auto& r : sHits)
+                            for (auto& pt : r.symbol.position) {
+                                const int i = pt.first - pmap.marginX;
+                                if (i >= 0 && i < (int)pmap.srcX.size())
+                                    pt.first = static_cast<int>(pmap.srcX[i]);
+                                pt.second -= pmap.marginY;
                             }
                     }
                 }
