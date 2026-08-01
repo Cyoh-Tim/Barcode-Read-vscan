@@ -428,9 +428,10 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     // 자체가 실패했다(22ms 성공 -> 190ms 실패). 되돌린 다음에는 어차피
     // tightenToContent()가 다시 좁히므로, 회전 쪽은 넉넉한 상자가 맞다.
     // 그래서 상자를 두 벌 만든다.
-    std::vector<Rect> rects, rotRects;
+    std::vector<Rect> rects, rotRects, tightRects;
     rects.reserve(regions.size());
     rotRects.reserve(regions.size());
+    tightRects.reserve(regions.size());
     for (auto& r : regions) {
         const int cw = r.bbox.x1 - r.bbox.x0, ch = r.bbox.y1 - r.bbox.y0;
         if (cw < 16 || ch < 16) continue;
@@ -501,6 +502,34 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         Rect rc{std::max(0, r.bbox.x0 - padX), std::max(0, r.bbox.y0 - padY),
                 std::min(image.width, r.bbox.x1 + padX), std::min(image.height, r.bbox.y1 + padY)};
         rects.push_back(rc);
+
+        // [저대비 전용 — 여백을 거의 안 준 판본]
+        // 위 여백은 "정지대를 확보한다"가 목적이라 넉넉한데, **저대비
+        // 프레임에서는 그 여백이 곧 실패 원인이 된다.**
+        //
+        // 실측(module 8, 대비 0.10, 정밀화된 상자 1021x385): 지금 여백
+        // (padX=122)으로는 UPCE/ITF/Codabar/Code93/Code39/DataBar가 전부
+        // 실패하고, 같은 상자를 여백 6~24px로 자르면 **여섯 종이 다**
+        // 스트레칭 + 3x3 블러만으로 읽힌다.
+        //
+        // 원인을 히스토그램으로 짐작했다가 틀렸다. "종이(220)가 화소의
+        // 절반을 넘어 스트레칭 범위를 가져간다"는 가설이었는데, 두 가지로
+        // 기각됐다: (1) 꼬리컷을 0.5%에서 25%까지 키워도 한 종도 안 열린다,
+        // (2) 넓은 크롭과 좁은 크롭의 LUT가 사실상 같고(lo/hi = 109/221 대
+        // 108/220) 서로 바꿔 끼워도 결과가 안 바뀐다 — 좁은 크롭은 어느
+        // LUT로도 읽히고 넓은 크롭은 어느 LUT로도 안 읽힌다.
+        // 남는 설명은 **크롭 크기 자체**다(1144x497 대 1034x409). 코드가
+        // 이미지에서 차지하는 비율이 zxing의 스캔라인 표본과 minLineCount=4
+        // 합의에 걸리는 것으로 보인다 — 확인은 못 했고, 고치는 데 필요하지도
+        // 않다. 재현되는 사실은 "여백을 걷어내면 읽힌다"이다.
+        //
+        // 정지대는 정밀화된 상자 자신이 이미 조금 물고 있다(프로파일
+        // 임계가 코드 끝보다 20~25px 바깥에서 끊긴다). 그래서 쓰는 쪽에서
+        // 그 여유에 얹는 정도만 준다. 다른 시도가 다 실패한 뒤의 추가
+        // 판본이라 검출을 깎을 여지가 없다. 여기에는 **여백 없는** 상자를
+        // 담는다 — 얼마를 얹을지는 쓰는 자리에서 정한다.
+        // [[vscan-lite-lowcontrast-tight-crop]]
+        tightRects.push_back(r.bbox);
     }
     if (rects.empty()) return {};
 
@@ -629,6 +658,62 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                 for (auto& pt : r.symbol.position) { pt.first += tx; pt.second += ty; }
                     }
                     }
+
+                    // [여백을 걷어낸 판본으로 한 번 더] 위 시도들이 쓴 크롭은
+                    // 정지대용 여백이 붙어 있는데, 저대비에서는 그게 실패
+                    // 원인이 된다(근거와 기각된 가설은 상자 만드는 자리 주석).
+                    // 이 자리는 stretchContrast가 true를 돌려준 경우 —
+                    // 즉 저대비가 확인된 프레임 — 에서만 도달한다.
+                    // [[vscan-lite-lowcontrast-tight-crop]]
+                    // 두 벌을 본다. (1) 정밀화된 상자 + 12px, (2) 그 상자를
+                    // 더 높은 에너지 임계로 한 번 더 좁힌 것 + 0px.
+                    // (2)가 따로 필요한 이유는 **납작한 코드**다 — PDF417은
+                    // 코드가 72px 높이인데 상자가 121px이라, 12px을 더 얹으면
+                    // 종이가 크롭의 절반이 된다. 실측(PDF417 대비 0.10):
+                    // (1)로는 안 열리고 (2)로 열린다. 반대로 세로가 넉넉한
+                    // 1D 여섯 종은 (1)에서 다 열리므로 (2)는 그때 안 돈다.
+                    if (sHits.empty() && !budgetExceeded() &&
+                        rectIdx < static_cast<int>(tightRects.size())) {
+                        const Rect base = tightRects[rectIdx];
+                        for (int variant = 0; variant < 2 && sHits.empty(); ++variant) {
+                            if (variant && budgetExceeded()) break;
+                            Rect b = base;
+                            int pad = 12;
+                            if (variant) {
+                                const Rect again = refineRegionBox(image, base, 0.60f, 8);
+                                if (again.x1 - again.x0 < 16 || again.y1 - again.y0 < 16) break;
+                                if (again.x1 - again.x0 >= b.x1 - b.x0 &&
+                                    again.y1 - again.y0 >= b.y1 - b.y0) break;  // 안 좁아졌으면 같은 그림
+                                b = again;
+                                pad = 0;
+                            }
+                            const Rect tr{std::max(0, b.x0 - pad), std::max(0, b.y0 - pad),
+                                          std::min(image.width, b.x1 + pad),
+                                          std::min(image.height, b.y1 + pad)};
+                            const int tw = tr.x1 - tr.x0, th = tr.y1 - tr.y0;
+                            if (tw < 16 || th < 16 || (tw >= rw && th >= rh)) continue;
+                            GrayImage tcrop;
+                            tcrop.width = tw;
+                            tcrop.height = th;
+                            tcrop.pixels.resize(static_cast<size_t>(tw) * th);
+                            for (int r = 0; r < th; ++r)
+                                std::memcpy(tcrop.pixels.data() + static_cast<size_t>(r) * tw,
+                                            image.pixels + static_cast<size_t>(tr.y0 + r) * srcStride + tr.x0, tw);
+                            GrayImage tboost;
+                            if (!stretchContrast(GrayView(tcrop), tboost)) continue;
+                            GrayImage tsm;
+                            boxBlur3x3(GrayView(tboost), tsm);
+                            sHits = roiPipe.processViewCore(GrayView(tsm));
+                            if (sHits.empty())
+                                sHits = roiPipe.processViewCore(GrayView(tboost));
+                            // 좌표는 이 크롭 기준이므로 원래 크롭 기준으로 옮긴다.
+                            for (auto& r : sHits)
+                                for (auto& pt : r.symbol.position) {
+                                    pt.first += tr.x0 - rc.x0;
+                                    pt.second += tr.y0 - rc.y0;
+                                }
+                        }
+                    }
                 }
                 if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
                     // [원근 보정] 회전은 축 하나면 되지만(§3.24) 원근은
@@ -668,9 +753,13 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     // 프레임에서만 돌지만, 그런 프레임이 곧 p95다 —
                     // 300장 코퍼스 교차 측정: 평균 128.9 -> 135.7ms(+5%),
                     // p95 366 -> 407ms(+11%), 검출 72.4 -> 72.7%.
-                    // "지도가 안 휘었으면 2차를 건너뛴다"는 문지기를
-                    // 절대/상대 두 가지로 넣어봤지만 둘 다 시간은 거의
-                    // 못 줄이고 검출만 깎았다(코드 1개). 그냥 둘 다 돈다.
+                    // 값을 깎아보려 한 것들은 전부 실패했다:
+                    //  - "지도가 안 휘었으면 2차를 건너뛴다"(절대 픽셀 / 코드
+                    //    폭 대비 두 가지): 시간은 거의 그대로고 검출만 -1
+                    //  - 2차를 첫 영역으로 제한: 시간 변화 없음(단일 코드
+                    //    프레임이 대부분이라 애초에 첫 영역만 돈다)
+                    //  - 2차 디코드에서 회전/반전 끄기: 평균 -2.7%, 검출 -1
+                    // 그냥 둘 다 돈다. 이 비용은 CI 기준선에 반영돼 있다.
                     // [[vscan-lite-pitch-equalize]]
                     for (int rows : {1, 9}) {
                         if (rows != 1 && budgetExceeded()) break;
