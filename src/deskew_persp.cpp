@@ -23,7 +23,15 @@ struct Pt { double x, y; };
  * 그 소수 점들에 끌려간다. 잔차 상위 25%를 버리고 다시 맞추기를
  * 네 번 반복한다.
  */
-bool fitLineRobust(std::vector<Pt> pts, Line& out) {
+// outX/outY: "바깥" 방향 단위벡터. 주면 **한쪽으로만** 절단한다.
+//
+// 왜 필요한가. 2D 행렬코드의 가장자리는 솔리드 선이 아니다 — 바깥 모듈이
+// 흰색인 행에서는 "가장 왼쪽 어두운 픽셀"이 한두 모듈 안쪽으로 튄다.
+// 그 이탈은 **항상 안쪽 방향**이라 대칭 절단(|잔차| 상위 25% 제거)으로는
+// 못 거른다. 안쪽으로 튄 점들이 선을 안쪽으로 끌고 가면서 다른 변과의
+// 교점이 발산한다 — 실측(QR persp 0.6, 크롭 434x434): 모서리가
+// (-538,1285)로 나와 사각형 추정이 실패했다.
+bool fitLineRobust(std::vector<Pt> pts, Line& out, double outX = 0.0, double outY = 0.0) {
     if (pts.size() < 8) return false;
     for (int iter = 0; iter < 5; ++iter) {
         double mx = 0, my = 0;
@@ -52,14 +60,21 @@ bool fitLineRobust(std::vector<Pt> pts, Line& out) {
         out.a = nx; out.b = ny; out.c = -(nx * mx + ny * my);
 
         if (iter == 4 || pts.size() < 16) break;
-        // 잔차 상위 25% 절단
+        const bool oneSided = (outX != 0.0 || outY != 0.0);
+        // 법선을 안쪽이 양수가 되도록 맞춘다.
+        double sgn = 1.0;
+        if (oneSided && (nx * outX + ny * outY) > 0.0) sgn = -1.0;
         std::vector<double> d;
         d.reserve(pts.size());
-        for (const Pt& p : pts) d.push_back(std::fabs(nx * p.x + ny * p.y + out.c));
+        for (const Pt& p : pts) {
+            const double r = nx * p.x + ny * p.y + out.c;
+            d.push_back(oneSided ? sgn * r : std::fabs(r));
+        }
         std::vector<double> sorted = d;
-        const size_t keep = sorted.size() * 3 / 4;
+        // 대칭이면 |잔차| 하위 75%, 한쪽이면 부호 잔차 하위 60%를 남긴다.
+        const size_t keep = oneSided ? sorted.size() * 3 / 5 : sorted.size() * 3 / 4;
         std::nth_element(sorted.begin(), sorted.begin() + keep, sorted.end());
-        const double thr = std::max(sorted[keep], 1e-6);
+        const double thr = sorted[keep];
         std::vector<Pt> next;
         next.reserve(keep + 1);
         for (size_t i = 0; i < pts.size(); ++i)
@@ -133,7 +148,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
     Line ll, lr;
     const bool flat = (cy1 - cy0) < (cx1 - cx0) * 2 / 5;
     if (!flat) {
-        if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
+        if (!fitLineRobust(left, ll, -1.0, 0.0) || !fitLineRobust(right, lr, 1.0, 0.0)) return false;
     } else {
         // 납작한 코드에서는 좌/우 변 맞춤을 쓰지 않는다. 변 길이가 너무
         // 짧아서다 — 실측(PDF417 module 8): 코드가 949x49라 좌/우 변이
@@ -169,7 +184,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
     }
 
     Line lt, lb;
-    if (!fitLineRobust(top, lt) || !fitLineRobust(bot, lb)) return false;
+    if (!fitLineRobust(top, lt, 0.0, -1.0) || !fitLineRobust(bot, lb, 0.0, 1.0)) return false;
 
     Pt TL, TR, BR, BL;
     if (!flat) {
