@@ -765,10 +765,30 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                 for (int r = 0; r < bh; ++r)
                                     std::memcpy(z.pixels.data() + static_cast<size_t>(r) * bw,
                                                 image.pixels + static_cast<size_t>(b.y0 + r) * srcStride + b.x0, bw);
-                                GrayImage vb;
-                                verticalBlur(GrayView(z), 1, vb);
+                                // 행 단위 임계는 **막대가 세로일 때만** 맞는
+                                // 가정이다. 정사각형에 가까운 상자(2D 또는
+                                // 기울어진 1D)에는 블록 임계를 쓴다 — 여백을
+                                // 걷은 크롭이라는 점이 여기서도 그대로 효과를
+                                // 낸다. 실측(40종 18번, QR 대비 0.08): 영역
+                                // 상자 그대로(870x870)는 어떤 조합으로도 안
+                                // 열리는데, 여백을 걷은 512x512에서는 블록 48
+                                // 평균임계로 열린다. 앞 단계가 이미 블록 24로
+                                // 두 규칙을 다 돌았으므로 여기서는 더 큰 블록이
+                                // 맞다 — 큰 2D 코드는 24px 블록이 한 모듈보다
+                                // 작아 국소 통계가 흔들린다.
+                                const bool wide = std::max(bw, bh) >= 3 * std::min(bw, bh) / 2;
                                 GrayImage vbin;
-                                if (rowBinarize(GrayView(vb), vbin)) {
+                                bool ok;
+                                if (wide) {
+                                    GrayImage vb;
+                                    verticalBlur(GrayView(z), 1, vb);
+                                    ok = rowBinarize(GrayView(vb), vbin);
+                                } else {
+                                    GrayImage zs;
+                                    if (!stretchContrast(GrayView(z), zs)) zs = z;
+                                    ok = localAdaptiveBinarize(GrayView(zs), vbin, false, 48);
+                                }
+                                if (ok) {
                                     sHits = roiPipe.processViewCore(GrayView(vbin));
                                     for (auto& r : sHits)
                                         for (auto& pt : r.symbol.position) {

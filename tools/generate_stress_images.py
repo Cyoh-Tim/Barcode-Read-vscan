@@ -19,6 +19,7 @@ generate_stress_images.py — 정확도 검증용 악조건 테스트 이미지 
 import argparse
 import os
 
+import math
 import numpy as np
 import io
 import qrcode
@@ -30,6 +31,34 @@ W, H = 2048, 1536
 
 
 # ---------------------------------------------------------------- helpers
+def _persp_expand(img, coeffs, max_grow=3.0):
+    """원근 변환을 **캔버스를 넓혀서** 적용한다 (rotate(expand=True)와 같은 취지).
+
+    coeffs는 PIL 관례대로 "목적지 -> 원본" 사상이다. 원본 네 모서리가 가는
+    목적지 좌표의 바운딩 박스를 새 캔버스로 삼고, 그만큼 평행이동을 합성한다.
+    강한 왜곡에서 크기가 폭발하면 균일 축소를 함께 합성해서 내용을 전부 담는다.
+    """
+    w, h = img.size
+    M = np.array([[coeffs[0], coeffs[1], coeffs[2]],
+                  [coeffs[3], coeffs[4], coeffs[5]],
+                  [coeffs[6], coeffs[7], 1.0]], dtype=np.float64)
+    F = np.linalg.inv(M)                       # 원본 -> 목적지
+    pts = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], dtype=np.float64).T
+    q = F @ pts
+    q = q[:2] / q[2]
+    x0, y0 = q[0].min(), q[1].min()
+    nw, nh = q[0].max() - x0, q[1].max() - y0
+    fit = min(1.0, (w * max_grow) / max(1.0, nw), (h * max_grow) / max(1.0, nh))
+    nw = max(8, int(math.ceil(nw * fit)))
+    nh = max(8, int(math.ceil(nh * fit)))
+    S = np.array([[1 / fit, 0, 0], [0, 1 / fit, 0], [0, 0, 1]], dtype=np.float64)
+    T = np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], dtype=np.float64)
+    M2 = M @ T @ S
+    M2 = M2 / M2[2, 2]
+    return img.transform((nw, nh), Image.PERSPECTIVE, tuple(M2.ravel()[:8]),
+                         resample=Image.BICUBIC, fillcolor=255)
+
+
 def bg(rng, base_level=195):
     """조명 그라디언트 + 약한 센서 노이즈가 있는 배경(골판지/라벨 면 가정)."""
     a = np.full((H, W), float(base_level), dtype=np.float32)
@@ -250,8 +279,14 @@ def gen(outdir, seed):
         ((1, 0.12, -40, 0.04, 1, -20, 0.00012, 0.00004), "25_perspective_mild_1"),
         ((1, 0.34, -110, 0.13, 1, -60, 0.00042, 0.00013), "26_perspective_strong_1"),
     ]:
-        q = qr(f"{P}-PERSP", 460).transform(
-            (460, 460), Image.PERSPECTIVE, coeffs, resample=Image.BICUBIC, fillcolor=255)
+        # [캔버스를 넓혀서 변환한다] PIL의 transform(size, PERSPECTIVE, ...)은
+        # 출력 크기를 그대로 두므로 전단으로 밀려난 부분이 잘려 나간다.
+        # 바코드에서 그건 "왜곡"이 아니라 **코드 일부가 없어지는 것**이라
+        # 어떤 리더로도 못 읽는다 — 실측(26번, 460x460 고정 출력): 원본
+        # 오른쪽 위 모서리가 목적지 x=716으로 가서 캔버스(460) 밖이었다.
+        # 즉 QR의 오른쪽 열이 통째로 사라진 이미지를 "읽어야 정상"으로
+        # 세고 있었다. 코퍼스 생성기는 같은 결함을 이미 고쳤다(§3.29).
+        q = _persp_expand(qr(f"{P}-PERSP", 460), coeffs)
         c = bg(rng); c.paste(q, (790, 530))
         save(soft(c), outdir, name)
 
