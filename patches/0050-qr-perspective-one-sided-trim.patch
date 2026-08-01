@@ -1,0 +1,123 @@
+From f463819ff18855c43b31af8ad67d9371de0f662d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 09:32:10 +0000
+Subject: [PATCH] =?UTF-8?q?QR=20=EC=9B=90=EA=B7=BC:=202D=20=EC=BD=94?=
+ =?UTF-8?q?=EB=93=9C=EC=9D=98=20=EA=B0=80=EC=9E=A5=EC=9E=90=EB=A6=AC=20?=
+ =?UTF-8?q?=EC=9D=B4=ED=83=88=EC=9D=80=20=ED=95=9C=EC=AA=BD=20=EB=B0=A9?=
+ =?UTF-8?q?=ED=96=A5=EC=9D=B4=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+QR 원근이 57.1%로 남아 있었다. 프로브부터 검증하고(파이프라인이 읽는
+persp 0.4/0.5를 넣어 편 결과가 읽히는지 확인) 실패 구간을 보니, persp 0.6
+에서 보정기가 거절하고 있었다 — 모서리가 434x434 크롭에서 (-538,1285)로
+발산했다.
+
+원인은 2D 행렬코드의 가장자리가 솔리드 선이 아니라는 것이다. 바깥 모듈이
+흰색인 행에서는 "가장 왼쪽 어두운 픽셀"이 한두 모듈 안쪽으로 튀는데,
+그 이탈이 **항상 안쪽 방향**이라 대칭 절단(|잔차| 상위 25% 제거)으로는
+못 거른다. 안쪽으로 튄 점들이 선을 끌고 가면 마주보는 변과 거의 평행해져
+교점이 발산한다. 1D는 좌/우 끝 막대가 항상 검정이라 이 문제가 약해서
+여태 안 드러났다.
+
+고친 것: 각 변에 "바깥 방향" 벡터를 주고, 법선을 안쪽이 양수가 되게 맞춘
+뒤 부호 잔차 하위 60%만 남긴다(대칭일 때는 종전대로 |잔차| 하위 75%).
+
+결과: QR 원근 57.1 -> 71.4%. 나머지 13종 원근과 곡면 축 전부 변화 없음.
+14종 x 8축 오디코딩 0 / 중복 2 유지, 코퍼스 72.4% / 오디코딩 0 / 중복 1,
+40종 38/38/38.
+
+남은 QR 실패는 persp 0.8 이상 — 코드 한쪽이 소실점에 가까워 모듈이
+뭉개지는 영역이라 사각형 하나로는 안 된다.
+
+PROJECT_NOTES §3.35
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md     |  2 +-
+ src/deskew_persp.cpp | 29 ++++++++++++++++++++++-------
+ 2 files changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 85d4d5d..00e2e01 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.34 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 — 창 크기 가설 기각** | 무엇부터 할지 정할 때 |
++| §3.14~3.35 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/src/deskew_persp.cpp b/src/deskew_persp.cpp
+index fc31c95..8a53d18 100644
+--- a/src/deskew_persp.cpp
++++ b/src/deskew_persp.cpp
+@@ -23,7 +23,15 @@ struct Pt { double x, y; };
+  * 그 소수 점들에 끌려간다. 잔차 상위 25%를 버리고 다시 맞추기를
+  * 네 번 반복한다.
+  */
+-bool fitLineRobust(std::vector<Pt> pts, Line& out) {
++// outX/outY: "바깥" 방향 단위벡터. 주면 **한쪽으로만** 절단한다.
++//
++// 왜 필요한가. 2D 행렬코드의 가장자리는 솔리드 선이 아니다 — 바깥 모듈이
++// 흰색인 행에서는 "가장 왼쪽 어두운 픽셀"이 한두 모듈 안쪽으로 튄다.
++// 그 이탈은 **항상 안쪽 방향**이라 대칭 절단(|잔차| 상위 25% 제거)으로는
++// 못 거른다. 안쪽으로 튄 점들이 선을 안쪽으로 끌고 가면서 다른 변과의
++// 교점이 발산한다 — 실측(QR persp 0.6, 크롭 434x434): 모서리가
++// (-538,1285)로 나와 사각형 추정이 실패했다.
++bool fitLineRobust(std::vector<Pt> pts, Line& out, double outX = 0.0, double outY = 0.0) {
+     if (pts.size() < 8) return false;
+     for (int iter = 0; iter < 5; ++iter) {
+         double mx = 0, my = 0;
+@@ -52,14 +60,21 @@ bool fitLineRobust(std::vector<Pt> pts, Line& out) {
+         out.a = nx; out.b = ny; out.c = -(nx * mx + ny * my);
+ 
+         if (iter == 4 || pts.size() < 16) break;
+-        // 잔차 상위 25% 절단
++        const bool oneSided = (outX != 0.0 || outY != 0.0);
++        // 법선을 안쪽이 양수가 되도록 맞춘다.
++        double sgn = 1.0;
++        if (oneSided && (nx * outX + ny * outY) > 0.0) sgn = -1.0;
+         std::vector<double> d;
+         d.reserve(pts.size());
+-        for (const Pt& p : pts) d.push_back(std::fabs(nx * p.x + ny * p.y + out.c));
++        for (const Pt& p : pts) {
++            const double r = nx * p.x + ny * p.y + out.c;
++            d.push_back(oneSided ? sgn * r : std::fabs(r));
++        }
+         std::vector<double> sorted = d;
+-        const size_t keep = sorted.size() * 3 / 4;
++        // 대칭이면 |잔차| 하위 75%, 한쪽이면 부호 잔차 하위 60%를 남긴다.
++        const size_t keep = oneSided ? sorted.size() * 3 / 5 : sorted.size() * 3 / 4;
+         std::nth_element(sorted.begin(), sorted.begin() + keep, sorted.end());
+-        const double thr = std::max(sorted[keep], 1e-6);
++        const double thr = sorted[keep];
+         std::vector<Pt> next;
+         next.reserve(keep + 1);
+         for (size_t i = 0; i < pts.size(); ++i)
+@@ -133,7 +148,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+     Line ll, lr;
+     const bool flat = (cy1 - cy0) < (cx1 - cx0) * 2 / 5;
+     if (!flat) {
+-        if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
++        if (!fitLineRobust(left, ll, -1.0, 0.0) || !fitLineRobust(right, lr, 1.0, 0.0)) return false;
+     } else {
+         // 납작한 코드에서는 좌/우 변 맞춤을 쓰지 않는다. 변 길이가 너무
+         // 짧아서다 — 실측(PDF417 module 8): 코드가 949x49라 좌/우 변이
+@@ -169,7 +184,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+     }
+ 
+     Line lt, lb;
+-    if (!fitLineRobust(top, lt) || !fitLineRobust(bot, lb)) return false;
++    if (!fitLineRobust(top, lt, 0.0, -1.0) || !fitLineRobust(bot, lb, 0.0, 1.0)) return false;
+ 
+     Pt TL, TR, BR, BL;
+     if (!flat) {
+-- 
+2.43.0
+
