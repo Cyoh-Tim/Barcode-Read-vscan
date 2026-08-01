@@ -268,6 +268,7 @@ GrayView Pipeline::preprocessFrame(const GrayView& image) {
     if (image.width < 256 || image.height < 256) return image;
 
     const float noise = estimateNoise(image);
+    frameNoise_ = noise;
     if (noise < cfg_.autoDenoiseNoise) return image;
 
     boxBlur3x3(image, denoiseBuf_);
@@ -302,9 +303,31 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
     // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
     // 가장 싸고, 실측상 가장 자주 걸린다(§3.14). [[vscan-lite-denoise-rescue]]
-    if (!cfg_.disableDenoiseRescue && !preDenoised_ && !budgetExceeded()) {
+    //
+    // [뭉개는 세기는 두 단이다] 이미 프레임 전처리에서 한 번 뭉갠
+    // 프레임(= 노이즈가 임계를 넘은 프레임)이 여기까지 왔다면 3x3 한 번이
+    // 모자랐다는 뜻이다. 그때는 **두 번 더** 먹인다.
+    //
+    // 실측(PDF417 module 8, 노이즈 축): 45/50/55/60 전부 3x3 한 번이나
+    // 두 번으로는 안 열리고 세 번에서 열린다(넷 다). 앞단에서 처음부터
+    // 세 번 먹이는 것은 안 된다 — 모듈이 2px인 코드가 그 자리에서 사라진다.
+    // 다 실패한 뒤의 구제 자리라야 안전하다.
+    // 이미 뭉갠 프레임은 **아주 시끄러울 때만** 다시 본다. 이 자리는
+    // 프레임 하나를 통째로 다시 도는 값이라 p95에 그대로 실린다 —
+    // 코퍼스 300장 p95: 임계 없음 525ms / 노이즈 30 이상 525ms /
+    // 노이즈 45 이상 431ms(= 이 단계가 없을 때와 같다). 검출은 셋 다 같다.
+    // 세 번이 필요했던 PDF417 프레임의 측정 노이즈가 46이라 45로 둔다.
+    // 한 번 뭉갠 것을 딱 한 번 더 뭉개는 중간 단계는 실측상 얻는 게 없어
+    // 두지 않는다(3x3 두 번으로는 넷 다 안 열렸다).
+    const bool dnAgain = preDenoised_ && frameNoise_ >= 45.0f;
+    if (!cfg_.disableDenoiseRescue && (!preDenoised_ || dnAgain) && !budgetExceeded()) {
         GrayImage smoothed;
         boxBlur3x3(view, smoothed);
+        if (dnAgain) {
+            GrayImage more;
+            boxBlur3x3(GrayView(smoothed), more);
+            smoothed = std::move(more);
+        }
         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
         PipelineConfig dnCfg = cfg_;

@@ -536,6 +536,7 @@ private:
     // [S1] 선 디노이즈 상태. 버퍼는 프레임마다 재사용한다.
     GrayImage denoiseBuf_;
     bool preDenoised_ = false;
+    float frameNoise_ = 0.0f;   // preprocessFrame()이 잰 값 (구제 세기 결정용)
     // 저대비 경로에서 영역 패스를 먼저 돌렸을 때의 부분 결과(개수가 모자라
     // 뒤 단계로 넘어간 경우). 뒤 단계가 더 못 찾으면 이것을 쓴다.
     std::vector<PipelineResult> lowContrastPartial_;
