@@ -131,7 +131,21 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
         if (xr >= 0) right.push_back({static_cast<double>(xr), static_cast<double>(y)});
     }
     Line ll, lr;
-    if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
+    const bool flat = (cy1 - cy0) < (cx1 - cx0) * 2 / 5;
+    if (!flat) {
+        if (!fitLineRobust(left, ll) || !fitLineRobust(right, lr)) return false;
+    } else {
+        // 납작한 코드에서는 좌/우 변 맞춤을 쓰지 않는다. 변 길이가 너무
+        // 짧아서다 — 실측(PDF417 module 8): 코드가 949x49라 좌/우 변이
+        // 49px뿐이다. 그 구간에 맞춘 기울기 오차가 사각형을 통째로
+        // 망가뜨렸다(persp 0.5에서 1000px 코드에 399x322가 나왔다).
+        //
+        // 막대 방향을 밖에서 받아 고정하는 것도 안 됐다. 강한 원근에서는
+        // 막대가 소실점으로 부채꼴로 벌어져 **좌/우 변과 나란하지 않다**
+        // (persp 0.3에서 545x143). 아래쪽 "위/아래 변의 양끝" 경로를 쓴다.
+        ll.a = 1; ll.b = 0; ll.c = -static_cast<double>(cx0);
+        lr.a = 1; lr.b = 0; lr.c = -static_cast<double>(cx1);
+    }
 
     // [모서리 제외 폭을 기울기에서 계산한다]
     // 평행사변형에서 좌변이 높이 Hc에 걸쳐 가로로 |dx/dy| * Hc 만큼
@@ -143,7 +157,7 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
         return (std::fabs(L.a) < 1e-9) ? 1e9 : std::fabs(L.b / L.a);
     };
     const int codeH = cy1 - cy0, codeW = cx1 - cx0;
-    const double sl = std::min(slopeOf(ll), slopeOf(lr));
+    const double sl = flat ? 0.0 : std::min(slopeOf(ll), slopeOf(lr));
     int mx = static_cast<int>(sl * codeH) + std::max(2, codeW / 20);
     mx = std::min(mx, static_cast<int>(codeW * 0.45));
     for (int x = cx0 + mx; x <= cx1 - mx; ++x) {
@@ -158,8 +172,39 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
     if (!fitLineRobust(top, lt) || !fitLineRobust(bot, lb)) return false;
 
     Pt TL, TR, BR, BL;
-    if (!intersect(lt, ll, TL) || !intersect(lt, lr, TR) ||
-        !intersect(lb, lr, BR) || !intersect(lb, ll, BL)) return false;
+    if (!flat) {
+        if (!intersect(lt, ll, TL) || !intersect(lt, lr, TR) ||
+            !intersect(lb, lr, BR) || !intersect(lb, ll, BL)) return false;
+    } else {
+        /*
+         * [납작한 코드: 위/아래 변의 양끝을 직접 찾는다]
+         *
+         * 좌/우 변을 직선으로 맞출 만한 세로 길이가 없으므로, 위 변과
+         * 아래 변 각각에 대해 "그 선 근처에 어두운 픽셀이 있는 가장
+         * 왼쪽/오른쪽 열"을 찾아 네 점으로 쓴다. 긴 축(위/아래 변)은
+         * 표본이 수백 개라 안정적이고, 그 두 선이 곧 원근 보정에서
+         * 실제로 중요한 정보다 — 한 스캔 행 안의 모듈 폭 변화는 위/아래
+         * 변의 수렴에서 나오기 때문이다.
+         */
+        auto endsOn = [&](const Line& L, Pt& lo, Pt& hi2) -> bool {
+            if (std::fabs(L.b) < 1e-9) return false;
+            int xl = -1, xr = -1;
+            for (int x = cx0; x <= cx1; ++x) {
+                const int ly = static_cast<int>(-(L.a * x + L.c) / L.b);
+                bool near = false;
+                for (int dy = -6; dy <= 6 && !near; ++dy) {
+                    const int y = ly + dy;
+                    if (y >= 0 && y < H && dark(x, y)) near = true;
+                }
+                if (near) { if (xl < 0) xl = x; xr = x; }
+            }
+            if (xl < 0 || xr - xl < 40) return false;
+            lo.x = xl;  lo.y = -(L.a * xl + L.c) / L.b;
+            hi2.x = xr; hi2.y = -(L.a * xr + L.c) / L.b;
+            return true;
+        };
+        if (!endsOn(lt, TL, TR) || !endsOn(lb, BL, BR)) return false;
+    }
 
     // 사각형이 크롭 밖으로 크게 벗어나면 변 추정이 실패한 것이다.
     const double slack = 0.5;
