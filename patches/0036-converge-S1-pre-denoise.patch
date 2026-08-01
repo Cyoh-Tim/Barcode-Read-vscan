@@ -1,0 +1,426 @@
+From 80068b14c0cc4b66f70479b2c4d9ac0e166922f5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 03:48:19 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=88=98=EB=A0=B4=20S1:=20=ED=94=84=EB=A0=88?=
+ =?UTF-8?q?=EC=9E=84=20=EC=A1=B0=EA=B1=B4=EC=9D=84=20=EB=A8=BC=EC=A0=80=20?=
+ =?UTF-8?q?=EC=9E=AC=EA=B3=A0=20=ED=95=84=EC=9A=94=ED=95=A0=20=EB=95=8C?=
+ =?UTF-8?q?=EB=A7=8C=20=EB=AD=89=EA=B0=9C=EC=84=9C=20=EB=84=A3=EB=8A=94?=
+ =?UTF-8?q?=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+노이즈 구제(3x3 블러)는 지금까지 모든 단계가 실패한 뒤에 돌았다. 그런데
+노이즈가 심한 프레임에서는 그 앞 단계들이 실패할 것이 처음부터 정해져
+있다 — 실측(Code128 module 8, 노이즈 시그마 40): zxing 호출 16회 652ms인데
+같은 프레임에 블러를 먼저 먹이면 호출 2회 24.1ms다.
+
+estimateNoise()로 재고 정한다(Immerkaer 라플라시안의 하위 25%). 코드의
+모듈 경계도 라플라시안에 잡히므로 평균이 아니라 백분위수를 쓴다.
+실측: 깨끗 3.5 / 모듈 2px 4.0 / 블러 5.5 / 실물 3.1MP 차트 0.0 vs
+노이즈 시그마 20에서 20.0. 임계 12에 5배 여유가 있다. 표본은 8행 x 4열
+(4x2부터 16x8까지 추정값이 완전히 같았다) — 2048x1536에서 0.19ms.
+
+결과 (Code128 module 8, 2단계 경로):
+  노이즈 20   89.1 ->  17.9ms
+  노이즈 40  652.2 ->  21.9ms
+  노이즈 60  758.7 ->  22.5ms
+  깨끗/모듈2px/블러 변화 없음
+
+게이트: 코퍼스 검출 59.7 -> 63.3%, 평균 115.4 -> 106.7, p95 336.7 ->
+287.6(기준선 301.4보다도 낮다), 오디코딩 2 / 중복 1 유지, 40종 38/38/38.
+40종 교차 A/B에서 full 경로는 오히려 3~8% 빨라지고 2단계는 3% 늘었다
+(그 세트에 노이즈 프레임이 2/40뿐이라 측정기 비용만 남는다).
+
+PROJECT_NOTES §3.26 S1
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan.h                       | 13 ++++++
+ include/vscan_internal/pipeline.hpp   | 36 +++++++++++++++
+ include/vscan_internal/preprocess.hpp | 45 +++++++++++++++++++
+ src/pipeline.cpp                      | 63 ++++++++++++++++++++-------
+ src/preprocess.cpp                    | 41 +++++++++++++++++
+ src/vscan_c_api.cpp                   |  1 +
+ 6 files changed, 184 insertions(+), 15 deletions(-)
+
+diff --git a/include/vscan.h b/include/vscan.h
+index 42eb7a6..df34d3f 100644
+--- a/include/vscan.h
++++ b/include/vscan.h
+@@ -306,6 +306,19 @@ typedef struct {
+      * 코드가 화면에서 50px 안팎으로 작게 잡히는 배치에서만 켤 것.
+      */
+     int enable_qr_finder_rescue;
++
++    /*
++     * [S1 — 사전 노이즈 측정 후 선(先) 디노이즈] 0 = 기본(켜짐), 1 = 끔.
++     *
++     * 프레임을 디코더에 넣기 전에 노이즈를 재고(0.5ms 남짓), 임계를 넘으면
++     * 3x3 블러를 한 번 먹여서 넣는다. 노이즈 구제가 체인 끝에 있던 것을
++     * 앞으로 옮긴 것이다 — 실측(Code128 module 8, 노이즈 시그마 40):
++     * zxing 호출 16회 652ms -> 2회 24.1ms.
++     *
++     * 끌 이유는 거의 없지만, 입력이 이미 디노이즈된 파이프라인이거나
++     * 모듈이 2px 미만이라 어떤 블러도 손해인 배치를 위해 열어둔다.
++     */
++    int disable_auto_denoise;
+ } vscan_config_t;
+ 
+ /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index 3fcebd5..d194912 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -341,6 +341,25 @@ struct PipelineConfig {
+      */
+     int disableDenoiseRescue = 0;
+ 
++    /*
++     * [S1 — 사전 노이즈 측정 후 선(先) 디노이즈] 1 = 켬(기본), 0 = 끔.
++     *
++     * 위 disableDenoiseRescue의 노이즈 구제는 **모든 게 실패한 뒤**에 돈다.
++     * 그런데 노이즈가 심한 프레임에서는 그 앞의 단계들이 실패할 것이
++     * 처음부터 정해져 있다. 실측(Code128 module 8, 노이즈 시그마 40,
++     * 2단계 경로): zxing 호출 16회 / 652ms인데, 같은 프레임에 3x3 블러를
++     * **먼저** 먹이면 호출 2회 / 24.1ms다 — fast 패스에서 바로 붙는다.
++     * 35배 차이이고, 없는 기능을 만드는 게 아니라 순서만 바꾼 것이다
++     * (회전에 대해 §3.24에서 이미 증명한 구조).
++     *
++     * 함부로 뭉개면 안 되므로 estimateNoise()로 재고 나서 정한다. 임계
++     * 12는 실측에서 왔다 — 깨끗 3.5 / 모듈 2px 4.0 / 실물 3.1MP 차트 0.0
++     * vs 노이즈 시그마 20에서 20.0. 5배 여유가 있다.
++     * [[vscan-lite-pre-denoise]]
++     */
++    int autoDenoise = 1;
++    float autoDenoiseNoise = 12.0f;
++
+     /*
+      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+      *
+@@ -473,6 +492,23 @@ private:
+     int coarseSkipLeft_ = 0;    // 남은 스킵 프레임 수
+     GrayImage coarseBuf_;       // 절반 해상도 버퍼 (프레임마다 재사용)
+ 
++    // [S1] 선 디노이즈 상태. 버퍼는 프레임마다 재사용한다.
++    GrayImage denoiseBuf_;
++    bool preDenoised_ = false;
++    // 최상위 호출 깊이. 2단계 경로가 마지막에 processView()를 부르므로,
++    // "이번 프레임에서 이미 뭉갰는가"를 중첩 호출이 지우지 않게 한다.
++    int frameDepth_ = 0;
++    struct FrameGuard {
++        Pipeline* p;
++        explicit FrameGuard(Pipeline* pp) : p(pp) {
++            if (p->frameDepth_++ == 0) p->preDenoised_ = false;
++        }
++        ~FrameGuard() { --p->frameDepth_; }
++    };
++    // 노이즈를 재서, 필요하면 뭉갠 사본을 가리키는 뷰를 돌려준다.
++    // 필요 없으면 입력을 그대로 돌려준다(복사 없음).
++    GrayView preprocessFrame(const GrayView& image);
++
+     std::vector<PipelineResult> decodeTile(const GrayView& tile, int yOffset);
+     static std::vector<PipelineResult> dedup(std::vector<PipelineResult> in);
+ 
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index b53768b..26fa3dc 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -65,6 +65,51 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage&
+  */
+ void boxBlur3x3(const GrayView& src, GrayImage& out);
+ 
++/*
++ * [프레임 노이즈 추정 — 전처리를 고르기 위한 사전 측정]
++ *
++ * 왜 필요한가. 지금 파이프라인은 어떤 프레임이든 풀프레임 두 번(coarse +
++ * fast, 13ms)으로 시작하고, 실패하면 TryHarder / +Invert / 노이즈 구제 /
++ * DPM 구제를 **전부 풀프레임에** 건다. 노이즈가 심한 프레임에서는 그
++ * 전부가 실패하므로 시간만 쓴다 — 실측(Code128 module 8, 노이즈 시그마 40):
++ * zxing 호출 16회, 652ms.
++ *
++ * 그런데 그 프레임에 **3x3 블러를 먼저 한 번** 먹이고 넣으면 호출 2회에
++ * 24.1ms로 끝난다(fast 패스에서 바로 붙는다). **35배**다. 없는 기능을
++ * 만드는 게 아니라 이미 있는 단계(노이즈 구제)를 앞으로 옮기는 것이고,
++ * 옮겨도 되는지는 이 함수가 판정한다.
++ *
++ * 방법은 Immerkær의 라플라시안 추정이다. 라플라시안 마스크는 평탄면과
++ * 완만한 기울기를 0으로 만들고 화소 단위 요동만 남기므로, 그 응답의 크기가
++ * 곧 노이즈 진폭이다. 다만 코드의 모듈 경계도 라플라시안에 크게 잡히므로
++ * **평균이 아니라 하위 백분위수**를 쓴다 — 프레임의 대부분은 배경이라,
++ * 하위 25%는 배경(=노이즈)만 본다.
++ *
++ * 실측(2048x1536 합성 + 실물 캡처):
++ *
++ *   프레임              p25    p50
++ *   깨끗                3.5    6.0
++ *   모듈 2px            4.0    6.0
++ *   블러 2.0             —     5.5
++ *   회전 45도            —     5.5
++ *   대비 0.10            —     6.0
++ *   실물 3.1MP 차트     0.0    0.0
++ *   노이즈 시그마 20   20.0   33.0
++ *   노이즈 시그마 40   37.5   61.5
++ *   노이즈 시그마 60     —    83.0
++ *
++ * p25 기준 임계 12면 5배 여유로 갈린다. **실물 카메라 캡처가 0.0인 것이
++ * 중요하다** — 진짜 캡처를 헛되이 뭉개지 않는다는 뜻이다.
++ *
++ * rowStep/colStep: 표본 간격. 노이즈는 화소 단위 통계라 표본이 수만 개면
++ * 백분위수가 안정적이다. 실측(2048x1536, 깨끗/노이즈40 두 프레임):
++ * 4x2부터 16x8까지 **추정값이 소수점까지 완전히 같고** 비용만 0.76ms ->
++ * 0.046ms로 줄었다. 기본값 8x4(표본 약 10만개, 0.19ms)는 그 사이에서
++ * 여유를 둔 값이다.
++ * [[vscan-lite-noise-estimate]]
++ */
++float estimateNoise(const GrayView& src, int rowStep = 8, int colStep = 4);
++
+ /*
+  * 퍼센타일 기반 선형 대비 스트레칭. 하위/상위 0.5%를 잘라 0~255로 편다.
+  * 이미 계조를 거의 다 쓰고 있으면(유효 폭이 minSpan 이상) 아무것도 하지
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 7da45af..6e2969a 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -249,19 +249,46 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image) {
+     return dedup(std::move(merged));
+ }
+ 
++GrayView Pipeline::preprocessFrame(const GrayView& image) {
++    // [[vscan-lite-pre-denoise]]
++    //
++    // 파이프라인에 넣기 전에 프레임 상태를 재고, 지금 상태로는 통과할 수
++    // 없는 것이 확실할 때만 고쳐서 넣는다. 근거는 pipeline.hpp의
++    // autoDenoise 주석(노이즈 40에서 652 -> 24.1ms).
++    // 이미 이번 프레임에서 뭉갰으면 두 번 하지 않는다. 2단계 경로가
++    // 마지막에 processView()를 부르는데, 거기서 또 재고 또 뭉개면 서로
++    // 다른 필터(블러의 블러)가 되어 작은 모듈이 사라진다.
++    if (preDenoised_) return image;
++    if (!cfg_.autoDenoise || image.empty()) return image;
++    // 너무 작은 프레임은 ROI 재귀에서 온 것일 수 있다. 거기서 또 뭉개면
++    // 이미 뭉갠 것을 두 번 뭉개게 되므로 손대지 않는다.
++    if (image.width < 256 || image.height < 256) return image;
++
++    const float noise = estimateNoise(image);
++    if (noise < cfg_.autoDenoiseNoise) return image;
++
++    boxBlur3x3(image, denoiseBuf_);
++    preDenoised_ = true;
++    return GrayView(denoiseBuf_);
++}
++
+ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     BudgetGuard budget(this);
+     // 코드가 물리적으로 존재할 수 없는 프레임(컨베이어 아이템 사이 등)은
+     // 폴백 체인 전체를 건너뛴다. [[vscan-lite-blank-frame-skip]]
+     if (!frameHasStructure(image)) return {};
+-    auto hits = processViewCore(image);
++    FrameGuard frameGuard(this);
++    // [S1] 조건을 먼저 재고, 필요하면 고쳐서 넣는다. 아래 단계들은 전부
++    // 이 뷰를 쓴다 — 원본이 아니라.
++    const GrayView view = preprocessFrame(image);
++    auto hits = processViewCore(view);
+     if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+ 
+     // 좁힌 마스크로 빈손이면 새 심볼로지일 수 있다 — 전체 마스크로 되돌려
+     // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
+     if (adaptiveNarrowed_) {
+         adaptiveWiden();
+-        hits = processViewCore(image);
++        hits = processViewCore(view);
+         if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+     }
+ 
+@@ -272,9 +299,9 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
+     // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
+     // 가장 싸고, 실측상 가장 자주 걸린다(§3.14). [[vscan-lite-denoise-rescue]]
+-    if (!cfg_.disableDenoiseRescue && !budgetExceeded()) {
++    if (!cfg_.disableDenoiseRescue && !preDenoised_ && !budgetExceeded()) {
+         GrayImage smoothed;
+-        boxBlur3x3(image, smoothed);
++        boxBlur3x3(view, smoothed);
+         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
+         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
+         PipelineConfig dnCfg = cfg_;
+@@ -291,7 +318,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // [[vscan-lite-dpm-rescue]]
+     if (cfg_.enableDPMRescue) {
+         GrayImage closed;
+-        morphologicalCloseInverted(image, cfg_.dpmKernelSize, closed);
++        morphologicalCloseInverted(view, cfg_.dpmKernelSize, closed);
+         auto dpmHits = processViewCore(GrayView(closed));
+         if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dpmHits;
+     }
+@@ -309,7 +336,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+         // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
+         // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
+         if (regionCropDone_ && regionRotDone_) return hits;
+-        auto regionHits = tryRegionRescue(image, std::max(1, cfg_.minExpectedCodes),
++        auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
+                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
+         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) return regionHits;
+         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+@@ -320,7 +347,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
+     // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
+     if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
+-        auto qrHits = tryQrFinderRescue(image, std::max(1, cfg_.minExpectedCodes));
++        auto qrHits = tryQrFinderRescue(view, std::max(1, cfg_.minExpectedCodes));
+         if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) return qrHits;
+         if (qrHits.size() > hits.size()) hits = std::move(qrHits);
+     }
+@@ -334,7 +361,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+     // [[vscan-lite-1d-deskew-rescue]]
+     if (!cfg_.enable1DDeskewRescue || budgetExceeded()) return hits;
+     int need = std::max(1, cfg_.minExpectedCodes);
+-    auto rescued = tryDeskewRescue1D(image, need);
++    auto rescued = tryDeskewRescue1D(view, need);
+     return rescued.empty() ? hits : rescued;
+ }
+ 
+@@ -811,10 +838,16 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     if (image.empty()) return {};
+     BudgetGuard budget(this);
+     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
++    FrameGuard frameGuard(this);
+     regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
+     regionRotDone_ = false;
+     (void)cropPadPx; // 하위 호환용으로 시그니처만 유지 (아래 주석 참고)
+ 
++    // [S1] 조건을 먼저 재고, 지금 상태로는 통과할 수 없는 것이 확실하면
++    // 고쳐서 넣는다. 아래 모든 단계가 이 뷰를 쓴다 — 원본이 아니라.
++    // [[vscan-lite-pre-denoise]]
++    const GrayView view = preprocessFrame(image);
++
+     // "빠른 패스 먼저, 실패하면 풀스캔" 전략.
+     //
+     // 1단계: 탐색 옵션(TryHarder/Rotate/Invert)을 꺼서 빠르게 훑는다.
+@@ -853,12 +886,12 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     // 이진화가 locate 비용의 대부분이고 픽셀 수에 비례하므로 1/4이 된다.
+     // 실패하면 아래 풀해상도 단계로 자연스럽게 내려간다(검출력 손실 없음).
+     // [[vscan-lite-coarse-locate]]
+-    if (cfg_.coarseLocate && image.width >= 768 && image.height >= 768) {
++    if (cfg_.coarseLocate && view.width >= 768 && view.height >= 768) {
+         if (coarseSkipLeft_ > 0) {
+             --coarseSkipLeft_;
+         } else {
+             const int cf = (cfg_.coarseFactor == 2) ? 2 : 3;
+-            downsampleBox(image, coarseBuf_, cf);
++            downsampleBox(view, coarseBuf_, cf);
+             Pipeline coarse(fastCfg);
+             auto ch = coarse.processViewCore(GrayView(coarseBuf_));
+             if ((int)ch.size() >= need) {
+@@ -878,7 +911,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     }
+ 
+     Pipeline fast(fastCfg);
+-    auto hits = fast.processViewCore(image);
++    auto hits = fast.processViewCore(view);
+     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
+ 
+     // [1.5단계 — 위치부터 찾고 그 자리만 본다]
+@@ -911,7 +944,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+         const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
+         regionCropDone_ = true;
+         regionRotDone_ = earlyRotate;
+-        auto roiHits = tryRegionRescue(image, need,
++        auto roiHits = tryRegionRescue(view, need,
+                                        earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
+         if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
+         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
+@@ -938,7 +971,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     harderCfg.tryRotate = false;
+     harderCfg.tryInvert = false;
+     Pipeline harder(harderCfg);
+-    auto hardHits = harder.processViewCore(image);
++    auto hardHits = harder.processViewCore(view);
+     if ((int)hardHits.size() >= need) return hardHits;
+     if (hardHits.size() > hits.size()) hits = std::move(hardHits);
+     if (budgetExceeded()) return hits;
+@@ -962,7 +995,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     hiCfg.tryRotate = false;
+     hiCfg.tryInvert = true;
+     Pipeline hi(hiCfg);
+-    auto hiHits = hi.processViewCore(image);
++    auto hiHits = hi.processViewCore(view);
+     if ((int)hiHits.size() >= need) return hiHits;
+     if (hiHits.size() > hits.size()) hits = std::move(hiHits);
+     if (budgetExceeded()) return hits;
+@@ -972,7 +1005,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     // 까지 자체적으로 시도하므로 여기서 따로 또 부를 필요는 없다 —
+     // 그래서 이 최종 호출 하나가 사실상 4~5단계를 전부 커버한다.
+     // [[vscan-lite-two-stage-fallback]]
+-    auto full = processView(image);
++    auto full = processView(view);
+     return full.size() >= hits.size() ? full : hits;
+ }
+ 
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index dbefd7f..6b6ea6c 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -333,6 +333,47 @@ void boxBlur3x3(const GrayView& src, GrayImage& out) {
+     }
+ }
+ 
++float estimateNoise(const GrayView& src, int rowStep, int colStep) {
++    const int W = src.width, H = src.height;
++    if (W < 8 || H < 8) return 0.0f;
++    const int stride = src.stride > 0 ? src.stride : W;
++    if (rowStep < 1) rowStep = 1;
++    if (colStep < 1) colStep = 1;
++
++    // 라플라시안 응답 |2v - 좌 - 우| + |2v - 상 - 하|. 최대 4*255*2이지만
++    // 노이즈 판정에 쓸 범위는 아래쪽뿐이라 1020에서 자른 히스토그램이면
++    // 충분하다(그 위는 전부 "엣지"라 어차피 백분위수 밖이다).
++    constexpr int kBins = 1021;
++    std::vector<int> hist(kBins, 0);
++    long total = 0;
++    for (int y = 1; y < H - 1; y += rowStep) {
++        const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(y - 1) * stride;
++        const uint8_t* __restrict r1 = src.pixels + static_cast<size_t>(y) * stride;
++        const uint8_t* __restrict r2 = src.pixels + static_cast<size_t>(y + 1) * stride;
++        for (int x = 1; x < W - 1; x += colStep) {
++            const int c = 2 * r1[x];
++            const int lx = std::abs(c - r1[x - 1] - r1[x + 1]);
++            const int ly = std::abs(c - r0[x] - r2[x]);
++            int v = lx + ly;
++            if (v >= kBins) v = kBins - 1;
++            ++hist[v];
++            ++total;
++        }
++    }
++    if (total <= 0) return 0.0f;
++
++    const long cut = total / 4;   // 하위 25%
++    long acc = 0;
++    int p25 = 0;
++    for (int i = 0; i < kBins; ++i) {
++        acc += hist[i];
++        if (acc >= cut) { p25 = i; break; }
++    }
++    // 라플라시안 응답 두 방향 합이라 진폭 환산은 /2. 절대 눈금이 아니라
++    // 임계와 비교하기 위한 값이므로 이 정도 근사로 충분하다.
++    return static_cast<float>(p25) * 0.5f;
++}
++
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     const int W = src.width, H = src.height;
+     if (W <= 0 || H <= 0) return false;
+diff --git a/src/vscan_c_api.cpp b/src/vscan_c_api.cpp
+index 42f7ad2..9690c24 100644
+--- a/src/vscan_c_api.cpp
++++ b/src/vscan_c_api.cpp
+@@ -111,6 +111,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
+         if (cfg->enable_adaptive_profile) pcfg.enableAdaptiveProfile = 1;
+         if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
+         if (cfg->enable_qr_finder_rescue) pcfg.enableQrFinderRescue = true;
++        if (cfg->disable_auto_denoise) pcfg.autoDenoise = 0;
+         if (cfg->worker_mode) {
+             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
+         }
+-- 
+2.43.0
+

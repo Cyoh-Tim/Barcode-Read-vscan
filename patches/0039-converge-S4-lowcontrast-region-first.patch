@@ -1,0 +1,272 @@
+From 2122c16115ebff029cdeeb03ef56feee4ab0a4b4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 04:18:59 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=88=98=EB=A0=B4=20S4:=20=EC=A0=80=EB=8C=80?=
+ =?UTF-8?q?=EB=B9=84=20=ED=94=84=EB=A0=88=EC=9E=84=EC=9D=80=20=EC=98=81?=
+ =?UTF-8?q?=EC=97=AD=20=EA=B2=BD=EB=A1=9C=EB=A5=BC=20=EB=A8=BC=EC=A0=80=20?=
+ =?UTF-8?q?=EB=8F=8C=EB=A6=B0=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+풀프레임 패스(coarse + fast, 12ms)는 대비가 무너진 프레임에서 성공할
+수가 없다 — zxing 이진화가 8x8 블록 명암 폭 24 이하를 "구조 없음"으로
+처리하기 때문이고 옵션으로는 안 바뀐다(§3.25). 그런데 지금까지는 그
+12ms를 먼저 내고 나서야 영역 경로로 갔다.
+
+estimateLocalRange()가 프레임을 0.10ms에 재서 정한다. 8x8 블록 범위의
+상위 1%를 쓰는 이유는, 프레임 전체 계조 폭을 쓰면 코드가 작을 때 배경만
+보게 되기 때문이다(모듈 2px 프레임은 대비가 멀쩡한데도 폭이 31로 나왔다 —
+코드가 프레임의 1% 미만이라 백분위수가 전부 배경이다).
+
+실측: 대비 0.05~0.30이 24~84, 0.40이 109, 정상 프레임(깨끗/회전/노이즈/
+블러/모듈 2px/실물 3.1MP 차트)이 213~255. 임계 100으로 갈린다.
+
+건너뛰는 게 아니라 순서만 바꾼다 — 영역 경로가 빈손이면 풀프레임 패스가
+그대로 뒤에서 돈다. 잘못 짚었을 때의 손해 상한이 "원래 순서로 했을 때와
+같은 총합"이라 검출력 손실이 없다.
+
+결과 (Code128 module 8, 2단계, reps 5):
+  대비 0.15  30.8 -> 14.7ms
+  대비 0.20        14.6ms
+  대비 0.30        14.2ms
+  대비 0.10  36.2 -> 23.7ms
+  대비 0.05  68   -> 59.5ms
+게이트: 검출 63.3%, 평균(기준 작업량 대비) 92.7~94.5, p95 236.7,
+오디코딩 2 / 중복 1 유지, 40종 38/38/38, 대비 스윕 14종 전부 동일.
+
+PROJECT_NOTES §3.26 S4
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/pipeline.hpp   | 17 +++++++
+ include/vscan_internal/preprocess.hpp | 34 ++++++++++++++
+ src/pipeline.cpp                      | 68 ++++++++++++++++++++-------
+ src/preprocess.cpp                    | 37 +++++++++++++++
+ 4 files changed, 139 insertions(+), 17 deletions(-)
+
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index d194912..ab07b27 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -360,6 +360,20 @@ struct PipelineConfig {
+     int autoDenoise = 1;
+     float autoDenoiseNoise = 12.0f;
+ 
++    /*
++     * [S4 — 저대비 프레임은 영역 경로를 먼저]
++     *
++     * 풀프레임 패스(coarse + fast, 12ms)는 대비가 무너진 프레임에서
++     * 성공할 수가 없다 — zxing 이진화가 8x8 블록 명암 폭 24 이하를
++     * "구조 없음"으로 처리하기 때문이고, 옵션으로는 안 바뀐다(§3.25).
++     * estimateLocalRange()가 이 값 미만이면 영역 경로를 먼저 돌린다.
++     * 건너뛰는 게 아니라 순서만 바꾸므로 검출력 손실이 없다.
++     *
++     * 임계 100(블록범위 상위 1%): 대비 0.05~0.30이 24~84, 0.40이 109,
++     * 정상 프레임(깨끗/회전/노이즈/블러/모듈 2px/실물 차트)이 213~255.
++     */
++    int lowContrastRange = 100;
++
+     /*
+      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
+      *
+@@ -495,6 +509,9 @@ private:
+     // [S1] 선 디노이즈 상태. 버퍼는 프레임마다 재사용한다.
+     GrayImage denoiseBuf_;
+     bool preDenoised_ = false;
++    // 저대비 경로에서 영역 패스를 먼저 돌렸을 때의 부분 결과(개수가 모자라
++    // 뒤 단계로 넘어간 경우). 뒤 단계가 더 못 찾으면 이것을 쓴다.
++    std::vector<PipelineResult> lowContrastPartial_;
+     // 최상위 호출 깊이. 2단계 경로가 마지막에 processView()를 부르므로,
+     // "이번 프레임에서 이미 뭉갰는가"를 중첩 호출이 지우지 않게 한다.
+     int frameDepth_ = 0;
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 26fa3dc..7fcd47a 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -110,6 +110,40 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
+  */
+ float estimateNoise(const GrayView& src, int rowStep = 8, int colStep = 4);
+ 
++/*
++ * [프레임 국소 명암 폭 추정 — "이 프레임은 지금 상태로 읽힐까"]
++ *
++ * 8x8 블록의 (최대-최소) 중 상위 1% 값을 돌려준다. 즉 "프레임에서 가장
++ * 대비가 센 자리가 얼마나 센가"다.
++ *
++ * 왜 이 형태인가. 목적은 저대비 프레임을 가려내는 것인데, 프레임 전체의
++ * 계조 폭(p1~p99)을 쓰면 **코드가 작을 때 배경만 보게 된다** — 실측:
++ * 모듈 2px 프레임은 대비가 멀쩡한데도 폭이 31로 나왔다(코드가 프레임의
++ * 1% 미만이라 백분위수가 전부 배경이다). 블록 범위의 상위값은 코드가
++ * 아무리 작아도 그 자리를 집어낸다.
++ *
++ * 실측(2048x1536):
++ *
++ *   프레임            p1~p99 폭   블록범위 p99
++ *   대비 0.05            102            91
++ *   대비 0.10            108            85
++ *   대비 0.20            121            72
++ *   대비 0.30            134            90
++ *   대비 0.40            147           115
++ *   모듈 2px              31           255   <- 폭은 실패, 블록범위는 성공
++ *   깨끗 / 회전 / 노이즈  255           255
++ *   블러 2.0             247           254
++ *   실물 3.1MP 차트      228           255
++ *
++ * zxing의 이진화가 8x8 블록의 명암 폭 24를 기준으로 "구조 없음"을
++ * 판정하므로(preprocess.hpp localAdaptiveBinarize 주석), 이 값은 그
++ * 판정과 같은 눈금 위에 있다.
++ *
++ * 표본 16x8에서 2048x1536 기준 0.10ms다(8x4의 0.41ms와 값이 완전히 같다).
++ * [[vscan-lite-contrast-estimate]]
++ */
++int estimateLocalRange(const GrayView& src, int rowStep = 16, int colStep = 8);
++
+ /*
+  * 퍼센타일 기반 선형 대비 스트레칭. 하위/상위 0.5%를 잘라 0~255로 편다.
+  * 이미 계조를 거의 다 쓰고 있으면(유효 폭이 minSpan 이상) 아무것도 하지
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index ff960a6..de8b749 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -969,6 +969,52 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+ 
+     const int need = std::max(1, cfg_.minExpectedCodes);
+ 
++    // [S4 — 저대비 프레임은 순서를 뒤집는다]
++    // 풀프레임 패스(coarse + fast, 합쳐서 12ms)는 대비가 무너진 프레임에서
++    // 성공할 수가 없다. zxing의 이진화가 8x8 블록 명암 폭 24를 "구조 없음"
++    // 으로 보기 때문이고, 그건 옵션을 어떻게 켜도 안 바뀐다(§3.25).
++    // estimateLocalRange()로 그걸 미리 재서, 낮으면 영역 경로를 먼저 돌린다.
++    //
++    // **건너뛰는 게 아니라 순서만 바꾼다.** 영역 경로가 빈손이면 풀프레임
++    // 패스가 그대로 뒤에서 돈다 — 잘못 짚었을 때의 손해 상한이 "원래
++    // 순서로 했을 때와 같은 총합"이다. 검출력에는 영향이 없다.
++    //
++    // 임계 100의 근거(블록범위 상위 1%, 실측): 대비 0.05~0.30이 24~84,
++    // 0.40이 109, 정상 프레임(깨끗/회전/노이즈/블러/모듈 2px/실물 차트)이
++    // 213~255다. 0.40은 풀프레임 패스로 읽히므로 정상 쪽에 두는 게 맞다.
++    // [[vscan-lite-lowcontrast-region-first]]
++    bool regionFirstDone = false;
++    const bool lowContrast = cfg_.enableRegionRescue &&
++                             estimateLocalRange(view) < cfg_.lowContrastRange;
++
++    auto regionFirstPass = [&](std::vector<PipelineResult>& acc) -> bool {
++        if (!cfg_.enableRegionRescue || budgetExceeded() || regionFirstDone) return false;
++        regionFirstDone = true;
++        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
++        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
++        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
++        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
++        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
++        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다.
++        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
++        regionCropDone_ = true;
++        regionRotDone_ = earlyRotate;
++        auto roiHits = tryRegionRescue(view, need,
++                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
++        if ((int)roiHits.size() >= need) { acc = std::move(roiHits); return true; }
++        if (roiHits.size() > acc.size()) acc = std::move(roiHits);
++        return false;
++    };
++
++    if (lowContrast) {
++        std::vector<PipelineResult> early;
++        if (regionFirstPass(early)) { adaptiveObserve(early); return early; }
++        if (!early.empty()) { /* 부분 결과는 아래 단계들이 더 채울 수 있다 */ }
++        lowContrastPartial_ = std::move(early);
++    } else {
++        lowContrastPartial_.clear();
++    }
++
+     // [0단계] coarse locate — 절반 해상도로 먼저 훑는다.
+     // 이진화가 locate 비용의 대부분이고 픽셀 수에 비례하므로 1/4이 된다.
+     // 실패하면 아래 풀해상도 단계로 자연스럽게 내려간다(검출력 손실 없음).
+@@ -1000,6 +1046,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     Pipeline fast(fastCfg);
+     auto hits = fast.processViewCore(view);
+     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
++    if (lowContrastPartial_.size() > hits.size()) hits = lowContrastPartial_;
+ 
+     // [1.5단계 — 위치부터 찾고 그 자리만 본다]
+     // 빠른 풀프레임 패스가 빈손일 때 가장 흔한 이유는 "코드가 프레임에 비해
+@@ -1017,23 +1064,10 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
+     // 실패했을 때의 추가 비용은 locate 몇 ms + 작은 크롭 디코드뿐이고,
+     // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
+     // [[vscan-lite-region-first]]
+-    if (cfg_.enableRegionRescue && !budgetExceeded()) {
+-        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
+-        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
+-        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
+-        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
+-        // 40종도 726 -> 592ms, 단일코드 코퍼스도 평균 152 -> 144ms로
+-        // 같이 빨라진다 — 뒤의 비싼 단계들을 건너뛰기 때문이다.
+-        //
+-        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
+-        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다
+-        // (다중 코드 코퍼스에서 그 경우 평균이 7% 늘었다).
+-        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
+-        regionCropDone_ = true;
+-        regionRotDone_ = earlyRotate;
+-        auto roiHits = tryRegionRescue(view, need,
+-                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
+-        if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
++    {
++        std::vector<PipelineResult> roiHits = std::move(lowContrastPartial_);
++        lowContrastPartial_.clear();
++        if (regionFirstPass(roiHits)) { adaptiveObserve(roiHits); return roiHits; }
+         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
+     }
+     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 6b6ea6c..c6399e9 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -374,6 +374,43 @@ float estimateNoise(const GrayView& src, int rowStep, int colStep) {
+     return static_cast<float>(p25) * 0.5f;
+ }
+ 
++int estimateLocalRange(const GrayView& src, int rowStep, int colStep) {
++    const int W = src.width, H = src.height;
++    if (W < 16 || H < 16) return 255;
++    const int stride = src.stride > 0 ? src.stride : W;
++    if (rowStep < 1) rowStep = 1;
++    if (colStep < 1) colStep = 1;
++
++    // 8x8 블록(원본 좌표)을 표본 간격대로 훑으며 범위를 모은다. 블록 안은
++    // 4점(모서리 근처)만 봐도 범위가 거의 같고 — 모듈 경계가 블록을
++    // 가로지르면 어느 두 점을 잡아도 밝고 어두운 쪽이 섞인다 — 비용이
++    // 8x8 전수 대비 1/16이다.
++    int hist[256] = {0};
++    long total = 0;
++    for (int y = 0; y + 8 <= H; y += rowStep) {
++        for (int x = 0; x + 8 <= W; x += colStep) {
++            const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(y) * stride + x;
++            const uint8_t* __restrict r3 = r0 + 3 * static_cast<size_t>(stride);
++            const uint8_t* __restrict r7 = r0 + 7 * static_cast<size_t>(stride);
++            int mn = r0[0], mx = r0[0];
++            const int vs[8] = {r0[3], r0[7], r3[0], r3[3], r3[7], r7[0], r7[3], r7[7]};
++            for (int v : vs) { if (v < mn) mn = v; if (v > mx) mx = v; }
++            ++hist[mx - mn];
++            ++total;
++        }
++    }
++    if (total <= 0) return 255;
++
++    // 상위 1%
++    const long cut = total / 100;
++    long acc = 0;
++    for (int i = 255; i >= 0; --i) {
++        acc += hist[i];
++        if (acc >= cut) return i;
++    }
++    return 0;
++}
++
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     const int W = src.width, H = src.height;
+     if (W <= 0 || H <= 0) return false;
+-- 
+2.43.0
+

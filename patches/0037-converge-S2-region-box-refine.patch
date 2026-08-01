@@ -1,0 +1,279 @@
+From 4bd7622283b02553001dd515f8d7bc75d6e8b774 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 03:57:41 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=88=98=EB=A0=B4=20S2:=20=EC=98=81=EC=97=AD?=
+ =?UTF-8?q?=20=EC=83=81=EC=9E=90=EB=A5=BC=20=EC=9B=90=EB=B3=B8=20=ED=95=B4?=
+ =?UTF-8?q?=EC=83=81=EB=8F=84=EB=A1=9C=20=EB=8B=A4=EC=8B=9C=20=EC=9E=AC?=
+ =?UTF-8?q?=EC=84=9C=20=EC=A2=81=ED=9E=8C=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+축소본 상자는 타일 격자(원본 128px) 단위라 늘 헐렁했다 — 실측(대비
+0.10): 영역 크롭 985k px가 프레임의 31%인데 실제 코드는 408k px(13%)다.
+그 차이가 그대로 시간이었다(985k 풀옵션 디코드 13.6~27.2ms vs 408k 13.1ms).
+
+refineRegionBox()가 행/열 그래디언트 프로파일로 상자를 다시 잰다.
+두 가지가 결정적이었고 둘 다 실패해보고 알았다:
+ - 임계를 최대값이 아니라 백분위수(p10~p90)로 잡는다. 라벨 종이 가장자리
+   한 행에 수백 px짜리 단차가 들어가 최대값을 혼자 정하는 바람에, 코드
+   행 0.19 / 배경 행 0.15로 붙어서 0.12~0.55 어떤 값으로도 안 갈렸다.
+ - 열은 1차에서 찾은 행 범위 안에서만 잰다. 창 전체에서 재면 코드 없는
+   행이 모든 열에 똑같이 더해져 차이가 희석된다(행은 잡히는데 열만 창
+   전체로 나왔다).
+
+회전 패스는 이 상자를 쓰지 않는다. 기울어진 1D는 축정렬 상자 안에서
+마름모로 놓여 모서리 에너지가 옅은데 프로파일 임계가 그 꼬리를 자른다 —
+45도에서 768 -> 699로 좁아지자 검출 자체가 실패했다(22ms 성공 -> 190ms
+실패). 되돌린 뒤 어차피 tightenToContent()가 다시 좁히므로 회전 쪽은
+넉넉한 상자를 그대로 쓴다.
+
+결과 (Code128 module 8, 2단계):
+  대비 0.10   92.9 -> 51.4ms
+  대비 0.15   28.4 -> 27.4ms
+  깨끗/모듈2px/노이즈 변화 없음
+게이트: 40종 full 1378.7 -> 1214.1 / 2단계 658.5 -> 517.4 / fast 586.7 ->
+449.6ms. 코퍼스 검출 63.3 -> 63.0%(측정 잡음), p95 287.6 -> 262.8,
+오디코딩 2 / 중복 1 유지, 14종 x 19각도 100%.
+
+PROJECT_NOTES §3.26 S2
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/locate.hpp |  43 ++++++++++++
+ src/locate.cpp                    | 105 ++++++++++++++++++++++++++++++
+ src/pipeline.cpp                  |  41 ++++++++++--
+ 3 files changed, 184 insertions(+), 5 deletions(-)
+
+diff --git a/include/vscan_internal/locate.hpp b/include/vscan_internal/locate.hpp
+index 28b7e2e..f292a1a 100644
+--- a/include/vscan_internal/locate.hpp
++++ b/include/vscan_internal/locate.hpp
+@@ -96,4 +96,47 @@ std::vector<CodeRegion> findCodeRegions(const GrayView& image, int maxRegions =
+  */
+ float refineRegionAngle(const GrayView& image, const Rect& bbox);
+ 
++/*
++ * [상자 정밀화] 영역 상자를 **원본 해상도로** 다시 재서 좁힌다.
++ *
++ * 왜 필요한가. findCodeRegions()의 상자는 타일 격자(기본 원본 128px)
++ * 단위라 코드보다 늘 헐렁하다. 거기에 호출부가 정지대용 여백까지 붙이면
++ * "ROI"가 ROI가 아니게 된다 — 실측(Code128 module 8, 대비 0.10,
++ * 2048x1536): 영역 크롭이 1184x832 = 985k px로 **프레임의 31%**인데
++ * 정작 코드는 1023x399(13%)다.
++ *
++ * 그 차이가 그대로 시간이다. 같은 프레임에서 zxing 호출을 찍어보면
++ * 985k px 풀옵션 디코드가 13.6~27.2ms인데 408k px는 13.1ms다. 게다가
++ * 저대비/회전/노이즈 경로가 전부 같은 rect를 쓰므로 한 번 좁히면
++ * 모든 구제 단계에 그대로 곱해진다.
++ *
++ * 각도를 원본 해상도로 다시 재서 오차를 4.2도 -> 0.7도로 줄인 것과
++ * 같은 수법이다(refineRegionAngle 위 주석). 축소본은 어디에 있는지
++ * 알려주는 데까지만 쓰고, 정확한 값은 원본에서 다시 잰다.
++ *
++ * 방법은 행/열별 그래디언트 에너지 프로파일이다. 바코드는 종류를 불문하고
++ * 배경보다 단위 길이당 엣지가 압도적으로 많으므로, 프로파일이 낮아지는
++ * 지점이 코드의 경계다. 두 가지가 결정적이다(둘 다 실패해보고 알았다):
++ *
++ *  - **임계를 최대값이 아니라 백분위수로 잡는다.** 라벨 종이 가장자리는
++ *    한 행에 수백 픽셀짜리 단차가 통째로 들어가 최대값을 혼자 정한다.
++ *    그 기준으로는 코드 행 0.19 / 배경 행 0.15로 붙어버려서 0.12~0.55
++ *    어떤 값으로도 안 갈렸다. p10을 바닥, p90을 꼭대기로 삼으면 갈린다.
++ *  - **열은 1차에서 찾은 행 범위 안에서만 잰다.** 창 전체에서 재면
++ *    코드가 없는 행들이 모든 열에 똑같이 더해져 차이가 희석된다.
++ *    실제로 행은 제대로 잡히는데 열만 창 전체로 나왔다.
++ *
++ * 결과가 원래 상자보다 넓으면 판정 실패로 보고 원래 상자를 쓴다.
++ * energyRatio 0.30은 실측에서 왔다 — 0.5/0.7로 올리면 45도 회전 코드가
++ * 678x678에서 331x522로 잘린다(대각선 방향으로 에너지가 옅어지기 때문).
++ *
++ * searchMargin: 프로파일을 재기 전에 상자를 이만큼 넓혀서 본다. 타일
++ * 격자가 코드의 가장자리를 잘라먹었을 수 있으므로(에너지가 약한 정지대
++ * 쪽 타일이 임계를 못 넘는 경우), 한 타일만큼 넓혀놓고 다시 찾는다.
++ * 넓힌 창 안에서 다시 좁히는 것이라 결과가 원래 상자보다 커질 수도 있고,
++ * 그건 잘려 있었다는 뜻이라 맞는 동작이다.
++ */
++Rect refineRegionBox(const GrayView& image, const Rect& bbox,
++                     float energyRatio = 0.30f, int searchMargin = 64);
++
+ } // namespace vscan
+diff --git a/src/locate.cpp b/src/locate.cpp
+index 7975d1a..aea73d1 100644
+--- a/src/locate.cpp
++++ b/src/locate.cpp
+@@ -199,4 +199,109 @@ float refineRegionAngle(const GrayView& image, const Rect& bbox) {
+     return static_cast<float>(theta);
+ }
+ 
++namespace {
++
++// 프로파일의 "코드 구간"을 찾는다. 최대값이 아니라 **백분위수**를 기준으로
++// 삼는 것이 핵심이다.
++//
++// 왜 최대값이면 안 되나. 라벨 종이의 가장자리는 한 행/열에 수백 픽셀짜리
++// 강한 단차가 통째로 들어가서 프로파일의 최대값을 혼자 정해버린다.
++// 실측(Code128 module 8, 대비 0.10): 그 최대값 기준으로 보면 코드 행이
++// 0.19, 배경 행이 0.15로 둘이 거의 붙어 있어서 어떤 임계로도 안 갈린다
++// (0.12~0.55 전부 창 전체를 반환했다). p10을 바닥, p90을 꼭대기로 삼으면
++// 그 두 이상치가 빠지면서 996x354(참값 973x331)로 정확히 잡힌다.
++bool profileBounds(const std::vector<float>& v, float ratio, int& lo, int& hi) {
++    const int n = static_cast<int>(v.size());
++    if (n < 8) return false;
++
++    // 이동 평균(창 24표본 = 원본 48px). 1D 바코드는 바 사이에서 프로파일이
++    // 0으로 떨어지는 자리가 있어서, 원시값에 임계를 걸면 그 골에서 코드가
++    // 끊긴다.
++    std::vector<double> pre(n + 1, 0.0);
++    for (int i = 0; i < n; ++i) pre[i + 1] = pre[i] + v[i];
++    const int half = 12;
++    std::vector<float> sv(n, 0.0f);
++    for (int i = 0; i < n; ++i) {
++        const int a = std::max(0, i - half), b = std::min(n, i + half + 1);
++        sv[i] = static_cast<float>((pre[b] - pre[a]) / (b - a));
++    }
++
++    std::vector<float> sorted = sv;
++    std::nth_element(sorted.begin(), sorted.begin() + n / 10, sorted.end());
++    const float p10 = sorted[n / 10];
++    sorted = sv;
++    std::nth_element(sorted.begin(), sorted.begin() + (n * 9) / 10, sorted.end());
++    const float p90 = sorted[(n * 9) / 10];
++    if (p90 <= p10) return false;
++
++    const float th = p10 + ratio * (p90 - p10);
++    int a = -1, b = -1;
++    for (int i = 0; i < n; ++i) if (sv[i] >= th) { a = i; break; }
++    for (int i = n - 1; i >= 0; --i) if (sv[i] >= th) { b = i; break; }
++    if (a < 0 || b < a) return false;
++    lo = a; hi = b;
++    return true;
++}
++
++} // namespace
++
++Rect refineRegionBox(const GrayView& image, const Rect& bbox, float energyRatio, int searchMargin) {
++    const int wx0 = std::max(0, bbox.x0 - searchMargin);
++    const int wy0 = std::max(0, bbox.y0 - searchMargin);
++    const int wx1 = std::min(image.width, bbox.x1 + searchMargin);
++    const int wy1 = std::min(image.height, bbox.y1 + searchMargin);
++    if (wx1 - wx0 < 32 || wy1 - wy0 < 32) return bbox;
++
++    const int stride = image.stride > 0 ? image.stride : image.width;
++    // 2픽셀 간격 표본. **빈 칸을 남기지 않고 압축해서** 담는 것이 중요하다 —
++    // 표본이 없는 자리를 0으로 채우면 백분위수가 그 0들에 끌려간다.
++    const int ys0 = wy0 + 1, xs0 = wx0 + 1;
++    const int hs = std::max(0, (wy1 - 1 - ys0 + 1) / 2);
++    const int ws = std::max(0, (wx1 - 1 - xs0 + 1) / 2);
++    if (hs < 8 || ws < 8) return bbox;
++
++    auto energyAt = [&](int y, int x) -> float {
++        const uint8_t* __restrict r0 = image.pixels + static_cast<size_t>(y - 1) * stride;
++        const uint8_t* __restrict r1 = image.pixels + static_cast<size_t>(y) * stride;
++        const uint8_t* __restrict r2 = image.pixels + static_cast<size_t>(y + 1) * stride;
++        return static_cast<float>(std::abs(static_cast<int>(r1[x + 1]) - static_cast<int>(r1[x - 1])) +
++                                  std::abs(static_cast<int>(r2[x]) - static_cast<int>(r0[x])));
++    };
++
++    // [1차] 행 프로파일. 행은 코드 폭 전체를 지나므로 배경과 잘 갈린다.
++    std::vector<float> rowE(static_cast<size_t>(hs), 0.0f);
++    for (int i = 0; i < hs; ++i) {
++        const int y = ys0 + 2 * i;
++        float acc = 0.0f;
++        for (int j = 0; j < ws; ++j) acc += energyAt(y, xs0 + 2 * j);
++        rowE[static_cast<size_t>(i)] = acc;
++    }
++    int ri0, ri1;
++    if (!profileBounds(rowE, energyRatio, ri0, ri1)) return bbox;
++
++    // [2차] 열 프로파일 — **1차에서 찾은 행 범위 안에서만** 잰다.
++    // 창 전체에서 재면 코드 없는 행들이 모든 열에 똑같이 더해져서 코드
++    // 열과 배경 열의 차이가 희석된다. 실제로 그것 때문에 열 경계가
++    // 창 전체로 나왔었다(행은 제대로 잡혔는데 열만 안 잡혔다).
++    std::vector<float> colE(static_cast<size_t>(ws), 0.0f);
++    for (int i = ri0; i <= ri1; ++i) {
++        const int y = ys0 + 2 * i;
++        for (int j = 0; j < ws; ++j) colE[static_cast<size_t>(j)] += energyAt(y, xs0 + 2 * j);
++    }
++    int ci0, ci1;
++    if (!profileBounds(colE, energyRatio, ci0, ci1)) return bbox;
++
++    Rect out{xs0 + 2 * ci0, ys0 + 2 * ri0, xs0 + 2 * ci1 + 1, ys0 + 2 * ri1 + 1};
++    out.x0 = std::max(0, out.x0); out.y0 = std::max(0, out.y0);
++    out.x1 = std::min(image.width, out.x1); out.y1 = std::min(image.height, out.y1);
++    const long ow = out.x1 - out.x0, oh = out.y1 - out.y0;
++    if (ow < 16 || oh < 16) return bbox;
++    // 좁히려고 부른 함수다. 결과가 더 넓으면 판정이 실패한 것이므로
++    // 원래 상자를 쓴다(창을 넓혀 잡은 만큼 커지는 것을 그대로 두면
++    // ROI가 오히려 비싸진다 — 실측에서 그것 때문에 대비 구간이
++    // 28 -> 108ms로 뒤집혔다).
++    if (ow * oh >= static_cast<long>(bbox.x1 - bbox.x0) * (bbox.y1 - bbox.y0)) return bbox;
++    return out;
++}
++
+ } // namespace vscan
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 6e2969a..d1797d2 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -410,12 +410,43 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+     // 영역마다 크기가 달라서 pad도 달라진다 — decodeRegionsParallel()은
+     // 단일 pad만 받으므로, 여기서 미리 여백을 먹인 rect를 만들어 넘기고
+     // pad 인자는 0으로 준다.
+-    std::vector<Rect> rects;
++    // [S2 — 상자를 원본 해상도로 다시 재서 좁힌다]
++    // 축소본 상자는 타일 격자(원본 128px) 단위라 늘 헐렁하다. 그 헐렁함이
++    // 그대로 시간이 된다 — 실측(대비 0.10): 영역 크롭 985k px(프레임의
++    // 31%)의 풀옵션 디코드가 13.6~27.2ms인데, 실제 코드 크기인 408k px는
++    // 13.1ms다. 여기서 한 번 좁히면 자르기/대비/회전 패스가 전부 같은
++    // rect를 쓰므로 이득이 모든 구제 단계에 곱해진다.
++    // [[vscan-lite-region-box-refine]]
++    //
++    // 다만 **회전 패스는 이 상자를 쓰면 안 된다.** 기울어진 1D 코드는
++    // 축정렬 상자 안에서 마름모꼴로 놓여 모서리 쪽 에너지가 옅어지는데,
++    // 프로파일 임계가 그 꼬리를 잘라낸다. 실측(Code128 module 8, 45도):
++    // 상자가 768 -> 699로 좁아지자 되돌린 뒤 코드의 양끝이 잘려 검출
++    // 자체가 실패했다(22ms 성공 -> 190ms 실패). 되돌린 다음에는 어차피
++    // tightenToContent()가 다시 좁히므로, 회전 쪽은 넉넉한 상자가 맞다.
++    // 그래서 상자를 두 벌 만든다.
++    std::vector<Rect> rects, rotRects;
+     rects.reserve(regions.size());
+-    for (const auto& r : regions) {
++    rotRects.reserve(regions.size());
++    for (auto& r : regions) {
++        const int cw = r.bbox.x1 - r.bbox.x0, ch = r.bbox.y1 - r.bbox.y0;
++        if (cw < 16 || ch < 16) continue;
++        {   // 회전용: 예전 그대로 넉넉하게
++            int pad = std::min(static_cast<int>(0.35f * std::max(cw, ch)), cfg_.regionRescueMaxPadPx);
++            rotRects.push_back(Rect{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
++                                    std::min(image.width, r.bbox.x1 + pad),
++                                    std::min(image.height, r.bbox.y1 + pad)});
++        }
++        const Rect tight = refineRegionBox(image, r.bbox);
++        if (tight.x1 - tight.x0 >= 16 && tight.y1 - tight.y0 >= 16) r.bbox = tight;
+         const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
+         if (w < 16 || h < 16) continue;
+-        int pad = static_cast<int>(0.35f * std::max(w, h));
++        // [여백] 정지대는 모듈 크기에 비례해야 하는데 모듈을 모르므로
++        // 상자 크기에 비례시킨다. 상자가 이제 코드에 딱 맞으므로 비율을
++        // 예전(0.35)만큼 크게 줄 이유가 없다 — 그 값은 헐렁한 상자를
++        // 전제로 정해진 것이었다. 작은 코드에서 정지대가 모자라지 않도록
++        // 하한을 둔다.
++        int pad = std::max(24, static_cast<int>(0.12f * std::max(w, h)));
+         pad = std::min(pad, cfg_.regionRescueMaxPadPx);
+         Rect rc{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
+                 std::min(image.width, r.bbox.x1 + pad), std::min(image.height, r.bbox.y1 + pad)};
+@@ -565,8 +596,8 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+     for (int i = 0; i < rotLimit; ++i) {
+         if (budgetExceeded()) break;
+         if (regions[i].angleDeg >= CodeRegion::kAngleUnknown) continue;
+-        if (i >= (int)rects.size()) break;
+-        const Rect& rc = rects[i];
++        if (i >= (int)rotRects.size()) break;
++        const Rect& rc = rotRects[i];
+         const int rw = rc.x1 - rc.x0, rh = rc.y1 - rc.y0;
+         if (rw < 32 || rh < 32) continue;
+ 
+-- 
+2.43.0
+
