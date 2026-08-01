@@ -547,8 +547,15 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
 
 
 def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
-    """코드 단위 기하 변환(회전/원근). 회전 후 bbox가 셀을 넘지 않게 미리 축소."""
+    """코드 단위 기하 변환(회전/원근). 회전 후 bbox가 셀을 넘지 않게 미리 축소.
+
+    반환은 (이미지, 각도, **모듈 배율**)이다. 배율을 같이 돌려주는 이유:
+    여기서 하는 축소(회전 여유분 1/1.42, 셀 맞춤, 원근 압축)가 전부
+    모듈 크기를 줄이는데 지금까지 module_px에 반영되지 않았다. 그래서
+    판독 가능성 버킷이 실제보다 후하게 'ok'를 줬다.
+    """
     ang = 0.0
+    scale = 1.0
     if rng.random() < p_rot:
         # 1D는 회전에 원리적으로 취약하다(§3.2.15) — 작은 기울기와 큰 각도를
         # 둘 다 뽑는다. 90도 근방은 TryRotate 회귀 감시용으로 일부러 자주.
@@ -568,11 +575,13 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
         coeffs = (1, s * 0.9, -w * s * 0.12, s * 0.35, 1, -h * s * 0.10,
                   s * 0.0011, s * 0.00035)
         pw0, ph0 = img.size
-        img = _perspective(img, coeffs)
+        img, pscale = _perspective(img, coeffs)
+        scale *= pscale
         if img.width > pw0 or img.height > ph0:
             k = min(pw0 / img.width, ph0 / img.height)
             img = img.resize((max(24, int(img.width * k)),
                               max(24, int(img.height * k))), Image.LANCZOS)
+            scale *= k
         tags.append("perspective" + ("-strong" if s > 0.2 else ""))
 
     if ang:
@@ -580,11 +589,13 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
             # 회전 bbox 확대분(최대 sqrt(2))만큼 미리 줄여야 셀 안에 들어간다
             k = 1.0 / 1.42
             img = img.resize((max(30, int(img.width * k)), max(20, int(img.height * k))))
+            scale *= k
         img = img.rotate(ang, expand=True, fillcolor=255, resample=Image.BICUBIC)
         if max(img.size) > cell_min:
             k = cell_min / max(img.size)
             img = img.resize((max(20, int(img.width * k)), max(20, int(img.height * k))))
-    return img, ang
+            scale *= k
+    return img, ang, scale
 
 
 # ============================================================ 판독 가능성 분류
@@ -802,16 +813,51 @@ def _perspective(img, coeffs):
     q = q[:2] / q[2]
     x0, y0 = q[0].min(), q[1].min()
     x1, y1 = q[0].max(), q[1].max()
-    nw = int(math.ceil(x1 - x0))
-    nh = int(math.ceil(y1 - y0))
-    # 지나치게 커지는 경우(강한 왜곡)는 상한을 둔다 — 프레임에 못 넣는다.
-    nw = max(w, min(nw, w * 3))
-    nh = max(h, min(nh, h * 3))
+    nw = x1 - x0
+    nh = y1 - y0
+    # [상한을 자르지 말고 줄일 것] 강한 왜곡에서는 결과가 폭발한다 —
+    # 실측: persp 0.6에서 자연 크기 4051x1150, 0.7에서 8066x2271,
+    # 0.9에서는 소실선이 이미지를 지나 5810460x117384가 된다. 예전에는
+    # 여기서 크기를 min()으로 잘랐는데, 그러면 캔버스 확장이 무의미해지고
+    # persp 0.6 이상이 다시 잘려 나갔다(EAN13 중앙행 런 59 -> 13).
+    # 자르는 대신 균일 축소를 합성해서 **내용을 전부 담는다**. 코드가
+    # 작아지는 것은 아래 pscale에 반영되므로 판독 가능성 버킷이 알아서
+    # 걸러낸다.
+    maxW, maxH = w * 4, h * 4
+    fit = min(1.0, maxW / max(1.0, nw), maxH / max(1.0, nh))
+    nw = max(8, int(math.ceil(nw * fit)))
+    nh = max(8, int(math.ceil(nh * fit)))
+    # 새 목적지 좌표 -> (축소 해제) -> 평행이동 -> 원본
+    S = np.array([[1 / fit, 0, 0], [0, 1 / fit, 0], [0, 0, 1]], dtype=np.float64)
     T = np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], dtype=np.float64)
-    M2 = M @ T                                # 새 목적지 -> 원본
+    M2 = M @ T @ S                            # 새 목적지 -> 원본
     M2 = M2 / M2[2, 2]
-    return img.transform((nw, nh), Image.PERSPECTIVE, tuple(M2.ravel()[:8]),
-                         resample=Image.BICUBIC, fillcolor=255)
+    out = img.transform((nw, nh), Image.PERSPECTIVE, tuple(M2.ravel()[:8]),
+                        resample=Image.BICUBIC, fillcolor=255)
+
+    # [모듈이 얼마나 눌리는가] 원근은 코드 **안에서** 배율을 바꾼다. 한쪽은
+    # 늘어나고 반대쪽은 눌리는데, 눌리는 쪽 모듈이 1px 아래로 내려가면
+    # 그 부분의 바는 실제로 사라진다 — 실측(EAN13 persp 0.7): 중앙행의
+    # 흑백 런이 59개여야 하는데 9개만 남았다. module_px가 스칼라 하나라
+    # 그걸 표현하지 못해서 판독 가능성 버킷이 계속 'ok'라고 했다.
+    #
+    # 바 폭은 "면적 배율 / 높이 배율"이다(평행사변형이므로). 원본 격자에서
+    # 표본을 떠서 그 최솟값을 돌려준다.
+    def local_scale(px, py):
+        def fwd(x, y):
+            v = F @ np.array([x, y, 1.0])
+            return v[:2] / v[2]
+        p0 = fwd(px, py)
+        dx = fwd(px + 1.0, py) - p0
+        dy = fwd(px, py + 1.0) - p0
+        area = abs(dx[0] * dy[1] - dx[1] * dy[0])
+        hgt = math.hypot(dy[0], dy[1])
+        return area / hgt if hgt > 1e-9 else 0.0
+
+    smin = min(local_scale(x, y)
+               for x in (0.0, w * 0.5, float(w))
+               for y in (0.0, h * 0.5, float(h)))
+    return out, max(1e-4, smin * fit)
 
 
 def _cylinder_warp(a, strength):
@@ -980,8 +1026,9 @@ def build_one(index, cfg):
         cphys = {}
         sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
                              is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys)
-        sym, ang = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
-                                   p_rot=prof["p_rot"])
+        sym, ang, gscale = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
+                                           p_rot=prof["p_rot"])
+        mod_px *= gscale
         px = cx0 + margin + int(rng.integers(0, max(1, avail_w - sym.width + 1)))
         py = cy0 + margin + int(rng.integers(0, max(1, avail_h - sym.height + 1)))
         img.paste(sym, (px, py))
@@ -1163,8 +1210,9 @@ def build_sweep(index, combo, cfg):
         sym = Image.fromarray(np.clip(s, 0, 255).astype(np.uint8), mode="L")
         if p["persp"]:
             v = float(p["persp"])
-            sym = _perspective(sym, (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
-                                     -sym.height * v * 0.10, v * 0.0011, v * 0.00035))
+            sym, pscale = _perspective(sym, (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
+                                             -sym.height * v * 0.10, v * 0.0011, v * 0.00035))
+            eff_mod *= pscale
             # 캔버스를 넓혔으므로 셀을 넘칠 수 있다. 넘치면 줄여서 담는다 —
             # 고정 화각 카메라 앞에서 라벨을 기울이면 실제로 그렇게 된다.
             # 모듈 크기도 같은 비율로 줄어드므로 eff_mod를 함께 환산해야
