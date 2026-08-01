@@ -8,7 +8,7 @@
 namespace vscan {
 
 bool pitchEqualize(const GrayView& src, GrayImage& out, PitchMap* map,
-                   int winRuns, int pct, float outModule) {
+                   int rows, int winRuns, int pct, float outModule) {
     const int W = src.width, H = src.height;
     if (W < 64 || H < 24 || winRuns < 3 || outModule < 2.0f) return false;
     const int stride = src.stride > 0 ? src.stride : W;
@@ -37,77 +37,136 @@ bool pitchEqualize(const GrayView& src, GrayImage& out, PitchMap* map,
             if (dark(x, y)) { if (y < cy0) cy0 = y; cy1 = y; break; }
     if (cy1 - cy0 < 12) return false;
 
-    // [대표 행] 전환이 가장 많은 행을 쓴다. 1D는 어느 행이나 같지만
-    // 적층 코드(PDF417/DataBarExp)는 행마다 내용이 달라, 런이 많은 행이
-    // 모듈 추정에 표본을 더 준다.
-    int bestY = -1, bestN = 0, bx0 = 0, bx1 = 0;
-    for (int i = 0; i < 15; ++i) {
-        const int y = cy0 + (cy1 - cy0) * (2 + i * 6) / 100;
-        if (y < 0 || y >= H) continue;
+    // [표본 행 고르기] rows==1이면 전환이 가장 많은 한 행, rows>1이면
+    // 코드 높이를 균등 분할한 여러 행. 어느 쪽이 맞는지는 코드 종류에
+    // 달렸다 — 둘 다 필요해서 파이프라인이 두 번 부른다(아래 주석).
+    std::vector<int> ys;
+    if (rows <= 1) {
+        int bestY = -1, bestN = 0;
+        for (int i = 0; i < 15; ++i) {
+            const int y = cy0 + (cy1 - cy0) * (2 + i * 6) / 100;
+            if (y < 0 || y >= H) continue;
+            int x0 = -1, x1 = -1;
+            for (int x = 0; x < W; ++x) if (dark(x, y)) { x0 = x; break; }
+            for (int x = W - 1; x >= 0; --x) if (dark(x, y)) { x1 = x; break; }
+            if (x0 < 0 || x1 - x0 < 40) continue;
+            int n = 0;
+            bool prev = dark(x0, y);
+            for (int x = x0 + 1; x <= x1; ++x) {
+                const bool c = dark(x, y);
+                if (c != prev) { ++n; prev = c; }
+            }
+            if (n > bestN) { bestN = n; bestY = y; }
+        }
+        if (bestY < 0 || bestN < 20) return false;
+        ys.push_back(bestY);
+    } else {
+        for (int i = 0; i < rows; ++i) {
+            const int y = cy0 + (cy1 - cy0) * (10 + i * 80 / (rows - 1)) / 100;
+            if (y >= 0 && y < H) ys.push_back(y);
+        }
+    }
+
+    // [런을 모은다] 여러 행이면 x 위치로 묶어 백분위수를 내므로 행마다
+    // 따로 볼 필요가 없다 — 그냥 한 통에 붓는다.
+    std::vector<float> cent, len;
+    cent.reserve(512);
+    len.reserve(512);
+    int gx0 = W, gx1 = -1;
+    for (int y : ys) {
         int x0 = -1, x1 = -1;
         for (int x = 0; x < W; ++x) if (dark(x, y)) { x0 = x; break; }
         for (int x = W - 1; x >= 0; --x) if (dark(x, y)) { x1 = x; break; }
         if (x0 < 0 || x1 - x0 < 40) continue;
-        int n = 0;
+        int nCh = 0;
+        int start = x0;
         bool prev = dark(x0, y);
-        for (int x = x0 + 1; x <= x1; ++x) {
-            const bool c = dark(x, y);
-            if (c != prev) { ++n; prev = c; }
-        }
-        if (n > bestN) { bestN = n; bestY = y; bx0 = x0; bx1 = x1; }
-    }
-    if (bestY < 0 || bestN < 20) return false;
-
-    // 런 길이와 중심
-    std::vector<float> runLen, runCent;
-    runLen.reserve(bestN + 2);
-    runCent.reserve(bestN + 2);
-    {
-        int start = bx0;
-        bool prev = dark(bx0, bestY);
-        for (int x = bx0 + 1; x <= bx1 + 1; ++x) {
-            const bool c = (x <= bx1) ? dark(x, bestY) : !prev;
+        for (int x = x0 + 1; x <= x1 + 1; ++x) {
+            const bool c = (x <= x1) ? dark(x, y) : !prev;
             if (c != prev) {
-                runLen.push_back(static_cast<float>(x - start));
-                runCent.push_back(0.5f * static_cast<float>(x + start));
+                len.push_back(static_cast<float>(x - start));
+                cent.push_back(0.5f * static_cast<float>(x + start));
                 start = x;
                 prev = c;
+                ++nCh;
             }
         }
+        if (nCh >= 8) { gx0 = std::min(gx0, x0); gx1 = std::max(gx1, x1); }
     }
-    if (runLen.size() < 12) return false;
+    if (len.size() < (rows <= 1 ? 12u : 24u) || gx1 - gx0 < 40) return false;
 
-    // [국소 모듈] 이동창 안 런 길이의 하위 백분위수. 런은 모듈의 정수배
+    // 중심 기준 정렬 (창을 밀며 훑기 위해). 1행이면 이미 정렬돼 있다.
+    if (rows > 1) {
+        std::vector<int> idx(len.size());
+        for (size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(i);
+        std::sort(idx.begin(), idx.end(), [&](int a2, int b2) { return cent[a2] < cent[b2]; });
+        std::vector<float> c2(len.size()), l2(len.size());
+        for (size_t i = 0; i < idx.size(); ++i) { c2[i] = cent[idx[i]]; l2[i] = len[idx[i]]; }
+        cent.swap(c2); len.swap(l2);
+    }
+
+    // [국소 모듈] 창 안 런 길이의 **하위 백분위수**. 런은 모듈의 정수배
     // (1~4)라 하위값이 곧 1모듈이다.
-    const int n = static_cast<int>(runLen.size());
-    std::vector<float> mod(n);
-    std::vector<float> buf;
-    buf.reserve(winRuns + 1);
-    for (int i = 0; i < n; ++i) {
-        const int a = std::max(0, i - winRuns / 2), b = std::min(n, i + winRuns / 2 + 1);
-        buf.assign(runLen.begin() + a, runLen.begin() + b);
-        const size_t k = static_cast<size_t>(buf.size() * pct / 100);
-        std::nth_element(buf.begin(), buf.begin() + std::min(k, buf.size() - 1), buf.end());
-        mod[i] = std::max(1.0f, buf[std::min(k, buf.size() - 1)]);
-    }
-
-    // [모듈 좌표] u(x) = 적분 1/m. m은 런 중심에서만 알므로 선형 보간한다.
+    //
+    // 창을 어떻게 잡느냐가 두 갈래로 갈린다. 1행일 때는 런 인덱스로
+    // 세는 창(앞뒤 winRuns개)이 맞다 — 배율이 변해도 항상 같은 개수의
+    // 모듈을 본다. 여러 행일 때는 런이 x축에서 뒤섞이므로 인덱스 창이
+    // 물리적으로 얼마나 넓은지 알 수 없다. 그래서 픽셀 창으로 바꾼다.
+    // 두 추정기는 결과가 다르다 — 섞지 말고 따로 둘 것.
     std::vector<double> u(static_cast<size_t>(W) + 1, 0.0);
-    int seg = 0;
-    for (int x = 0; x < W; ++x) {
-        while (seg + 1 < n && runCent[seg + 1] < static_cast<float>(x)) ++seg;
-        double m;
-        if (static_cast<float>(x) <= runCent[0]) m = mod[0];
-        else if (static_cast<float>(x) >= runCent[n - 1]) m = mod[n - 1];
-        else {
-            const float t = (static_cast<float>(x) - runCent[seg]) /
-                            std::max(1e-3f, runCent[seg + 1] - runCent[seg]);
-            m = mod[seg] * (1.0f - t) + mod[seg + 1] * t;
+    if (rows <= 1) {
+        const int n = static_cast<int>(len.size());
+        std::vector<float> mod(static_cast<size_t>(n));
+        std::vector<float> buf;
+        buf.reserve(static_cast<size_t>(winRuns) + 1);
+        for (int i = 0; i < n; ++i) {
+            const int a = std::max(0, i - winRuns / 2), b = std::min(n, i + winRuns / 2 + 1);
+            buf.assign(len.begin() + a, len.begin() + b);
+            const size_t k = std::min(static_cast<size_t>(buf.size() * pct / 100), buf.size() - 1);
+            std::nth_element(buf.begin(), buf.begin() + k, buf.end());
+            mod[static_cast<size_t>(i)] = std::max(1.0f, buf[k]);
         }
-        u[x + 1] = u[x] + 1.0 / std::max(1.0, m);
+        // m은 런 중심에서만 알므로 중심 사이를 선형 보간한다.
+        int seg = 0;
+        for (int x = 0; x < W; ++x) {
+            while (seg + 1 < n && cent[seg + 1] < static_cast<float>(x)) ++seg;
+            double m;
+            if (static_cast<float>(x) <= cent[0]) m = mod[0];
+            else if (static_cast<float>(x) >= cent[n - 1]) m = mod[n - 1];
+            else {
+                const float t = (static_cast<float>(x) - cent[seg]) /
+                                std::max(1e-3f, cent[seg + 1] - cent[seg]);
+                m = mod[seg] * (1.0f - t) + mod[seg + 1] * t;
+            }
+            u[x + 1] = u[x] + 1.0 / std::max(1.0, m);
+        }
+    } else {
+        float medLen;
+        {
+            std::vector<float> t = len;
+            std::nth_element(t.begin(), t.begin() + t.size() / 2, t.end());
+            medLen = t[t.size() / 2];
+        }
+        const float winPx = std::max(24.0f, medLen * static_cast<float>(winRuns));
+        size_t l = 0, r = 0;
+        float last = std::max(1.0f, medLen);
+        std::vector<float> buf;
+        for (int x = 0; x < W; ++x) {
+            const float a2 = static_cast<float>(x) - winPx * 0.5f;
+            const float b2 = static_cast<float>(x) + winPx * 0.5f;
+            while (l < cent.size() && cent[l] < a2) ++l;
+            while (r < cent.size() && cent[r] <= b2) ++r;
+            if (r > l + 3) {
+                buf.assign(len.begin() + l, len.begin() + r);
+                const size_t k = std::min(buf.size() - 1, static_cast<size_t>(buf.size() * pct / 100));
+                std::nth_element(buf.begin(), buf.begin() + k, buf.end());
+                last = std::max(1.0f, buf[k]);
+            }
+            u[x + 1] = u[x] + 1.0 / static_cast<double>(last);
+        }
     }
 
-    const double u0 = u[std::max(0, bx0)], u1 = u[std::min(W, bx1 + 1)];
+    const double u0 = u[std::max(0, gx0)], u1 = u[std::min(W, gx1 + 1)];
     const double span = u1 - u0;
     if (!(span > 4.0)) return false;
     const int dw = static_cast<int>(span * outModule) + 1;

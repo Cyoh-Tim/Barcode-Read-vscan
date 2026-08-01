@@ -657,11 +657,28 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     // [곡면(원통) 보정] 원통 라벨은 상자가 직사각형 그대로라
                     // 호모그래피로는 못 편다 — 가로 좌표만 비선형으로 밀린다.
                     // 국소 바 피치를 균등하게 다시 샘플링한다.
+                    //
+                    // 피치를 재는 행 수는 **1행과 9행 둘 다** 돌린다.
+                    // 적층 코드에는 9행이 유리할 것 같지만 실측은 서로를
+                    // 포함하지 않는 트레이드오프였다(곡면 축 11단계):
+                    // DataBar 9/11 vs 8/11, DataBarExp 7/11 vs 9/11.
+                    // 9행이 DataBar 0.4를 살리면서 0.6/0.7을 죽였다.
+                    //
+                    // 값은 치른다. 사다리 맨 끝이라 이미 다 실패한
+                    // 프레임에서만 돌지만, 그런 프레임이 곧 p95다 —
+                    // 300장 코퍼스 교차 측정: 평균 128.9 -> 135.7ms(+5%),
+                    // p95 366 -> 407ms(+11%), 검출 72.4 -> 72.7%.
+                    // "지도가 안 휘었으면 2차를 건너뛴다"는 문지기를
+                    // 절대/상대 두 가지로 넣어봤지만 둘 다 시간은 거의
+                    // 못 줄이고 검출만 깎았다(코드 1개). 그냥 둘 다 돈다.
                     // [[vscan-lite-pitch-equalize]]
-                    GrayImage eq;
-                    PitchMap pmap;
-                    if (pitchEqualize(GrayView(crop), eq, &pmap)) {
+                    for (int rows : {1, 9}) {
+                        if (rows != 1 && budgetExceeded()) break;
+                        GrayImage eq;
+                        PitchMap pmap;
+                        if (!pitchEqualize(GrayView(crop), eq, &pmap, rows)) continue;
                         sHits = roiPipe.processViewCore(GrayView(eq));
+                        if (sHits.empty()) continue;
                         // 가로만 바뀌었으므로 x는 역사상, y는 여백만 뺀다.
                         for (auto& r : sHits)
                             for (auto& pt : r.symbol.position) {
@@ -670,6 +687,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                     pt.first = static_cast<int>(pmap.srcX[i]);
                                 pt.second -= pmap.marginY;
                             }
+                        break;
                     }
                 }
                 if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {

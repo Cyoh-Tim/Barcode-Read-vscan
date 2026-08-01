@@ -400,6 +400,7 @@ struct PipelineConfig {
      */
     int perspRescueMaxRegions = 2;
 
+
     /*
      * [적응형 배치 프로파일] 0 = 끔(기본), 1 = 켬.
      *
