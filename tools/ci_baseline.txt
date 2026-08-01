@@ -1,8 +1,8 @@
-rate=59.4
-mean=190.38
-p95=491.62
-misdec=2
-dup=3
-meanr=116.71
-p95r=301.39
-ref=1631.2
+rate=69.7
+mean=118.04
+p95=345.87
+misdec=0
+dup=1
+meanr=83.56
+p95r=244.85
+ref=1412.6
