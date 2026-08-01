@@ -2,6 +2,7 @@
 #include "vscan_internal/decoder_zxing.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
+#include <cstdlib>
 #include "vscan_internal/locate.hpp"
 #include "vscan_internal/locate_qr.hpp"
 #ifdef VSCAN_HAVE_ZBAR
@@ -437,19 +438,66 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                                     std::min(image.width, r.bbox.x1 + pad),
                                     std::min(image.height, r.bbox.y1 + pad)});
         }
-        const Rect tight = refineRegionBox(image, r.bbox);
-        if (tight.x1 - tight.x0 >= 16 && tight.y1 - tight.y0 >= 16) r.bbox = tight;
+        // [2D 행렬코드는 좁히지 않는다]
+        // 정밀화 + 좁은 여백은 1D/적층형에는 그대로 이득인데, QR/DataMatrix
+        // 같은 2D에는 손해다. 2D는 사방에 정지대가 필요하고, 국소 이진화의
+        // 구조 마스크도 코드 바깥의 "구조 없는" 영역이 있어야 경계를
+        // 제대로 잡는다. 실측(QR module 8, 대비 스윕 8단): 정밀화와 좁은
+        // 여백이 각각 한 단씩 깎아서 8/8 -> 6/8이 됐고, 둘 다 되돌리면
+        // 8/8로 돌아온다.
+        //
+        // 구분은 **거친 상자의 종횡비**로 한다. 가로로(또는 세로로) 길면
+        // 1D/적층형이고, 정사각형에 가까우면 2D이거나 기울어진 1D다.
+        // 어느 쪽이든 넉넉한 상자가 맞다 — 기울어진 1D는 회전 패스가
+        // 따로 넉넉한 상자를 쓰므로 여기서 좁힐 이유가 없다.
+        //
+        // angleDeg(방향성 유무)를 쓰려다 실패했다. 이론상으로는 그게
+        // 맞는 신호인데(2D는 사방 엣지라 코히런스가 안 나온다),
+        // **저대비에서는 1D도 코히런스가 임계 아래로 떨어진다** — 실측:
+        // 같은 Code128이 대비 0.15/0.30에서는 "각도 있음"인데 0.10에서는
+        // "각도 없음"으로 뒤집혀서, 정작 가장 느린 프레임이 2D 취급을
+        // 받아 103ms가 됐다. 종횡비는 대비와 무관하게 안정적이다
+        // (1024x512 -> 2.0, QR 256x256 -> 1.0).
+        const bool elongated = std::max(cw, ch) >= 3 * std::min(cw, ch) / 2;
+        if (elongated) {
+            const Rect tight = refineRegionBox(image, r.bbox);
+            if (tight.x1 - tight.x0 >= 16 && tight.y1 - tight.y0 >= 16) r.bbox = tight;
+        }
         const int w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
         if (w < 16 || h < 16) continue;
         // [여백] 정지대는 모듈 크기에 비례해야 하는데 모듈을 모르므로
         // 상자 크기에 비례시킨다. 상자가 이제 코드에 딱 맞으므로 비율을
         // 예전(0.35)만큼 크게 줄 이유가 없다 — 그 값은 헐렁한 상자를
-        // 전제로 정해진 것이었다. 작은 코드에서 정지대가 모자라지 않도록
-        // 하한을 둔다.
-        int pad = std::max(24, static_cast<int>(0.12f * std::max(w, h)));
-        pad = std::min(pad, cfg_.regionRescueMaxPadPx);
-        Rect rc{std::max(0, r.bbox.x0 - pad), std::max(0, r.bbox.y0 - pad),
-                std::min(image.width, r.bbox.x1 + pad), std::min(image.height, r.bbox.y1 + pad)};
+        // 전제로 정해진 것이었다.
+        //
+        // **축마다 따로 준다.** 하나의 pad를 max(w,h)에 비례시키면
+        // 가로로 긴 1D 코드에서 위아래로도 그만큼 붙는데, 1D의 정지대는
+        // 막대 방향(가로)에만 필요하다. 실측(Code128 module 8, 정밀화된
+        // 상자 951x379): 단일 pad는 1179x607 = 715k px인데 축별 pad는
+        // 1179x469 = 553k px다. 세로로 붙은 여백은 정지대가 아니라
+        // 그냥 디코더가 훑을 배경일 뿐이다.
+        // [하한 56px] 비율만으로 주면 작은 2D 코드에서 정지대가 모자란다.
+        // QR은 규격상 정지대가 4모듈인데, 정밀화된 상자 249x249(모듈 8px)에
+        // 0.12를 곱하면 29px = 3.6모듈이라 아슬아슬하게 모자랐다 — 실측으로
+        // 대비 0.10 QR이 그것 때문에 안 읽혔다(하한 24/40 실패, 56/72 성공).
+        // 56px는 모듈 8px 기준 7모듈이다. 더 키워도 얻는 게 없어서
+        // 통과하는 가장 작은 값으로 둔다.
+        int padX, padY;
+        if (!elongated) {
+            // 정사각형에 가까움(2D 또는 기울어진 1D): 예전 그대로 넉넉하게.
+            padX = padY = std::min(static_cast<int>(0.35f * std::max(w, h)), cfg_.regionRescueMaxPadPx);
+        } else {
+            // 1D/적층형: 축마다 따로 준다. 하나의 pad를 max(w,h)에
+            // 비례시키면 가로로 긴 코드에서 위아래로도 그만큼 붙는데,
+            // 1D의 정지대는 막대 방향에만 필요하다. 실측(정밀화된 상자
+            // 951x379): 단일 pad는 1179x607 = 715k px인데 축별 pad는
+            // 1179x469 = 553k px다. 하한 56px은 작은 코드에서 정지대가
+            // 모자라지 않게 하기 위한 것이다.
+            padX = std::min(std::max(56, static_cast<int>(0.12f * w)), cfg_.regionRescueMaxPadPx);
+            padY = std::min(std::max(56, static_cast<int>(0.12f * h)), cfg_.regionRescueMaxPadPx);
+        }
+        Rect rc{std::max(0, r.bbox.x0 - padX), std::max(0, r.bbox.y0 - padY),
+                std::min(image.width, r.bbox.x1 + padX), std::min(image.height, r.bbox.y1 + padY)};
         rects.push_back(rc);
     }
     if (rects.empty()) return {};
@@ -510,19 +558,27 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                 Pipeline roiPipe(roiCfg);
                 std::vector<PipelineResult> sHits;
                 GrayImage boosted;
-                if (stretchContrast(GrayView(crop), boosted))
-                    sHits = roiPipe.processViewCore(GrayView(boosted));
-                if (sHits.empty() && !boosted.pixels.empty()) {
-                    // [편 다음엔 한 번 뭉갠다] 스트레칭은 신호와 **노이즈를
-                    // 같이** 증폭한다. 대비가 낮을수록 이득이 커지므로
-                    // 양자화/센서 노이즈도 그만큼 커져서, 편 직후에는
-                    // 오히려 이진화가 흔들린다.
+                if (stretchContrast(GrayView(crop), boosted)) {
+                    // [펴고 나서 뭉갠 판본을 **먼저** 본다]
+                    // 스트레칭은 신호와 노이즈를 같이 증폭한다. 대비가
+                    // 낮을수록 이득이 커지므로 양자화/센서 노이즈도 그만큼
+                    // 커져서, 편 직후에는 오히려 이진화가 흔들린다.
                     // 실측(EAN13 대비 0.20): ROI를 펴기만 하면 실패,
-                    // 편 뒤 3x3 블러를 한 번 먹이면 읽힌다. 0.25는 펴는
-                    // 것만으로도 읽히므로 이 단계는 더 낮은 대비 전용이다.
+                    // 편 뒤 3x3 블러를 한 번 먹이면 읽힌다.
+                    //
+                    // 예전에는 "펴기만" -> "펴고 뭉개기" 순서였는데,
+                    // 실측상 저대비 프레임은 거의 항상 뭉개야 붙는다.
+                    // 순서를 바꾸면 펴기만 한 판본의 디코드(실측 12.0ms,
+                    // 그리고 그건 노이즈가 증폭된 이미지라 가장 비싼
+                    // 판본이다)를 건너뛴다. 순서만 바꾸는 것이라 검출력에는
+                    // 영향이 없다 — 뭉갠 쪽이 빈손이면 아래에서 펴기만 한
+                    // 판본을 그대로 본다(모듈이 아주 작아 블러가 손해인
+                    // 경우가 그쪽이다).
                     GrayImage smoothed;
                     boxBlur3x3(GrayView(boosted), smoothed);
                     sHits = roiPipe.processViewCore(GrayView(smoothed));
+                    if (sHits.empty())
+                        sHits = roiPipe.processViewCore(GrayView(boosted));
                 }
                 // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
                 // ROI가 이미 계조를 200 이상 쓰고 있으면(stretchContrast가
