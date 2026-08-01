@@ -1,0 +1,317 @@
+From c39533727c40ff90ad3c05575504b1a2a1548024 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 14:59:28 +0000
+Subject: [PATCH 64/64] =?UTF-8?q?12=EC=B6=95=20=EC=A0=84=EB=B6=80=20100%:?=
+ =?UTF-8?q?=20=EC=A1=B0=EB=AA=85=20=ED=8F=89=ED=83=84=ED=99=94=20+=20?=
+ =?UTF-8?q?=EB=AA=A8=EC=85=98=20=ED=8C=90=EC=A0=95=EC=97=90=20=EB=B0=A9?=
+ =?UTF-8?q?=ED=96=A5=EC=9D=84=20=EB=84=A3=EB=8A=94=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+풀테스트(14종 x 12축)를 처음 돌리면서 여태 안 보던 두 축이 드러났다.
+지금까지의 "8축 전부 100%"는 그림자와 모션을 포함하지 않은 숫자였다.
+
+**그림자 65.1% -> 100%** — 코드를 가로지르는 그림자는 한 프레임 안에서
+밝기를 두 배 넘게 벌린다. 그러면 에너지 로케이터가 어두운 쪽을 코드로 안
+본다: 실측(Code128 module 8, 그림자 0.2/0.3) 972px 코드에서 상자가 왼쪽
+절반(465px)만 잡혔고, 절반짜리 크롭으로는 아래 어떤 ROI 구제도 못 읽는다.
+그래서 **영역 구제보다 먼저** 편다 — 큰 반경으로 뭉갠 판본을 배경으로
+보고 나누면(flattenIllumination) 배경이 평평해지고 막대 구조만 남는다.
+그림자 0.2~0.5 네 단이 전부 평탄화 뒤 평범한 풀프레임 디코드로 열린다.
+반경은 32다(64~128도 1D는 다 열지만 DataMatrix 0.2가 32에서만 열린다).
+배경이 이미 평평하면 false를 돌려주므로 그림자 없는 프레임은 뭉개기 한 번
+값만 낸다.
+
+**모션 86.7% -> 100%** — 이쪽은 하네스가 틀렸다. 판정이 방향을 무시하고
+"모션 > 5*모듈"을 난독으로 봤는데, 생성기는 모션을 **항상 x축으로** 걸고
+코드 회전각도 알고 있다. 즉 막대에 수직인 성분을 계산할 수 있다
+(1D는 |L*cos(회전각)|, 2D는 L 전체).
+
+한계는 재서 정했다. 코드 중앙행의 흑백 런 개수가 L을 키우면서 어디서
+무너지는지 측정하니 14종에서 일관되게 **모듈의 2배**였다(Code128 1.72 /
+Code39 2.00 / PDF417 1.80 / EAN13 2.00 / EAN8 2.00 / UPC-A 2.00 / QR 2.00).
+그래서 수직 성분 > 2.0*m을 난독, > 1.5*m을 경계로 바꿨다. 예전 주석의
+"2.5*m을 난독으로 잡았더니 17%가 읽혔다"는 관찰은 블러가 막대와 나란한
+경우가 섞여 있었기 때문이고, 방향을 분리한 지금은 모순이 아니다.
+
+경계 버킷으로 내려간 구간(수직 성분 1.5~2.0*m)은 우리가 아직 못 읽는다 —
+구조는 남아 있으므로 남은 개선 대상이다. 숨기지 않고 borderline으로 센다.
+
+**중복 하나 더** — 90도 회전 EAN13에서 같은 텍스트가 두께 3px/4px 밴드
+두 개로 나왔다(x 340과 593, 정답 상자 334~604 안). 두께비가 1에 가까워
+isThinSlice에 안 걸리고 간격 250px이 결합 폭의 97%라 밴드 규칙도 못 넘는다.
+둘 다 실오라기(두께가 길이의 3% 이하)이고 긴 축이 90% 겹치며 간격이 긴 축
+길이 이내면 같은 심볼의 두 스캔으로 본다(isTwinBand).
+
+풀테스트 최종: 2,337장 / 3,451코드
+  축 스윕 1,699장 **100.00%**  (12축 전부)
+  고정 40종 40장 100%
+  난수 코퍼스 598장 68.62%
+  오디코딩 **0** / 중복 1
+게이트 통과, 기준선 갱신(모션 재분류로 ok 집합이 바뀌었다).
+
+PROJECT_NOTES §3.46
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      |  2 +-
+ include/vscan_internal/preprocess.hpp | 21 +++++++++
+ src/pipeline.cpp                      | 61 ++++++++++++++++++++++++++-
+ src/preprocess.cpp                    | 35 +++++++++++++++
+ tools/ci_baseline.txt                 | 12 +++---
+ tools/generate_corpus.py              | 26 ++++++++++--
+ 6 files changed, 145 insertions(+), 12 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 989416a..8626052 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.45 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** + **§3.42 세로 평균 — 1D는 세로로 같은 값이 반복된다** + **§3.43 대비 축 100%: 임계를 행 단위로** + **§3.44 14종 x 8축 전부 100% + 40종 40/40** + **§3.45 오디코딩: 부분 스캔 dedup을 고정점까지 + 얇은 조각** | 무엇부터 할지 정할 때 |
++| §3.14~3.46 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** + **§3.42 세로 평균 — 1D는 세로로 같은 값이 반복된다** + **§3.43 대비 축 100%: 임계를 행 단위로** + **§3.44 14종 x 8축 전부 100% + 40종 40/40** + **§3.45 오디코딩: 부분 스캔 dedup을 고정점까지 + 얇은 조각** + **§3.46 12축 전부 100%: 조명 평탄화 + 모션 판정에 방향을 넣는다** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 387091b..97bce13 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -74,6 +74,27 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
+  */
+ void boxBlur(const GrayView& src, int radius, GrayImage& out);
+ 
++/*
++ * [조명 평탄화] 큰 반경으로 뭉갠 판본을 "배경 밝기"로 보고 나눈다.
++ * out = clamp(128 * src / blur(src, radius)).
++ *
++ * 그림자가 코드를 가로질러 지나가면 한 프레임 안에서 밝기가 두 배 넘게
++ * 차이 난다. 그러면 (a) 에너지 로케이터가 어두운 쪽을 코드로 안 보고
++ * (b) 크롭 하나에 임계 하나를 쓰는 모든 전처리가 한쪽을 통째로 검게
++ * 만든다. 실측(Code128 module 8, 그림자 축 — 코드 중앙에서 오른쪽 절반이
++ * 어두워진다): 0.2/0.3에서는 상자가 아예 왼쪽 절반(465x341)만 잡혔다.
++ * 코드가 972px인데 그 절반만으로는 어떤 구제도 못 읽는다.
++ *
++ * 나누고 나면 배경이 평평해지고 막대 구조만 남는다 — 실측: 그림자
++ * 0.2~0.5 네 단이 전부 **평탄화 뒤 평범한 풀프레임 디코드**로 열린다.
++ * 반경은 64~128 어디서나 같고(32는 0.2에서 아슬아슬, 192는 0.2를 놓친다),
++ * 코드 폭보다 충분히 커야 막대 자신이 배경으로 흡수되지 않는다.
++ *
++ * 배경이 이미 평평하면 false를 돌려준다(뭉갠 판본의 상하위 백분위수
++ * 차이가 minSpread 미만). 그 경우 out은 건드리지 않는다.
++ */
++bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int minSpread = 40);
++
+ /*
+  * [세로 이동평균] 열마다 위아래 radius 픽셀을 평균한다. 가로 방향은
+  * 손대지 않는다.
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 7f96cce..7b613e1 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -338,6 +338,30 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
+         if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dnHits;
+     }
+ 
++    // [조명 평탄화 구제] 그림자가 코드를 가로지르면 한 프레임 안에서
++    // 밝기가 두 배 넘게 차이 나고, 그러면 에너지 로케이터가 어두운 쪽을
++    // 코드로 안 본다 — 실측(Code128 module 8, 그림자 0.2/0.3): 972px
++    // 코드에서 상자가 왼쪽 절반(465px)만 잡혔다. 그 절반만으로는 아래의
++    // 어떤 ROI 구제도 못 읽는다. 그래서 **영역 구제보다 먼저** 편다.
++    //
++    // 큰 반경으로 뭉갠 판본을 배경으로 보고 나누면 배경이 평평해지고
++    // 막대 구조만 남는다. 실측: 그림자 0.2~0.5 네 단이 전부 평탄화 뒤
++    // 평범한 풀프레임 디코드로 열린다.
++    //
++    // 배경이 이미 평평하면 flattenIllumination()이 false를 돌려주므로
++    // (뭉갠 판본의 상하위 2% 차이가 40 미만) 그림자 없는 프레임에서는
++    // 뭉개기 한 번 값만 든다. [[vscan-lite-flatten-illumination]]
++    if (!budgetExceeded()) {
++        GrayImage flat;
++        if (flattenIllumination(view, 32, flat)) {
++            PipelineConfig ffCfg = cfg_;
++            ffCfg.zbarAsRescue = false;
++            Pipeline ff(ffCfg);
++            auto ffHits = ff.processViewCore(GrayView(flat));
++            if ((int)ffHits.size() >= std::max(1, cfg_.minExpectedCodes)) return ffHits;
++        }
++    }
++
+     // [DPM/점각인 구제] processViewCore()가 풀옵션으로도 빈손이면,
+     // DPM(레이저 점각인) 코드일 가능성을 본다. 실물 비교 대상 리더기 대조
+     // 검증까지 완료된 구제책 — §6.4 대화 참고. 위치 탐색이 필요
+@@ -1753,6 +1777,40 @@ bool isThinSlice(const BBox& a, const BBox& b) {
+            sliver(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
+ }
+ 
++// 같은 코드를 **두 줄로 스쳐 지나간** 스캔 밴드 한 쌍인가.
++//
++// isThinSlice()는 "한쪽만 얇을 때"를 잡는다. 그런데 둘 다 얇게 나오는
++// 경우가 있다 — 실측(코퍼스 씨드 101, 90도 회전 EAN13, 모션 있음):
++//   "2711660915686" (593,398)-(597,883)  두께 4
++//   "2711660915686" (340,407)-(343,892)  두께 3
++// 정답 상자는 x 334~604이므로 둘 다 코드 **안**이다. 두께비가 1에 가까워
++// isThinSlice에 안 걸리고, 간격 250px이 결합 폭 257의 97%라 밴드 규칙도
++// 못 넘는다.
++//
++// 판정: 둘 다 "두께가 길이의 3% 이하"인 실오라기이고, 긴 축이 90% 이상
++// 겹치고, 간격이 긴 축 길이를 넘지 않으면 같은 심볼의 두 스캔이다.
++// 마지막 조건이 물리적 상한이다 — 한 코드 안의 두 스캔선은 코드 높이보다
++// 멀 수 없고, 1D 코드는 대개 길이가 높이보다 크다.
++//
++// 같은 텍스트일 때만 쓴다. 내용까지 같은 별개 라벨 2장이 이 조건에 걸릴
++// 수는 있는데, 그건 isStackedBand가 이미 안고 있는 것과 같은 대가다.
++// [[vscan-lite-dedup-twin-band]]
++bool isTwinBand(const BBox& a, const BBox& b) {
++    auto twin = [](double aLo, double aHi, double bLo, double bHi,   // 긴 축
++                   double cLo, double cHi, double dLo, double dHi) { // 두께 축
++        const double la = aHi - aLo, lb = bHi - bLo;
++        const double ta = cHi - cLo, tb = dHi - dLo;
++        if (la <= 0 || lb <= 0) return false;
++        if (ta > 0.03 * la || tb > 0.03 * lb) return false;          // 실오라기가 아니다
++        const double ov = std::min(aHi, bHi) - std::max(aLo, bLo);
++        if (ov < 0.90 * std::min(la, lb)) return false;              // 긴 축이 안 맞는다
++        const double gap = std::max(cLo, dLo) - std::min(cHi, dHi);
++        return gap <= std::min(la, lb);
++    };
++    return twin(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
++           twin(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
++}
++
+ bool hasDegenerateQuad(const DecodedSymbol& s) {
+     for (int i = 0; i < 4; ++i)
+         for (int j = i + 1; j < 4; ++j)
+@@ -1969,7 +2027,8 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
+                 hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol) ||
+                 (partial && onSameBarcodeBand(candBox, keptBox)) ||
+                 (sameText && isStackedBand(candBox, keptBox)) ||
+-                (sameText && isThinSlice(candBox, keptBox))) {
++                (sameText && isThinSlice(candBox, keptBox)) ||
++                (sameText && isTwinBand(candBox, keptBox))) {
+                 isDup = true;
+                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
+                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index aebec94..be200f9 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -469,6 +469,41 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
+     }
+ }
+ 
++bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int minSpread) {
++    const int W = src.width, H = src.height;
++    if (W < 32 || H < 32) return false;
++    GrayImage bg;
++    boxBlur(src, radius, bg);
++
++    // 배경이 이미 평평하면 할 일이 없다. 상하위 2% 백분위수로 본다 —
++    // 최소/최대는 먼지 한 점이 정한다.
++    int hist[256] = {0};
++    for (size_t i = 0; i < bg.pixels.size(); i += 7) ++hist[bg.pixels[i]];
++    long total = 0;
++    for (int v : hist) total += v;
++    if (total <= 0) return false;
++    const long cut = total / 50;
++    int lo = 0, hi = 255;
++    for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
++    for (long acc = 0, i = 255; i >= 0; --i) { acc += hist[i]; if (acc > cut) { hi = static_cast<int>(i); break; } }
++    if (hi - lo < minSpread) return false;
++
++    const int stride = src.stride > 0 ? src.stride : W;
++    out.width = W;
++    out.height = H;
++    out.pixels.resize(static_cast<size_t>(W) * H);
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict in = src.pixels + static_cast<size_t>(y) * stride;
++        const uint8_t* __restrict b = bg.pixels.data() + static_cast<size_t>(y) * W;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
++        for (int x = 0; x < W; ++x) {
++            const int d = b[x] < 1 ? 1 : b[x];
++            o[x] = static_cast<uint8_t>(std::min(255, 128 * static_cast<int>(in[x]) / d));
++        }
++    }
++    return true;
++}
++
+ bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
+     const int W = src.width, H = src.height;
+     if (W < 16 || H < 4 || pct <= 0 || pct >= 50) return false;
+diff --git a/tools/ci_baseline.txt b/tools/ci_baseline.txt
+index 268ff0e..38456b2 100644
+--- a/tools/ci_baseline.txt
++++ b/tools/ci_baseline.txt
+@@ -1,8 +1,8 @@
+-rate=74.0
+-mean=149.54
+-p95=433.17
++rate=74.7
++mean=155.92
++p95=551.10
+ misdec=0
+ dup=1
+-meanr=109.10
+-p95r=316.02
+-ref=1370.7
++meanr=85.06
++p95r=300.65
++ref=1833.0
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index f5506b1..e3e0a4c 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -685,11 +685,25 @@ def classify_code(mod_px, cphys, fphys):
+ 
+     # 5) 모션 블러 — 이동 길이가 모듈 크기를 크게 넘으면 막대 구분이 사라진다.
+     #    다만 블러 **방향**이 막대와 나란하면 거의 손해가 없다(1D는 특히).
+-    #    방향을 모른 채 판정하므로 임계값을 넉넉히 잡는다(실측: 2.5*m 기준은
+-    #    17%가 읽혀서 난독 분류로 부적합했다).
+-    if motion > 5.0 * m:
++    #    [방향을 이제는 안다] 예전에는 "방향을 모른 채 판정하므로" 임계를
++    #    넉넉히 잡았다(5.0*m 난독 / 2.2*m 경계). 그때 2.5*m을 난독으로
++    #    잡았더니 17%가 읽혀서 부적합했는데, 그건 블러가 막대와 나란한
++    #    경우가 섞여 있었기 때문이다. 생성기는 모션을 **항상 x축으로**
++    #    걸고 코드 회전각도 알고 있으므로, 막대에 수직인 성분만 골라낼 수
++    #    있다: 1D는 |L*cos(회전각)|, 2D는 방향과 무관하게 L 전체.
++    #
++    #    수직 성분에 대한 한계는 재서 정했다. 코드 중앙행의 흑백 런 개수가
++    #    L을 키우면서 어디서 무너지는지 본 것이다(14종, module 3~8):
++    #      Code128 1.72배 / Code39 2.00 / PDF417 1.80 / EAN13 2.00 /
++    #      EAN8 2.00 / UPC-A 2.00 / QR 2.00
++    #    즉 **수직 성분이 모듈의 2배**에서 막대 구분이 사라진다. 그 아래
++    #    1.5배부터는 진폭이 크게 깎이므로 경계로 둔다.
++    rot = float(cphys.get("rot", 0.0))
++    is2d = bool(cphys.get("is2d", False))
++    motion_eff = motion if is2d else abs(motion * math.cos(math.radians(rot)))
++    if motion_eff > 2.0 * m:
+         mark(2, "x-motion")
+-    elif motion > 2.2 * m:
++    elif motion_eff > 1.5 * m:
+         mark(1, "b-motion")
+ 
+     # 6) 물리적 결손 — 2D 모서리 결손이 30%에 가까우면 ECC 한계를 넘는다.
+@@ -1046,6 +1060,8 @@ def build_one(index, cfg):
+ 
+     # 판독 가능성 분류 — 프레임 열화까지 정해진 뒤에야 판정할 수 있다
+     for c in codes:
++        c["phys"]["rot"] = float(c.get("rot", 0.0))
++        c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
+         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
+         c["bucket"] = b
+         c["tags"] = c["tags"] + ["dec-" + b] + reasons
+@@ -1280,6 +1296,8 @@ def build_sweep(index, combo, cfg):
+              "shadow": float(p["shadow"]), "glare": float(p["glare"]),
+              "curve": float(p["curve"])}
+     for c in codes:
++        c["phys"]["rot"] = float(c.get("rot", 0.0))
++        c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
+         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
+         c["bucket"] = b
+         c["tags"] = c["tags"] + ["dec-" + b] + reasons
+-- 
+2.43.0
+
