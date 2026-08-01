@@ -1,0 +1,147 @@
+From 880b169d5c1b4556ea16c493d86e540f66e4d34a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 06:29:50 +0000
+Subject: [PATCH] =?UTF-8?q?=EC=BD=94=ED=8D=BC=EC=8A=A4=20=EC=83=9D?=
+ =?UTF-8?q?=EC=84=B1=EA=B8=B0:=20=EC=9B=90=EA=B7=BC=20=EB=B3=80=ED=99=98?=
+ =?UTF-8?q?=EC=9D=B4=20=EC=BD=94=EB=93=9C=EB=A5=BC=20=EC=9E=98=EB=9D=BC?=
+ =?UTF-8?q?=EB=82=B4=EA=B3=A0=20=EC=9E=88=EC=97=88=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+태그별 검출률에서 perspective(63장 57.5%)와 perspective-strong(27장
+36.6%)이 다음 목표였는데, 원근 축을 재보니 Code128이 11단 중 1단만
+읽히고 나머지가 persp 0.1부터 전멸이었다. 너무 심해서 원인을 먼저 팠다.
+
+원인은 리더가 아니라 생성기였다. PIL의 transform(size, PERSPECTIVE, ...)은
+출력 크기를 그대로 두므로 전단으로 밀려난 부분이 캔버스 밖으로 잘린다.
+바코드에서 그건 왜곡이 아니라 **코드 일부가 없어지는 것**이다.
+
+실측(Code128 module 8, 코드 중앙행의 흑백 런 개수 — 정상 103개):
+    persp 0     런 103   코드 오른쪽 끝 x=951 (여유 있음)
+    persp 0.1   런  97   오른쪽 끝 x=997  <- 캔버스 끝(999)
+    persp 0.3   런  81   오른쪽 끝 x=997
+    persp 0.6   런  65   오른쪽 끝 x=997
+그런 이미지는 어떤 리더로도 못 읽는데 버킷 분류는 'ok'로 표시하고 있었다.
+
+(리샘플 품질을 의심해 3배 슈퍼샘플링도 해봤지만 런 개수가 한 개도 안
+변했다 — 잘림 문제라는 확인이다.)
+
+고친 것: rotate(expand=True)와 같은 취지로 캔버스를 넓혀서 변환한 뒤,
+셀을 넘치면 줄여 담는다(고정 화각 카메라 앞에서 라벨을 기울이면 실제로
+그렇게 된다). 줄인 비율만큼 eff_mod도 환산해서 판독 가능성 버킷이
+정직해지게 했다 — 그래서 persp 0.6/1.0은 이제 '판독 불가'로 분류된다.
+
+결과 (원근 축, 버킷 ok만):
+    Code128 9.1% -> 100%   Code39 9.1% -> 100%   DataMatrix 27.3% -> 100%
+    EAN13 18.2% -> 66.7%   ITF 9.1% -> 61.9%     QR 18.2% -> 47.6%
+    DataBar 9.1% -> 60.0%  PDF417 18.2% -> 27.3%
+코퍼스 400장: 전체 64.0 -> 68.9%, perspective 58.9 -> 72.9%,
+perspective-strong 36.6 -> 53.7%, curved 59.0 -> 66.0%,
+quietzone 61.5 -> 69.4%, shadow 54.8 -> 60.7%.
+
+곁들여 invert 스윕 축을 추가했다(§3.28에서 쓴 축).
+
+코퍼스가 바뀌었으므로 CI 기준선은 다시 잡아야 한다(다음 커밋).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ tools/generate_corpus.py | 67 ++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index 21bc64a..0907b78 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -567,8 +567,12 @@ def place_transform(img, rng, sev, tags, cell_min, p_rot=0.45):
+         w, h = img.size
+         coeffs = (1, s * 0.9, -w * s * 0.12, s * 0.35, 1, -h * s * 0.10,
+                   s * 0.0011, s * 0.00035)
+-        img = img.transform(img.size, Image.PERSPECTIVE, coeffs,
+-                            resample=Image.BICUBIC, fillcolor=255)
++        pw0, ph0 = img.size
++        img = _perspective(img, coeffs)
++        if img.width > pw0 or img.height > ph0:
++            k = min(pw0 / img.width, ph0 / img.height)
++            img = img.resize((max(24, int(img.width * k)),
++                              max(24, int(img.height * k))), Image.LANCZOS)
+         tags.append("perspective" + ("-strong" if s > 0.2 else ""))
+ 
+     if ang:
+@@ -766,6 +770,50 @@ def _motion_blur(a, length, angle_deg):
+     return acc / (2 * half + 1)
+ 
+ 
++
++def _perspective(img, coeffs):
++    """원근 변환 — **캔버스를 넓혀서** 적용한다 (rotate(expand=True)와 같은 취지).
++
++    PIL의 transform(size, PERSPECTIVE, ...)은 출력 크기를 그대로 두므로,
++    전단으로 밀려난 부분이 캔버스 밖으로 잘려 나간다. 바코드에서 그건
++    "왜곡"이 아니라 **코드 일부가 없어지는 것**이라 어떤 리더로도 못 읽는다.
++
++    실측(Code128 module 8, 코드 중앙행의 흑백 런 개수 — 정상은 103개):
++        persp 0     런 103   코드 오른쪽 끝 x=951 (캔버스 여유 있음)
++        persp 0.1   런  97   오른쪽 끝 x=997  <- 캔버스 끝(999)에 붙었다
++        persp 0.3   런  81   오른쪽 끝 x=997
++        persp 0.6   런  65   오른쪽 끝 x=997
++    즉 생성 단계에서 이미 코드가 잘려 있었고, 버킷 분류는 그걸 'ok'로
++    표시하고 있었다 — 리더의 약점이 아니라 테스트 하네스의 결함이었다.
++    (3배 슈퍼샘플링도 해봤지만 런 개수가 한 개도 안 변했다. 리샘플 품질
++    문제가 아니라 잘림 문제라는 확인이다.)
++
++    coeffs는 PIL 규약대로 **목적지 -> 원본** 사상이다. 그 역행렬로 원본
++    네 모서리가 어디로 가는지 구해 출력 상자를 잡고, 그만큼 평행이동을
++    합성해서 전부 담는다.
++    """
++    w, h = img.size
++    M = np.array([[coeffs[0], coeffs[1], coeffs[2]],
++                  [coeffs[3], coeffs[4], coeffs[5]],
++                  [coeffs[6], coeffs[7], 1.0]], dtype=np.float64)
++    F = np.linalg.inv(M)                      # 원본 -> 목적지
++    pts = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], dtype=np.float64).T
++    q = F @ pts
++    q = q[:2] / q[2]
++    x0, y0 = q[0].min(), q[1].min()
++    x1, y1 = q[0].max(), q[1].max()
++    nw = int(math.ceil(x1 - x0))
++    nh = int(math.ceil(y1 - y0))
++    # 지나치게 커지는 경우(강한 왜곡)는 상한을 둔다 — 프레임에 못 넣는다.
++    nw = max(w, min(nw, w * 3))
++    nh = max(h, min(nh, h * 3))
++    T = np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], dtype=np.float64)
++    M2 = M @ T                                # 새 목적지 -> 원본
++    M2 = M2 / M2[2, 2]
++    return img.transform((nw, nh), Image.PERSPECTIVE, tuple(M2.ravel()[:8]),
++                         resample=Image.BICUBIC, fillcolor=255)
++
++
+ def _cylinder_warp(a, strength):
+     """원통 라벨의 수평 압축. 행 루프 없이 전부 벡터화 (대량 생성용)."""
+     h, w = a.shape
+@@ -1115,10 +1163,17 @@ def build_sweep(index, combo, cfg):
+         sym = Image.fromarray(np.clip(s, 0, 255).astype(np.uint8), mode="L")
+         if p["persp"]:
+             v = float(p["persp"])
+-            sym = sym.transform(sym.size, Image.PERSPECTIVE,
+-                                (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
+-                                 -sym.height * v * 0.10, v * 0.0011, v * 0.00035),
+-                                resample=Image.BICUBIC, fillcolor=255)
++            sym = _perspective(sym, (1, v * 0.9, -sym.width * v * 0.12, v * 0.35, 1,
++                                     -sym.height * v * 0.10, v * 0.0011, v * 0.00035))
++            # 캔버스를 넓혔으므로 셀을 넘칠 수 있다. 넘치면 줄여서 담는다 —
++            # 고정 화각 카메라 앞에서 라벨을 기울이면 실제로 그렇게 된다.
++            # 모듈 크기도 같은 비율로 줄어드므로 eff_mod를 함께 환산해야
++            # 판독 가능성 버킷이 정직해진다.
++            if sym.width > cw or sym.height > ch:
++                k = min(cw / sym.width, ch / sym.height)
++                sym = sym.resize((max(24, int(sym.width * k)),
++                                  max(24, int(sym.height * k))), Image.LANCZOS)
++                eff_mod *= k
+         if float(p["invert"]) >= 0.5:
+             # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
+             # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
+-- 
+2.43.0
+
