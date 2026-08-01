@@ -1,0 +1,131 @@
+From 982dc5e788adb56895e72222920be113abfcccf8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 12:20:30 +0000
+Subject: [PATCH 56/62] =?UTF-8?q?=EB=B0=98=EC=A0=84=20=EC=B6=95=EC=9D=80?=
+ =?UTF-8?q?=20=ED=95=98=EB=84=A4=EC=8A=A4=20=EA=B2=B0=ED=95=A8=EC=9D=B4?=
+ =?UTF-8?q?=EC=97=88=EB=8B=A4=20=E2=80=94=20=EC=A0=95=EC=A7=80=EB=8C=80?=
+ =?UTF-8?q?=EA=B0=80=20=EA=B7=9C=EA=B2=A9=20=EB=AF=B8=EB=8B=AC=EC=9D=B4?=
+ =?UTF-8?q?=EC=97=88=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ITF 반전이 50%(1/2)로 남아 있었다. 리더 문제인 줄 알고 파고들었는데
+생성기가 틀리고 있었다.
+
+반전 케이스는 뒤집기 전에 흰 여백을 덧대서 반전 후 어두운 정지대가
+남게 만든다. 그 여백을 **코드 크기의 6%**로 주고 있었는데, 규격이
+요구하는 정지대는 크기 비율이 아니라 **최소 폭 요소의 10배**다.
+실측(ITF module 8, 코드 1012x376): 6%는 20px인데 규격은 59px을 요구한다.
+코드가 클수록 모듈 대비 정지대가 얇아지는 구조라, 큰 코드일수록 규격에서
+멀어진다. 그 상태로 "읽혀야 정상(ok)" 버킷에 넣고 있었으니 리더가 아니라
+하네스가 틀린 것이다.
+
+여백을 max(모듈 10배, 기존 6%)로 고쳤다. 난수 경로와 스윕 경로 둘 다.
+
+결과: 반전 축이 14종 전부 100%(ITF 50 -> 100%). 다른 열세 종은 원래
+100%였고 그대로다 — 즉 이 수정이 통과를 만들어낸 게 아니라 ITF만
+규격 미달 구간에 걸려 있었다는 뜻이다.
+
+코퍼스도 같이 정직해졌다: 검출 72.9 -> 73.8%, p95 469 -> 432ms
+(규격 미달 반전 프레임이 사다리를 끝까지 돌던 것이 없어졌다).
+난수 경로의 반전 이미지가 바뀌었으므로 기준선을 갱신했다.
+
+14종 x 8축에서 100% 미만 항목 8 -> 7개(대비 0.05 일곱 종, PDF417
+노이즈 55, PDF417 곡면 0.1). 오디코딩 0 / 중복 1.
+
+PROJECT_NOTES §3.41
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md         |  2 +-
+ tools/ci_baseline.txt    | 12 ++++++------
+ tools/generate_corpus.py | 17 +++++++++++++----
+ 3 files changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 025b03d..4365fbb 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.40 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** | 무엇부터 할지 정할 때 |
++| §3.14~3.41 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/tools/ci_baseline.txt b/tools/ci_baseline.txt
+index 63c0d14..c8bbe00 100644
+--- a/tools/ci_baseline.txt
++++ b/tools/ci_baseline.txt
+@@ -1,8 +1,8 @@
+-rate=72.9
+-mean=147.27
+-p95=429.81
++rate=73.8
++mean=147.62
++p95=461.33
+ misdec=0
+ dup=1
+-meanr=106.42
+-p95r=310.60
+-ref=1383.8
++meanr=102.66
++p95r=320.81
++ref=1438.0
+diff --git a/tools/generate_corpus.py b/tools/generate_corpus.py
+index 2692ed4..f5506b1 100644
+--- a/tools/generate_corpus.py
++++ b/tools/generate_corpus.py
+@@ -487,7 +487,7 @@ def _to_dpm(arr, step=5):
+     return dot
+ 
+ 
+-def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
++def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None, mod_px=1.0):
+     """코드 이미지 자체에 걸리는 열화(대비/반전/DPM/인쇄불량/손상).
+ 
+     프레임 전체가 아니라 코드별로 적용한다 — 한 프레임에 '깨끗한 코드 +
+@@ -507,7 +507,8 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None):
+         # 반전 전에 흰 여백을 덧대야 반전 후에 **어두운 콰이어트존**이 남는다.
+         # 안 그러면 반전된 코드가 밝은 배경에 바로 붙어서 콰이어트존이
+         # 사라지고, "반전"이 아니라 "콰이어트존 파괴" 케이스가 돼버린다.
+-        pad = max(8, int(min(a.shape) * 0.06))
++        # 여백은 모듈 10개 이상 (규격 정지대). 스윕 경로의 같은 자리 주석 참고.
++        pad = max(8, int(round(10 * mod_px)), int(min(a.shape) * 0.06))
+         a = np.pad(a, pad, mode="constant", constant_values=255)
+         a = 255 - a
+         tags.append("inverted")
+@@ -1025,7 +1026,8 @@ def build_one(index, cfg):
+             continue
+         cphys = {}
+         sym = degrade_symbol(sym, rng, sev, ctags, allow_dpm=(kind == "QR"),
+-                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys)
++                             is_2d=(kind == "QR"), p_deg=prof["p_deg"], phys=cphys,
++                             mod_px=mod_px)
+         sym, ang, gscale = place_transform(sym, rng, sev, ctags, min(avail_w, avail_h),
+                                            p_rot=prof["p_rot"])
+         mod_px *= gscale
+@@ -1226,8 +1228,15 @@ def build_sweep(index, combo, cfg):
+             # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
+             # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라
+             # "정지대 파괴" 케이스가 된다.
++            #
++            # 여백은 **모듈 10개 이상**이어야 한다. 규격이 요구하는 정지대가
++            # 1D 대부분(ITF/Code39/Code128 등)에서 최소 폭 요소의 10배다.
++            # 크기 비율(6%)만 쓰면 코드가 커질수록 모듈 대비 정지대가
++            # 얇아진다 — 실측(ITF module 8, 코드 1012x376): 6%는 20px인데
++            # 규격은 59px을 요구한다. 그 상태로 "읽혀야 정상(ok)"으로
++            # 분류하면 리더가 아니라 하네스가 틀린 것이다.
+             a2 = np.array(sym).astype(np.uint8)
+-            pad = max(8, int(min(a2.shape) * 0.06))
++            pad = max(8, int(round(10 * eff_mod)), int(min(a2.shape) * 0.06))
+             a2 = np.pad(a2, pad, mode="constant", constant_values=255)
+             sym = Image.fromarray(255 - a2, mode="L")
+         if p["angle"]:
+-- 
+2.43.0
+

@@ -1,0 +1,119 @@
+From 802da5ce0e6574caf9f96202e043b8ced4a90b92 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 13:14:06 +0000
+Subject: [PATCH 60/62] =?UTF-8?q?=EA=B3=A1=EB=A9=B4=20=EC=B6=95=20100%:=20?=
+ =?UTF-8?q?=ED=94=BC=EC=B9=98=20=EC=B6=94=EC=A0=95=20=EC=95=9E=EC=97=90=20?=
+ =?UTF-8?q?=ED=96=89=20=EC=9D=B4=EC=A7=84=ED=99=94=EB=A5=BC=20=EB=84=A3?=
+ =?UTF-8?q?=EB=8A=94=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PDF417 곡면 0.1만 남아 있었다. 회색조 크롭에 (rows, win, pct) 격자를
+아무리 돌려도 안 열린다 — 가장 강한 곡률에서는 런 경계가 흐려 피치
+추정 자체가 흔들리기 때문이다.
+
+행 단위 이진화(직전 커밋)를 앞에 넣으면 런 길이가 정확해진다. 그러면
+백분위수를 30까지 올릴 수 있다 — 회색조에서는 30이 하나도 못 여는
+값이었는데(2모듈 런을 1모듈로 착각한다), 이진화된 뒤에는 그 착각이
+없어진다. 네 번째 벌 (rows=3, win=31, pct=30, 행이진화)에서 열린다.
+
+납작한 크롭(가로가 세로의 3배 이상)에서만 돌게 걸었다. 이 벌이 필요했던
+것은 PDF417 하나이고 그 크롭이 1055x201이다. 조건 없이 돌리면 코퍼스
+p95가 439 -> 584ms(+33%)가 된다 — 사다리 맨 끝에서 프레임마다 디코드를
+한 번 더 도는 값이다. 조건을 걸면 446ms로 사실상 그대로다.
+
+결과: **곡면 축이 14종 전부 100%**. 14종 x 8축에서 100% 미만은 PDF417
+노이즈 55 하나뿐이다(그마저 12/13). 오디코딩 0 / 중복 1.
+코퍼스 검출 74.0 -> 74.2%, 평균 146 -> 149ms, p95 439 -> 448ms.
+
+PROJECT_NOTES §3.43
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/pitch_equalize.hpp | 10 +++++--
+ src/pipeline.cpp                          | 35 +++++++++++++++++++++--
+ 2 files changed, 39 insertions(+), 6 deletions(-)
+
+diff --git a/include/vscan_internal/pitch_equalize.hpp b/include/vscan_internal/pitch_equalize.hpp
+index 89f67be..b334fe3 100644
+--- a/include/vscan_internal/pitch_equalize.hpp
++++ b/include/vscan_internal/pitch_equalize.hpp
+@@ -45,8 +45,11 @@ namespace vscan {
+  *   (1,13,10)  DataBar 0.6/0.7
+  *   (9,21,5)   PDF417 0.2/0.3, DataBar 0.1, DataBarExp 0.1
+  *   (9,13,10)  DataBarExp 0.2
+- * 셋을 다 돌리면 DataBar/DataBarExp 곡면이 11/11, PDF417이 10/11이다.
+- * 그래서 파이프라인은 구제 사다리에서 이 순서로 **셋 다** 부른다.
++ * 여기에 네 번째로 "행 이진화를 먼저 하고 (3,31,30)"이 있다 — 가장 강한
++ * 곡률(PDF417 0.1)은 회색조 런 경계가 흐려 추정이 흔들리는데, 행 단위로
++ * 먼저 흑백을 만들면 런 길이가 정확해져 백분위수를 30까지 올릴 수 있다
++ * (회색조에서 30은 하나도 못 연다). 넷을 다 돌리면 곡면 축이 14종 100%다.
++ * 그래서 파이프라인은 구제 사다리에서 이 순서로 **넷 다** 부른다.
+  * 사다리 맨 끝이라 이미 다 실패한 프레임에서만 뒤 벌이 돈다
+  * (값은 치른다 — pipeline.cpp의 해당 자리 주석).
+  *
+@@ -56,7 +59,8 @@ namespace vscan {
+  * 그대로 썼더니 rows=1이 예전과 달라져 DataBar 0.6/0.7이 죽었다.
+  * **두 추정기는 결과가 다르다 — 섞지 말 것.**
+  *
+- * [한계] PDF417 곡면 0.1은 위 격자 어느 칸으로도 안 열렸다.
++ * [한계] 회색조 입력만으로는 PDF417 0.1이 위 격자 어느 칸으로도 안 열린다.
++ * 행 이진화를 앞에 넣어야 열린다(위 네 번째 벌).
+  * [[vscan-lite-pitch-equalize]]
+  */
+ struct PitchMap {
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index e16b969..65d3fb3 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -842,13 +842,42 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                     //    변별력이 없다.
+                     // 이 비용은 CI 기준선에 반영돼 있다.
+                     // [[vscan-lite-pitch-equalize]]
+-                    struct PitchTry { int rows, win, pct; };
+-                    static constexpr PitchTry kTries[] = {{1, 13, 10}, {9, 21, 5}, {9, 13, 10}};
++                    // 네 번째 벌은 **행 이진화를 앞에 넣는다**. 가장 강한
++                    // 곡률에서는 회색조의 런 경계가 흐려 피치 추정이 흔들리는데,
++                    // 행 단위로 먼저 흑백을 만들면 런이 깨끗해져서 추정이 선다.
++                    // 그때는 백분위수를 30까지 올려도 된다(회색조에서는 30이면
++                    // 하나도 안 열렸다 — 2모듈 런을 1모듈로 착각하기 때문인데,
++                    // 이진화된 뒤에는 런 길이가 정확하다).
++                    // 실측: PDF417 곡면 0.1이 여기서만 열린다.
++                    struct PitchTry { int rows, win, pct; bool rowbin; };
++                    static constexpr PitchTry kTries[] = {
++                        {1, 13, 10, false}, {9, 21, 5, false}, {9, 13, 10, false},
++                        {3, 31, 30, true},
++                    };
++                    GrayImage rbCrop;
++                    bool rbDone = false, rbOk = false;
+                     for (const PitchTry& t : kTries) {
+                         if (&t != kTries && budgetExceeded()) break;
++                        const GrayImage* srcImg = &crop;
++                        if (t.rowbin) {
++                            // 납작한 크롭(가로가 세로의 3배 이상)에서만 돈다.
++                            // 이 벌이 필요했던 것은 PDF417 곡면 0.1 하나이고,
++                            // 그 크롭이 1055x201이다. 조건 없이 돌리면 코퍼스
++                            // p95가 439 -> 584ms(+33%)가 된다 — 사다리 맨
++                            // 끝에서 프레임마다 디코드를 한 번 더 도는 값이다.
++                            if (crop.height * 3 > crop.width) break;
++                            if (!rbDone) {
++                                GrayImage vb;
++                                verticalBlur(GrayView(crop), 1, vb);
++                                rbOk = rowBinarize(GrayView(vb), rbCrop);
++                                rbDone = true;
++                            }
++                            if (!rbOk) continue;
++                            srcImg = &rbCrop;
++                        }
+                         GrayImage eq;
+                         PitchMap pmap;
+-                        if (!pitchEqualize(GrayView(crop), eq, &pmap, t.rows, t.win, t.pct)) continue;
++                        if (!pitchEqualize(GrayView(*srcImg), eq, &pmap, t.rows, t.win, t.pct)) continue;
+                         sHits = roiPipe.processViewCore(GrayView(eq));
+                         if (sHits.empty()) continue;
+                         // 가로만 바뀌었으므로 x는 역사상, y는 여백만 뺀다.
+-- 
+2.43.0
+

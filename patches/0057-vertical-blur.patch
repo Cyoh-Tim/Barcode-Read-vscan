@@ -1,0 +1,154 @@
+From c0425f71ab040898414ff382df07e9226f759d55 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 12:30:34 +0000
+Subject: [PATCH 57/62] =?UTF-8?q?=EC=A0=80=EB=8C=80=EB=B9=84=200.05:=20?=
+ =?UTF-8?q?=EC=84=B8=EB=A1=9C=20=ED=8F=89=EA=B7=A0=EC=9D=84=20=EC=95=9E?=
+ =?UTF-8?q?=EC=97=90=20=EB=84=A3=EB=8A=94=EB=8B=A4=20(Code39/DataBar=20100?=
+ =?UTF-8?q?%)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+대비 0.05가 일곱 종에 남아 있었다. 여백을 걷은 크롭 + 스트레칭까지는
+0.10을 열었지만 0.05는 그걸로 안 된다.
+
+1D 바코드는 정보가 가로에만 있고 세로로는 같은 값이 반복된다. 그러니
+세로로만 평균하면 잡음 시그마가 sqrt(2r+1)배 줄면서 막대 경계는 그대로
+남는다 — 등방 블러처럼 얇은 막대를 뭉개지 않는다. verticalBlur()를
+추가하고, 여백을 걷은 크롭의 마지막 시도로 "세로평균(반경 4) ->
+스트레칭 -> 국소 이진화(평균/중간값)"를 넣었다.
+
+실측(module 8, 대비 0.05, 다른 모든 시도가 실패한 상태): Code39는
+여백 12px 상자에서 평균임계로, DataBar는 여백 0 상자에서 중간값임계로
+열린다. 세로평균 반경 0에서는 둘 다 안 열린다 — 이 단계가 결정적이다.
+
+기울어진 코드에는 맞지 않는 변환이지만(막대 방향이 세로가 아니다)
+사다리 맨 끝의 추가 판본이라 검출을 깎을 여지가 없다.
+
+결과: 대비 축 Code39 95 -> 100%, DataBar 95 -> 100%.
+14종 x 8축에서 100% 미만 항목 7 -> 5개(대비 0.05 다섯 종, PDF417
+노이즈 55, PDF417 곡면 0.1 — 합쳐서 7건).
+오디코딩 0 / 중복 1 유지. 코퍼스 검출 73.8% 유지, 코드 수 증가.
+평균 147.6 -> 153.3ms, p95 461ms 유지. 게이트 기준선 이내.
+
+PROJECT_NOTES §3.42
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      |  2 +-
+ include/vscan_internal/preprocess.hpp | 17 +++++++++++++++++
+ src/pipeline.cpp                      | 21 +++++++++++++++++++++
+ src/preprocess.cpp                    | 23 +++++++++++++++++++++++
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 4365fbb..3b8a915 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.41 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** | 무엇부터 할지 정할 때 |
++| §3.14~3.42 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** + **§3.42 세로 평균 — 1D는 세로로 같은 값이 반복된다** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 7fcd47a..95cab2d 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -65,6 +65,23 @@ void morphologicalCloseInverted(const GrayView& src, int kernelSize, GrayImage&
+  */
+ void boxBlur3x3(const GrayView& src, GrayImage& out);
+ 
++/*
++ * [세로 이동평균] 열마다 위아래 radius 픽셀을 평균한다. 가로 방향은
++ * 손대지 않는다.
++ *
++ * 1D 바코드는 정보가 **가로에만** 있고 세로로는 같은 값이 반복된다.
++ * 그래서 세로로만 평균하면 잡음 시그마가 sqrt(2r+1)배 줄어드는데 막대
++ * 경계는 그대로다 — 등방 블러처럼 얇은 막대를 뭉개지 않는다.
++ *
++ * 저대비 구제에서 필요했다. 실측(Code39 module 8, 대비 0.05): 여백을
++ * 걷은 크롭에 스트레칭 + 국소 이진화를 걸어도 안 읽히는데, 그 앞에
++ * 세로 평균(반경 2 이상)을 한 번 넣으면 읽힌다. 반경 0에서는 안 된다.
++ *
++ * 기울어진 코드에는 맞지 않는다(막대 방향이 세로가 아니다). 사다리
++ * 끝의 추가 판본으로만 쓸 것.
++ */
++void verticalBlur(const GrayView& src, int radius, GrayImage& out);
++
+ /*
+  * [프레임 노이즈 추정 — 전처리를 고르기 위한 사전 측정]
+  *
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 130254f..d956662 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -729,6 +729,27 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                             sHits = roiPipe.processViewCore(GrayView(tsm));
+                             if (sHits.empty())
+                                 sHits = roiPipe.processViewCore(GrayView(tboost));
++                            // [세로 평균 + 국소 이진화] 여기까지 왔으면
++                            // 전역 스트레칭으로는 안 되는 대비다. 1D는 세로로
++                            // 같은 값이 반복되므로 세로로만 평균하면 잡음만
++                            // 줄고 막대 경계는 그대로다 — 그 위에서 국소
++                            // 이진화를 하면 임계가 흔들리지 않는다.
++                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패):
++                            // Code39는 여백 12px 상자에서 세로평균+평균임계로,
++                            // DataBar는 여백 0 상자에서 세로평균+중간값임계로
++                            // 열린다. 세로평균 반경 0에서는 둘 다 안 열린다.
++                            if (sHits.empty() && !budgetExceeded()) {
++                                GrayImage vb;
++                                verticalBlur(GrayView(tcrop), 4, vb);
++                                GrayImage vst;
++                                if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
++                                GrayImage vbin;
++                                for (bool mid : {false, true}) {
++                                    if (!sHits.empty() || budgetExceeded()) break;
++                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, mid)) continue;
++                                    sHits = roiPipe.processViewCore(GrayView(vbin));
++                                }
++                            }
+                             // 좌표는 이 크롭 기준이므로 원래 크롭 기준으로 옮긴다.
+                             for (auto& r : sHits)
+                                 for (auto& pt : r.symbol.position) {
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index c6399e9..9f46588 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -411,6 +411,29 @@ int estimateLocalRange(const GrayView& src, int rowStep, int colStep) {
+     return 0;
+ }
+ 
++void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
++    const int W = src.width, H = src.height;
++    out.width = W;
++    out.height = H;
++    out.pixels.assign(static_cast<size_t>(W) * H, 0);
++    if (W <= 0 || H <= 0) return;
++    const int stride = src.stride > 0 ? src.stride : W;
++    const int r = std::max(1, std::min(radius, H / 2));
++    const int n = 2 * r + 1;
++    auto at = [&](int y, int x) -> int {
++        return src.pixels[static_cast<size_t>(std::min(H - 1, std::max(0, y))) * stride + x];
++    };
++    for (int x = 0; x < W; ++x) {
++        int acc = 0;
++        for (int y = -r; y <= r; ++y) acc += at(y, x);
++        for (int y = 0; y < H; ++y) {
++            out.pixels[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(acc / n);
++            acc -= at(y - r, x);
++            acc += at(y + r + 1, x);
++        }
++    }
++}
++
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     const int W = src.width, H = src.height;
+     if (W <= 0 || H <= 0) return false;
+-- 
+2.43.0
+

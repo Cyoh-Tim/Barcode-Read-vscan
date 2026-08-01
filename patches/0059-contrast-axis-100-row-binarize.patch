@@ -1,0 +1,282 @@
+From f8e2c3d092a3b7f48094f56b1b7df8abfa47c58f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 13:03:19 +0000
+Subject: [PATCH 59/62] =?UTF-8?q?=EB=8C=80=EB=B9=84=20=EC=B6=95=20100%:=20?=
+ =?UTF-8?q?=EC=9E=84=EA=B3=84=EB=A5=BC=20=EB=B8=94=EB=A1=9D=EC=9D=B4=20?=
+ =?UTF-8?q?=EC=95=84=EB=8B=88=EB=9D=BC=20=ED=96=89=20=EB=8B=A8=EC=9C=84?=
+ =?UTF-8?q?=EB=A1=9C=20=EC=9E=A1=EB=8A=94=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+대비 0.05에 Codabar/Code93/ITF/UPC-E 넷이 남아 있었다. 세로평균 x 여백 x
+블록크기 x 평균/중간값 격자 192칸 어디에서도 안 열려서, 먼저 정보가 남아
+있는지부터 쟀다 — 코드 행의 런 개수가 대비 1.0일 때와 **정확히 같다**
+(Codabar 81 / Code93 99 / ITF 49 / UPC-E 35). 진폭만 19계조로 줄었을 뿐
+정보는 그대로다. minLineCount도 원인이 아니었다(1까지 낮춰도 안 열린다).
+
+그러면 남은 것은 임계를 어디서 잡느냐다. 블록 단위 이진화는 블록이 굵은
+요소 안에 통째로 들어가는 경우를 이웃에서 빌려 메우는데, 19계조에서는
+그 추정이 안 선다. 1D는 한 행이 코드 전체를 담고 그 행 안에 밝은 요소와
+어두운 요소가 반드시 둘 다 있으므로, **그 행 자신의 백분위수**가 곧
+임계다. rowBinarize()를 추가하고 구제 사다리의 저대비 자리에 넣었다.
+
+세로평균 반경 1 + 여백 0 + 행 10퍼센타일 한 벌로 일곱 종이 전부 열린다
+(Codabar/Code39/Code93/DataBar/ITF/PDF417/UPC-E). 앞서 쓰던 블록 이진화
+두 벌로는 셋만 열렸다 — 디코드 횟수는 오히려 하나 줄었다.
+
+곁들여 중복 하나를 잡았다. 세로로 긴 1D 코드(EAN13 846x544)는 타일 격자
+상자 여러 개에 걸치는데, 각 상자를 따로 구제하면 zxing이 서로 다른 스캔
+밴드를 돌려준다 — 실측 (158,774)-(858,778)과 (164,1289)-(865,1293)로
+두께 4px짜리 두 밴드가 511px 떨어져 있다. dedup()의 기하 규칙(밴드/얇은
+조각)은 이 간격을 원리적으로 못 넘는다. 그런데 구제 자리에서는 **어느
+영역에서 나왔는지**를 알고 있으므로 기하로 추측할 필요가 없다 — 같은
+텍스트를 낸 영역이 지금 영역과 맞닿아 있으면 같은 코드로 본다. 떨어져
+있는 같은 내용 라벨 2장은 이 조건에 안 걸린다.
+
+결과: **대비 축이 14종 전부 100%**(0.05까지). 14종 x 8축에서 100% 미만은
+PDF417 노이즈 55와 PDF417 곡면 0.1 둘뿐이다. 오디코딩 0 / 중복 1.
+코퍼스 검출 73.8 -> 74.0%, 평균 155 -> 146ms(디코드 한 벌이 줄었다),
+p95 479 -> 431ms. 기준선 갱신.
+
+PROJECT_NOTES §3.43
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md                      |  2 +-
+ include/vscan_internal/preprocess.hpp | 27 +++++++++
+ src/pipeline.cpp                      | 87 ++++++++++++++++++++-------
+ src/preprocess.cpp                    | 29 +++++++++
+ tools/ci_baseline.txt                 | 12 ++--
+ 5 files changed, 127 insertions(+), 30 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 3b8a915..56552f3 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.42 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** + **§3.42 세로 평균 — 1D는 세로로 같은 값이 반복된다** | 무엇부터 할지 정할 때 |
++| §3.14~3.43 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** + **§3.39 곡면: 피치 모수 세 벌** + **§3.40 노이즈: 뭉개는 세기를 두 단으로** + **§3.41 반전 축은 하네스 결함이었다(정지대 규격)** + **§3.42 세로 평균 — 1D는 세로로 같은 값이 반복된다** + **§3.43 대비 축 100%: 임계를 행 단위로** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/include/vscan_internal/preprocess.hpp b/include/vscan_internal/preprocess.hpp
+index 95cab2d..1b4e28b 100644
+--- a/include/vscan_internal/preprocess.hpp
++++ b/include/vscan_internal/preprocess.hpp
+@@ -82,6 +82,33 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
+  */
+ void verticalBlur(const GrayView& src, int radius, GrayImage& out);
+ 
++/*
++ * [행 단위 이진화 — 1D 전용]
++ *
++ * 행마다 **그 행 자신의** 백분위수(pct / 100-pct)를 재서 중간값으로 가른다.
++ * 구조가 없는 행(범위가 minRange 미만)은 흰색으로 민다.
++ *
++ * 왜 블록이 아니라 행인가. 1D 코드는 한 행이 코드 전체를 담고 있고,
++ * 그 행 안에서 밝은 요소와 어두운 요소가 반드시 둘 다 나온다. 그래서
++ * 행 하나의 히스토그램이 그 행의 임계를 정하는 데 필요한 정보를 다 갖는다.
++ * 블록 단위(localAdaptiveBinarize)는 블록이 굵은 요소 안에 통째로 들어가는
++ * 경우를 이웃에서 빌려 메워야 하는데, 대비가 아주 낮으면 그 추정이 무너진다.
++ *
++ * 실측(module 8, 대비 0.05 — 다른 모든 전처리가 실패하는 구간): 코드 행의
++ * 런 개수는 대비 1.0일 때와 **정확히 같다**(Codabar 81, Code93 99, ITF 49,
++ * UPC-E 35). 진폭만 19계조로 줄었을 뿐 정보는 그대로다. 행 단위 임계는
++ * 그 19계조 안에서 정확히 갈라서 일곱 종(Codabar/Code39/Code93/DataBar/
++ * ITF/PDF417/UPC-E)을 전부 연다. 같은 이미지에 블록 이진화를 걸면 넷이
++ * 안 열린다.
++ *
++ * 세로 평균을 앞에 넣어야 한다(verticalBlur 반경 1이면 충분). 잡음이
++ * 행 백분위수를 흔들기 때문이다.
++ *
++ * 막대가 세로일 때만 맞는 가정이다 — 기울어진 코드나 2D에는 쓰지 말 것.
++ * 반환값 false는 "구조가 있는 행이 너무 적다"는 뜻이다.
++ */
++bool rowBinarize(const GrayView& src, GrayImage& out, int pct = 10, int minRange = 10);
++
+ /*
+  * [프레임 노이즈 추정 — 전처리를 고르기 위한 사전 측정]
+  *
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index 3113019..e16b969 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -595,6 +595,13 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+         // [[vscan-lite-roi-contrast-stretch]]
+         if (!budgetExceeded()) {
+             std::vector<PipelineResult> stretched;
++            std::vector<Rect> srcRect;              // stretched[i]를 만든 영역
++            auto rectsTouch = [](const Rect& a, const Rect& b) {
++                const int mx = std::max(a.x1 - a.x0, b.x1 - b.x0) / 4;
++                const int my = std::max(a.y1 - a.y0, b.y1 - b.y0) / 4;
++                return a.x0 - mx < b.x1 && b.x0 - mx < a.x1 &&
++                       a.y0 - my < b.y1 && b.y0 - my < a.y1;
++            };
+             const int srcStride = image.stride > 0 ? image.stride : image.width;
+             int rectIdx = -1;
+             for (const Rect& rc : rects) {
+@@ -729,32 +736,44 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                             sHits = roiPipe.processViewCore(GrayView(tsm));
+                             if (sHits.empty())
+                                 sHits = roiPipe.processViewCore(GrayView(tboost));
+-                            // [세로 평균 + 국소 이진화] 여기까지 왔으면
+-                            // 전역 스트레칭으로는 안 되는 대비다. 1D는 세로로
+-                            // 같은 값이 반복되므로 세로로만 평균하면 잡음만
+-                            // 줄고 막대 경계는 그대로다 — 그 위에서 국소
+-                            // 이진화를 하면 임계가 흔들리지 않는다.
+-                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패,
+-                            // 여백 12px 상자): 세로평균 반경 1을 앞에 넣고
+-                            //   블록 16 + 평균임계   -> Code39, PDF417
+-                            //   블록 24 + 중간값임계 -> DataBar
+-                            // 세로평균 반경 0에서는 셋 다 안 열린다 — 이
+-                            // 단계가 결정적이다. 반경은 1~32에서 결과가 같아
+-                            // 가장 싼 1로 둔다. 블록 크기는 갈린다(Code39/
+-                            // PDF417은 16에서만, DataBar는 24/48에서만).
+-                            static constexpr struct { int block; bool mid; } kBin[] = {
+-                                {16, false}, {24, true},
+-                            };
++                            // [세로평균 + 행 단위 이진화]
++                            // 대비 0.05에서도 **코드 행의 런 개수는 대비 1.0과
++                            // 정확히 같다**(Codabar 81 / Code93 99 / ITF 49 /
++                            // UPC-E 35). 진폭만 19계조로 줄었을 뿐 정보는
++                            // 그대로다. 그러니 문제는 임계를 어디서 잡느냐다.
++                            //
++                            // 블록 단위 이진화는 여기서 무너진다 — 블록이
++                            // 굵은 요소 안에 통째로 들어가면 이웃에서 빌려야
++                            // 하는데, 19계조에서는 그 추정이 안 선다. 1D는
++                            // 한 행이 코드 전체를 담고 그 행 안에 밝은 요소와
++                            // 어두운 요소가 반드시 둘 다 있으므로, **그 행
++                            // 자신의 백분위수**가 곧 임계다.
++                            //
++                            // 실측(대비 0.05, 다른 모든 전처리가 실패한 상태):
++                            // 세로평균 반경 1 + 여백 0 + 행 10퍼센타일 한 벌로
++                            // 일곱 종이 전부 열린다(Codabar/Code39/Code93/
++                            // DataBar/ITF/PDF417/UPC-E). 블록 이진화 두 벌로는
++                            // 셋만 열렸다. 디코드 횟수는 오히려 하나 줄었다.
++                            // [[vscan-lite-row-binarize]]
+                             if (sHits.empty() && !budgetExceeded()) {
++                                const int bw = b.x1 - b.x0, bh = b.y1 - b.y0;
++                                GrayImage z;
++                                z.width = bw;
++                                z.height = bh;
++                                z.pixels.resize(static_cast<size_t>(bw) * bh);
++                                for (int r = 0; r < bh; ++r)
++                                    std::memcpy(z.pixels.data() + static_cast<size_t>(r) * bw,
++                                                image.pixels + static_cast<size_t>(b.y0 + r) * srcStride + b.x0, bw);
+                                 GrayImage vb;
+-                                verticalBlur(GrayView(tcrop), 1, vb);
+-                                GrayImage vst;
+-                                if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
++                                verticalBlur(GrayView(z), 1, vb);
+                                 GrayImage vbin;
+-                                for (const auto& bp : kBin) {
+-                                    if (!sHits.empty() || budgetExceeded()) break;
+-                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, bp.mid, bp.block)) continue;
++                                if (rowBinarize(GrayView(vb), vbin)) {
+                                     sHits = roiPipe.processViewCore(GrayView(vbin));
++                                    for (auto& r : sHits)
++                                        for (auto& pt : r.symbol.position) {
++                                            pt.first += b.x0 - tr.x0;
++                                            pt.second += b.y0 - tr.y0;
++                                        }
+                                 }
+                             }
+                             // 좌표는 이 크롭 기준이므로 원래 크롭 기준으로 옮긴다.
+@@ -879,7 +898,29 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                 }
+                 for (auto& r : sHits)
+                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
+-                stretched.insert(stretched.end(), sHits.begin(), sHits.end());
++                // [같은 코드를 두 영역에서 각각 잡는 경우]
++                // 세로로 긴 1D 코드(예: EAN13 846x544)는 타일 격자 상자
++                // 여러 개에 걸친다. 각 상자를 따로 구제하면 zxing이 서로
++                // 다른 스캔 밴드를 돌려주는데, 밴드는 두께 4px짜리라 서로
++                // 500px 넘게 떨어질 수 있다 — 실측: (158,774)-(858,778)과
++                // (164,1289)-(865,1293), 둘 다 정답 상자 762~1306 안이다.
++                // dedup()의 기하 규칙(밴드/얇은조각)은 이 간격을 못 넘는다.
++                //
++                // 여기서는 **어느 영역에서 나왔는지**를 알고 있으므로
++                // 기하로 추측할 필요가 없다. 같은 텍스트가 이미 있고 그
++                // 결과를 낸 영역이 지금 영역과 맞닿아 있으면(둘을 25%씩
++                // 부풀렸을 때 겹치면) 같은 코드다. 떨어져 있는 같은 내용
++                // 라벨 2장은 이 조건에 안 걸린다.
++                for (auto& r : sHits) {
++                    bool same = false;
++                    for (size_t k = 0; k < stretched.size() && !same; ++k)
++                        if (stretched[k].symbol.text == r.symbol.text &&
++                            k < srcRect.size() && rectsTouch(srcRect[k], rc))
++                            same = true;
++                    if (same) continue;
++                    stretched.push_back(r);
++                    srcRect.push_back(rc);
++                }
+             }
+             if (take(dedup(std::move(stretched)))) return true;
+         }
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index 9f46588..eba7433 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -434,6 +434,35 @@ void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
+     }
+ }
+ 
++bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
++    const int W = src.width, H = src.height;
++    if (W < 16 || H < 4 || pct <= 0 || pct >= 50) return false;
++    const int stride = src.stride > 0 ? src.stride : W;
++    out.width = W;
++    out.height = H;
++    out.pixels.assign(static_cast<size_t>(W) * H, 255);
++
++    std::vector<uint8_t> buf(static_cast<size_t>(W));
++    const size_t kl = static_cast<size_t>(std::min(W - 1, W * pct / 100));
++    const size_t kh = static_cast<size_t>(std::min(W - 1, W * (100 - pct) / 100));
++    int structured = 0;
++    for (int y = 0; y < H; ++y) {
++        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
++        std::memcpy(buf.data(), row, static_cast<size_t>(W));
++        std::nth_element(buf.begin(), buf.begin() + kl, buf.end());
++        const int lo = buf[kl];
++        std::memcpy(buf.data(), row, static_cast<size_t>(W));
++        std::nth_element(buf.begin(), buf.begin() + kh, buf.end());
++        const int hi = buf[kh];
++        if (hi - lo < minRange) continue;   // 구조가 없는 행은 흰색으로 둔다
++        const int thr = (lo + hi) / 2;
++        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
++        for (int x = 0; x < W; ++x) o[x] = row[x] < thr ? 0 : 255;
++        ++structured;
++    }
++    return structured * 4 >= H;
++}
++
+ bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+     const int W = src.width, H = src.height;
+     if (W <= 0 || H <= 0) return false;
+diff --git a/tools/ci_baseline.txt b/tools/ci_baseline.txt
+index c8bbe00..9a5e700 100644
+--- a/tools/ci_baseline.txt
++++ b/tools/ci_baseline.txt
+@@ -1,8 +1,8 @@
+-rate=73.8
+-mean=147.62
+-p95=461.33
++rate=74.0
++mean=147.77
++p95=439.19
+ misdec=0
+ dup=1
+-meanr=102.66
+-p95r=320.81
+-ref=1438.0
++meanr=109.95
++p95r=326.78
++ref=1344.0
+-- 
+2.43.0
+

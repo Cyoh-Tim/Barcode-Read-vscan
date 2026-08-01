@@ -1,0 +1,114 @@
+From 5d2556a904677ea4489afd7afb0a7794847014dc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 11:35:06 +0000
+Subject: [PATCH 53/62] =?UTF-8?q?=EC=9B=90=EA=B7=BC=20=EC=B6=95=20100%:=20?=
+ =?UTF-8?q?=EB=AA=A8=EC=84=9C=EB=A6=AC=20=EC=A0=90=EC=9D=84=20=EC=97=B4=20?=
+ =?UTF-8?q?=EB=B2=88=ED=98=B8=EA=B0=80=20=EC=95=84=EB=8B=88=EB=9D=BC=20?=
+ =?UTF-8?q?=EA=B1=B0=EB=A6=AC=EB=A1=9C=20=EB=BA=80=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+QR 원근이 7/11로 남아 있었다(0.6과 0.8~1.0 실패). 프로브를 파이프라인의
+rect 구성 그대로 재현해서 보니 perspectiveRectify()가 그 넷을 거절하고
+있었고, 거절 사유는 전부 모서리 발산이었다(BL=(1628,-2561) 같은 값).
+
+원인은 위/아래 변 표본에 좌우 변 점이 섞이는 것이었다. 지금은 모서리
+근처 **열 번호**를 잘라내는데 — 좌변이 코드 높이에 걸쳐 가로로 |dx/dy|*Hc
+만큼 움직이니 그만큼 양끝을 빼는 방식 — 전단이 커지면 그 폭이 코드 폭을
+넘어 상한(45%)에 걸린다. 상한에 걸리는 순간 좌우 변 점이 그대로 남는다.
+실측(QR persp 0.6): 아래 변 표본 39개가 우변 쪽으로 끌려가 lb=(-0.898,-0.440)이
+ll=(-0.878,-0.478)과 거의 같은 방향이 됐고, persp 0.9에서는 lb가 lr과
+소수점 셋째 자리까지 같아졌다. 마주보는 변이 평행해지면 교점이 발산한다.
+
+좌/우 변은 이미 수백 개 표본으로 맞춰져 있고 믿을 만하다(볼록 도형에서
+행마다의 최좌/최우 점은 항상 좌/우 변 위에 있다). 그러니 열 번호로
+어림하지 말고 **그 선에서 얼마나 떨어져 있나**를 직접 재서 가까운 점을
+뺀다. 직선이 정규화돼 있어 |ax+by+c|가 곧 거리다. 전단이 아무리 커도
+기하가 그대로 성립하므로 상한이 필요 없다.
+
+결과: QR 원근 63.6 -> 100%. **원근 축이 14종 전부 100%가 됐다.**
+14종 x 8축에서 100% 미만 항목 12 -> 11개, 오디코딩 0 / 중복 1 유지.
+코퍼스 검출 72.7 -> 72.9%, 시간은 기준선 이내(평균 98.12 / p95 302.41).
+40종 38/38/38, 14종 x 19각도 100%.
+
+PROJECT_NOTES §3.38
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ PROJECT_NOTES.md     |  2 +-
+ src/deskew_persp.cpp | 40 +++++++++++++++++++++++++---------------
+ 2 files changed, 26 insertions(+), 16 deletions(-)
+
+diff --git a/PROJECT_NOTES.md b/PROJECT_NOTES.md
+index 9b2473a..9417183 100644
+--- a/PROJECT_NOTES.md
++++ b/PROJECT_NOTES.md
+@@ -21,7 +21,7 @@
+ | §3.8 | 대량 코퍼스/스윕 도구 (수만~수십만 장, 디스크 0) | 성능/검출률을 **개선**할 때 |
+ | §3.9~3.10 | 1차 측정 결과 + 1차 로드맵(1/2/4 완료, 3 기각) | 이력 확인 |
+ | §3.11~3.12 | 2차 측정 결과 + N 시리즈 로드맵 | 이력 확인 |
+-| §3.14~3.37 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** | 무엇부터 할지 정할 때 |
++| §3.14~3.38 | N1~N6 결과 + 심볼로지 14종 전수 측정 + 로드맵(M) + **§3.17 회전이 아니라 탐색 면적** + **§3.18 오디코딩** + **§3.19 대비** + **§3.20 실물 차트 한계** + **§3.21 회전 시간 균일성** + **§3.22 실물 차트 목표** + **§3.23 전수 재측정과 로드맵 R** + **§3.24 R5 회전 구간 50->21ms** + **§3.25 R4 대비 0.15->0.05** + **§3.26 수렴 전략 S1~S4** + **§3.27 수렴 완료: 69배 -> 2.8배** + **§3.28 반전 1D** + **§3.29 원근 축은 생성기 결함이었다** + **§3.30 생성기 완전 수정** + **§3.31 원근 보정** + **§3.32 납작한 코드의 사각형** + **§3.33 곡면: 피치 균등화** + **§3.34 대비 잔여 기각** + **§3.35 QR 원근: 한쪽 방향 절단** + **§3.36 곡면 적층 코드: 피치 추정 행 수는 하나로 못 정한다** + **§3.37 저대비: 원인은 히스토그램이 아니라 여백이었다** + **§3.38 원근 축 100%: 모서리 점을 열 번호가 아니라 거리로 뺀다** | 무엇부터 할지 정할 때 |
+ | §4 | 심볼로지 커버리지 & 미구현 갭 | 새 심볼 지원 얘기 나올 때 |
+ | §5 | ZBar 관련 조사 결론 | ZBar 건드릴 때 |
+ | §6 | 빌드 방법 (x86 / aarch64) | 빌드할 때 |
+diff --git a/src/deskew_persp.cpp b/src/deskew_persp.cpp
+index 8a53d18..b11b71d 100644
+--- a/src/deskew_persp.cpp
++++ b/src/deskew_persp.cpp
+@@ -162,25 +162,35 @@ bool perspectiveRectify(const GrayView& src, GrayImage& out, int marginPx, Recti
+         lr.a = 1; lr.b = 0; lr.c = -static_cast<double>(cx1);
+     }
+ 
+-    // [모서리 제외 폭을 기울기에서 계산한다]
+-    // 평행사변형에서 좌변이 높이 Hc에 걸쳐 가로로 |dx/dy| * Hc 만큼
+-    // 움직이면, 그 폭만큼의 열에서는 최상단 점이 좌변 위에 있다.
+-    // 고정 5%로 잘랐더니 전단이 큰 코드에서 위 변 표본에 좌우 변이 섞여
+-    // 직선 맞춤이 무너졌다 — 실측(PDF417 persp 0.3, 크롭 1098x221):
+-    // 모서리 교점이 x=-3547로 나와 사각형 추정이 통째로 실패했다.
+-    auto slopeOf = [](const Line& L) {
+-        return (std::fabs(L.a) < 1e-9) ? 1e9 : std::fabs(L.b / L.a);
+-    };
++    // [모서리 점은 좌/우 변으로부터의 거리로 뺀다]
++    // 모서리 근처 열에서는 최상단/최하단 점이 **좌우 변** 위에 놓인다.
++    // 그걸 열 번호로 잘라내려 했었다(기울기 x 코드 높이만큼 양끝을 제외).
++    // 전단이 크면 그 폭이 코드 폭을 넘어서 상한(45%)에 걸리고, 상한에
++    // 걸리는 순간 좌우 변 점이 그대로 표본에 남는다 — 실측(QR persp 0.6,
++    // 크롭 434x434): 아래 변 표본 39개 중 상당수가 우변 위에 있어서
++    // 맞춤이 **우변으로 넘어갔다**(lb=(-0.898,-0.440)가 ll=(-0.878,-0.478)와
++    // 거의 같은 방향). persp 0.9에서는 lb가 lr과 소수점 셋째 자리까지
++    // 같아졌다. 그러면 마주보는 변이 평행해져 교점이 발산한다
++    // (BL=(1628,-2561)).
++    //
++    // 좌/우 변은 이미 수백 개 표본으로 맞춰져 있고 믿을 만하다(행마다의
++    // 최좌/최우 점은 볼록 도형에서 항상 좌/우 변 위에 있다). 그러니
++    // 열 번호로 어림하지 말고 **그 선에서 얼마나 떨어져 있나**를 직접
++    // 재서 가까운 점을 뺀다. 직선은 정규화돼 있어(a^2+b^2=1) |ax+by+c|가
++    // 곧 거리다. 전단이 아무리 커도 기하가 그대로 성립한다.
+     const int codeH = cy1 - cy0, codeW = cx1 - cx0;
+-    const double sl = flat ? 0.0 : std::min(slopeOf(ll), slopeOf(lr));
+-    int mx = static_cast<int>(sl * codeH) + std::max(2, codeW / 20);
+-    mx = std::min(mx, static_cast<int>(codeW * 0.45));
+-    for (int x = cx0 + mx; x <= cx1 - mx; ++x) {
++    const double dEdge = std::max(6.0, 0.08 * std::min(codeW, codeH));
++    auto farFromSides = [&](double x, double y) {
++        return std::fabs(ll.a * x + ll.b * y + ll.c) > dEdge &&
++               std::fabs(lr.a * x + lr.b * y + lr.c) > dEdge;
++    };
++    const int endTrim = std::max(2, codeW / 20);
++    for (int x = cx0 + endTrim; x <= cx1 - endTrim; ++x) {
+         int ytop = -1, ybot = -1;
+         for (int y = 0; y < H; ++y) if (dark(x, y)) { ytop = y; break; }
+         for (int y = H - 1; y >= 0; --y) if (dark(x, y)) { ybot = y; break; }
+-        if (ytop >= 0) top.push_back({static_cast<double>(x), static_cast<double>(ytop)});
+-        if (ybot >= 0) bot.push_back({static_cast<double>(x), static_cast<double>(ybot)});
++        if (ytop >= 0 && farFromSides(x, ytop)) top.push_back({static_cast<double>(x), static_cast<double>(ytop)});
++        if (ybot >= 0 && farFromSides(x, ybot)) bot.push_back({static_cast<double>(x), static_cast<double>(ybot)});
+     }
+ 
+     Line lt, lb;
+-- 
+2.43.0
+

@@ -1,0 +1,80 @@
+From 2becbd843ee93800da0f687354647291375d7ed6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 12:39:46 +0000
+Subject: [PATCH 58/62] =?UTF-8?q?=EC=A0=80=EB=8C=80=EB=B9=84=200.05:=20?=
+ =?UTF-8?q?=EC=84=B8=EB=A1=9C=ED=8F=89=EA=B7=A0=20=EB=B0=98=EA=B2=BD?=
+ =?UTF-8?q?=EA=B3=BC=20=EC=9D=B4=EC=A7=84=ED=99=94=20=EB=B8=94=EB=A1=9D?=
+ =?UTF-8?q?=EC=9D=84=20=EC=8B=A4=EC=B8=A1=EA=B0=92=EC=9C=BC=EB=A1=9C=20(PD?=
+ =?UTF-8?q?F417=20100%)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+앞 커밋에서 넣은 세로평균 단계의 모수를 격자로 다시 쟀다. 반경 x 여백 x
+블록 크기 x 임계 규칙을 훑으니 잔여 케이스가 반경이 아니라 **블록 크기**로
+갈렸다(여백 12px 상자, 대비 0.05):
+
+  블록 16 + 평균임계   -> Code39, PDF417
+  블록 24 + 중간값임계 -> DataBar
+
+반경은 1~32에서 결과가 같아서 가장 싼 1로 내렸다(전에는 4). 반경 0에서는
+셋 다 안 열리므로 이 단계 자체는 여전히 결정적이다.
+
+결과: PDF417 대비 95 -> 100%. 디코드 횟수는 그대로(두 번)인데 한 종을
+더 연다. 대비 0.05는 Codabar/Code93/ITF/UPC-E 넷이 남았고, 이 넷은
+반경 1~32 x 여백 0~24 x 블록 16~48 x 평균/중간값 격자(192칸) 어디에서도
+안 열렸다.
+
+14종 x 8축에서 100% 미만 항목 5 -> 4개(대비 0.05 넷, PDF417 노이즈 55,
+PDF417 곡면 0.1 — 합쳐서 6건). 오디코딩 0 / 중복 1 유지.
+코퍼스 검출 73.8% 유지, 게이트 기준선 이내.
+
+PROJECT_NOTES §3.42
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ src/pipeline.cpp | 21 ++++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index d956662..3113019 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -734,19 +734,26 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
+                             // 같은 값이 반복되므로 세로로만 평균하면 잡음만
+                             // 줄고 막대 경계는 그대로다 — 그 위에서 국소
+                             // 이진화를 하면 임계가 흔들리지 않는다.
+-                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패):
+-                            // Code39는 여백 12px 상자에서 세로평균+평균임계로,
+-                            // DataBar는 여백 0 상자에서 세로평균+중간값임계로
+-                            // 열린다. 세로평균 반경 0에서는 둘 다 안 열린다.
++                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패,
++                            // 여백 12px 상자): 세로평균 반경 1을 앞에 넣고
++                            //   블록 16 + 평균임계   -> Code39, PDF417
++                            //   블록 24 + 중간값임계 -> DataBar
++                            // 세로평균 반경 0에서는 셋 다 안 열린다 — 이
++                            // 단계가 결정적이다. 반경은 1~32에서 결과가 같아
++                            // 가장 싼 1로 둔다. 블록 크기는 갈린다(Code39/
++                            // PDF417은 16에서만, DataBar는 24/48에서만).
++                            static constexpr struct { int block; bool mid; } kBin[] = {
++                                {16, false}, {24, true},
++                            };
+                             if (sHits.empty() && !budgetExceeded()) {
+                                 GrayImage vb;
+-                                verticalBlur(GrayView(tcrop), 4, vb);
++                                verticalBlur(GrayView(tcrop), 1, vb);
+                                 GrayImage vst;
+                                 if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
+                                 GrayImage vbin;
+-                                for (bool mid : {false, true}) {
++                                for (const auto& bp : kBin) {
+                                     if (!sHits.empty() || budgetExceeded()) break;
+-                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, mid)) continue;
++                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, bp.mid, bp.block)) continue;
+                                     sHits = roiPipe.processViewCore(GrayView(vbin));
+                                 }
+                             }
+-- 
+2.43.0
+
