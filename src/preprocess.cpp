@@ -374,6 +374,43 @@ float estimateNoise(const GrayView& src, int rowStep, int colStep) {
     return static_cast<float>(p25) * 0.5f;
 }
 
+int estimateLocalRange(const GrayView& src, int rowStep, int colStep) {
+    const int W = src.width, H = src.height;
+    if (W < 16 || H < 16) return 255;
+    const int stride = src.stride > 0 ? src.stride : W;
+    if (rowStep < 1) rowStep = 1;
+    if (colStep < 1) colStep = 1;
+
+    // 8x8 블록(원본 좌표)을 표본 간격대로 훑으며 범위를 모은다. 블록 안은
+    // 4점(모서리 근처)만 봐도 범위가 거의 같고 — 모듈 경계가 블록을
+    // 가로지르면 어느 두 점을 잡아도 밝고 어두운 쪽이 섞인다 — 비용이
+    // 8x8 전수 대비 1/16이다.
+    int hist[256] = {0};
+    long total = 0;
+    for (int y = 0; y + 8 <= H; y += rowStep) {
+        for (int x = 0; x + 8 <= W; x += colStep) {
+            const uint8_t* __restrict r0 = src.pixels + static_cast<size_t>(y) * stride + x;
+            const uint8_t* __restrict r3 = r0 + 3 * static_cast<size_t>(stride);
+            const uint8_t* __restrict r7 = r0 + 7 * static_cast<size_t>(stride);
+            int mn = r0[0], mx = r0[0];
+            const int vs[8] = {r0[3], r0[7], r3[0], r3[3], r3[7], r7[0], r7[3], r7[7]};
+            for (int v : vs) { if (v < mn) mn = v; if (v > mx) mx = v; }
+            ++hist[mx - mn];
+            ++total;
+        }
+    }
+    if (total <= 0) return 255;
+
+    // 상위 1%
+    const long cut = total / 100;
+    long acc = 0;
+    for (int i = 255; i >= 0; --i) {
+        acc += hist[i];
+        if (acc >= cut) return i;
+    }
+    return 0;
+}
+
 bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     const int W = src.width, H = src.height;
     if (W <= 0 || H <= 0) return false;

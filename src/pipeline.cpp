@@ -969,6 +969,52 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
 
     const int need = std::max(1, cfg_.minExpectedCodes);
 
+    // [S4 — 저대비 프레임은 순서를 뒤집는다]
+    // 풀프레임 패스(coarse + fast, 합쳐서 12ms)는 대비가 무너진 프레임에서
+    // 성공할 수가 없다. zxing의 이진화가 8x8 블록 명암 폭 24를 "구조 없음"
+    // 으로 보기 때문이고, 그건 옵션을 어떻게 켜도 안 바뀐다(§3.25).
+    // estimateLocalRange()로 그걸 미리 재서, 낮으면 영역 경로를 먼저 돌린다.
+    //
+    // **건너뛰는 게 아니라 순서만 바꾼다.** 영역 경로가 빈손이면 풀프레임
+    // 패스가 그대로 뒤에서 돈다 — 잘못 짚었을 때의 손해 상한이 "원래
+    // 순서로 했을 때와 같은 총합"이다. 검출력에는 영향이 없다.
+    //
+    // 임계 100의 근거(블록범위 상위 1%, 실측): 대비 0.05~0.30이 24~84,
+    // 0.40이 109, 정상 프레임(깨끗/회전/노이즈/블러/모듈 2px/실물 차트)이
+    // 213~255다. 0.40은 풀프레임 패스로 읽히므로 정상 쪽에 두는 게 맞다.
+    // [[vscan-lite-lowcontrast-region-first]]
+    bool regionFirstDone = false;
+    const bool lowContrast = cfg_.enableRegionRescue &&
+                             estimateLocalRange(view) < cfg_.lowContrastRange;
+
+    auto regionFirstPass = [&](std::vector<PipelineResult>& acc) -> bool {
+        if (!cfg_.enableRegionRescue || budgetExceeded() || regionFirstDone) return false;
+        regionFirstDone = true;
+        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
+        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
+        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
+        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
+        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
+        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다.
+        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
+        regionCropDone_ = true;
+        regionRotDone_ = earlyRotate;
+        auto roiHits = tryRegionRescue(view, need,
+                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
+        if ((int)roiHits.size() >= need) { acc = std::move(roiHits); return true; }
+        if (roiHits.size() > acc.size()) acc = std::move(roiHits);
+        return false;
+    };
+
+    if (lowContrast) {
+        std::vector<PipelineResult> early;
+        if (regionFirstPass(early)) { adaptiveObserve(early); return early; }
+        if (!early.empty()) { /* 부분 결과는 아래 단계들이 더 채울 수 있다 */ }
+        lowContrastPartial_ = std::move(early);
+    } else {
+        lowContrastPartial_.clear();
+    }
+
     // [0단계] coarse locate — 절반 해상도로 먼저 훑는다.
     // 이진화가 locate 비용의 대부분이고 픽셀 수에 비례하므로 1/4이 된다.
     // 실패하면 아래 풀해상도 단계로 자연스럽게 내려간다(검출력 손실 없음).
@@ -1000,6 +1046,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline fast(fastCfg);
     auto hits = fast.processViewCore(view);
     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
+    if (lowContrastPartial_.size() > hits.size()) hits = lowContrastPartial_;
 
     // [1.5단계 — 위치부터 찾고 그 자리만 본다]
     // 빠른 풀프레임 패스가 빈손일 때 가장 흔한 이유는 "코드가 프레임에 비해
@@ -1017,23 +1064,10 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 실패했을 때의 추가 비용은 locate 몇 ms + 작은 크롭 디코드뿐이고,
     // 성공하면 뒤의 100~250ms짜리 단계들을 통째로 건너뛴다.
     // [[vscan-lite-region-first]]
-    if (cfg_.enableRegionRescue && !budgetExceeded()) {
-        // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
-        // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
-        // 나서야 돌려진다. 실측(14종 x 0~90도, 2단계 경로): 그 구간이
-        // 150~440ms였는데 회전을 이 자리로 올리니 40~110ms가 됐다.
-        // 40종도 726 -> 592ms, 단일코드 코퍼스도 평균 152 -> 144ms로
-        // 같이 빨라진다 — 뒤의 비싼 단계들을 건너뛰기 때문이다.
-        //
-        // 다만 요구 개수가 회전 상한보다 많으면 이 자리에서 회전해도
-        // need를 못 채우고 뒤로 넘어가므로, 그때는 자르기만 한다
-        // (다중 코드 코퍼스에서 그 경우 평균이 7% 늘었다).
-        const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
-        regionCropDone_ = true;
-        regionRotDone_ = earlyRotate;
-        auto roiHits = tryRegionRescue(view, need,
-                                       earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
-        if ((int)roiHits.size() >= need) { adaptiveObserve(roiHits); return roiHits; }
+    {
+        std::vector<PipelineResult> roiHits = std::move(lowContrastPartial_);
+        lowContrastPartial_.clear();
+        if (regionFirstPass(roiHits)) { adaptiveObserve(roiHits); return roiHits; }
         if (roiHits.size() > hits.size()) hits = std::move(roiHits);
     }
     // 예산을 넘겼으면 남은 단계를 생략하고 지금까지 찾은 것을 돌려준다.
