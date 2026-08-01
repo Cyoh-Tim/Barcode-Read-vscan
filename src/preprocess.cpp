@@ -434,6 +434,35 @@ void verticalBlur(const GrayView& src, int radius, GrayImage& out) {
     }
 }
 
+bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
+    const int W = src.width, H = src.height;
+    if (W < 16 || H < 4 || pct <= 0 || pct >= 50) return false;
+    const int stride = src.stride > 0 ? src.stride : W;
+    out.width = W;
+    out.height = H;
+    out.pixels.assign(static_cast<size_t>(W) * H, 255);
+
+    std::vector<uint8_t> buf(static_cast<size_t>(W));
+    const size_t kl = static_cast<size_t>(std::min(W - 1, W * pct / 100));
+    const size_t kh = static_cast<size_t>(std::min(W - 1, W * (100 - pct) / 100));
+    int structured = 0;
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+        std::memcpy(buf.data(), row, static_cast<size_t>(W));
+        std::nth_element(buf.begin(), buf.begin() + kl, buf.end());
+        const int lo = buf[kl];
+        std::memcpy(buf.data(), row, static_cast<size_t>(W));
+        std::nth_element(buf.begin(), buf.begin() + kh, buf.end());
+        const int hi = buf[kh];
+        if (hi - lo < minRange) continue;   // 구조가 없는 행은 흰색으로 둔다
+        const int thr = (lo + hi) / 2;
+        uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) o[x] = row[x] < thr ? 0 : 255;
+        ++structured;
+    }
+    return structured * 4 >= H;
+}
+
 bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
     const int W = src.width, H = src.height;
     if (W <= 0 || H <= 0) return false;

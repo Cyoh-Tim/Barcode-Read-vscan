@@ -595,6 +595,13 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
         // [[vscan-lite-roi-contrast-stretch]]
         if (!budgetExceeded()) {
             std::vector<PipelineResult> stretched;
+            std::vector<Rect> srcRect;              // stretched[i]를 만든 영역
+            auto rectsTouch = [](const Rect& a, const Rect& b) {
+                const int mx = std::max(a.x1 - a.x0, b.x1 - b.x0) / 4;
+                const int my = std::max(a.y1 - a.y0, b.y1 - b.y0) / 4;
+                return a.x0 - mx < b.x1 && b.x0 - mx < a.x1 &&
+                       a.y0 - my < b.y1 && b.y0 - my < a.y1;
+            };
             const int srcStride = image.stride > 0 ? image.stride : image.width;
             int rectIdx = -1;
             for (const Rect& rc : rects) {
@@ -729,32 +736,44 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                             sHits = roiPipe.processViewCore(GrayView(tsm));
                             if (sHits.empty())
                                 sHits = roiPipe.processViewCore(GrayView(tboost));
-                            // [세로 평균 + 국소 이진화] 여기까지 왔으면
-                            // 전역 스트레칭으로는 안 되는 대비다. 1D는 세로로
-                            // 같은 값이 반복되므로 세로로만 평균하면 잡음만
-                            // 줄고 막대 경계는 그대로다 — 그 위에서 국소
-                            // 이진화를 하면 임계가 흔들리지 않는다.
-                            // 실측(module 8, 대비 0.05, 다른 모든 시도 실패,
-                            // 여백 12px 상자): 세로평균 반경 1을 앞에 넣고
-                            //   블록 16 + 평균임계   -> Code39, PDF417
-                            //   블록 24 + 중간값임계 -> DataBar
-                            // 세로평균 반경 0에서는 셋 다 안 열린다 — 이
-                            // 단계가 결정적이다. 반경은 1~32에서 결과가 같아
-                            // 가장 싼 1로 둔다. 블록 크기는 갈린다(Code39/
-                            // PDF417은 16에서만, DataBar는 24/48에서만).
-                            static constexpr struct { int block; bool mid; } kBin[] = {
-                                {16, false}, {24, true},
-                            };
+                            // [세로평균 + 행 단위 이진화]
+                            // 대비 0.05에서도 **코드 행의 런 개수는 대비 1.0과
+                            // 정확히 같다**(Codabar 81 / Code93 99 / ITF 49 /
+                            // UPC-E 35). 진폭만 19계조로 줄었을 뿐 정보는
+                            // 그대로다. 그러니 문제는 임계를 어디서 잡느냐다.
+                            //
+                            // 블록 단위 이진화는 여기서 무너진다 — 블록이
+                            // 굵은 요소 안에 통째로 들어가면 이웃에서 빌려야
+                            // 하는데, 19계조에서는 그 추정이 안 선다. 1D는
+                            // 한 행이 코드 전체를 담고 그 행 안에 밝은 요소와
+                            // 어두운 요소가 반드시 둘 다 있으므로, **그 행
+                            // 자신의 백분위수**가 곧 임계다.
+                            //
+                            // 실측(대비 0.05, 다른 모든 전처리가 실패한 상태):
+                            // 세로평균 반경 1 + 여백 0 + 행 10퍼센타일 한 벌로
+                            // 일곱 종이 전부 열린다(Codabar/Code39/Code93/
+                            // DataBar/ITF/PDF417/UPC-E). 블록 이진화 두 벌로는
+                            // 셋만 열렸다. 디코드 횟수는 오히려 하나 줄었다.
+                            // [[vscan-lite-row-binarize]]
                             if (sHits.empty() && !budgetExceeded()) {
+                                const int bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+                                GrayImage z;
+                                z.width = bw;
+                                z.height = bh;
+                                z.pixels.resize(static_cast<size_t>(bw) * bh);
+                                for (int r = 0; r < bh; ++r)
+                                    std::memcpy(z.pixels.data() + static_cast<size_t>(r) * bw,
+                                                image.pixels + static_cast<size_t>(b.y0 + r) * srcStride + b.x0, bw);
                                 GrayImage vb;
-                                verticalBlur(GrayView(tcrop), 1, vb);
-                                GrayImage vst;
-                                if (!stretchContrast(GrayView(vb), vst)) vst = std::move(vb);
+                                verticalBlur(GrayView(z), 1, vb);
                                 GrayImage vbin;
-                                for (const auto& bp : kBin) {
-                                    if (!sHits.empty() || budgetExceeded()) break;
-                                    if (!localAdaptiveBinarize(GrayView(vst), vbin, bp.mid, bp.block)) continue;
+                                if (rowBinarize(GrayView(vb), vbin)) {
                                     sHits = roiPipe.processViewCore(GrayView(vbin));
+                                    for (auto& r : sHits)
+                                        for (auto& pt : r.symbol.position) {
+                                            pt.first += b.x0 - tr.x0;
+                                            pt.second += b.y0 - tr.y0;
+                                        }
                                 }
                             }
                             // 좌표는 이 크롭 기준이므로 원래 크롭 기준으로 옮긴다.
@@ -879,7 +898,29 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                 }
                 for (auto& r : sHits)
                     for (auto& pt : r.symbol.position) { pt.first += rc.x0; pt.second += rc.y0; }
-                stretched.insert(stretched.end(), sHits.begin(), sHits.end());
+                // [같은 코드를 두 영역에서 각각 잡는 경우]
+                // 세로로 긴 1D 코드(예: EAN13 846x544)는 타일 격자 상자
+                // 여러 개에 걸친다. 각 상자를 따로 구제하면 zxing이 서로
+                // 다른 스캔 밴드를 돌려주는데, 밴드는 두께 4px짜리라 서로
+                // 500px 넘게 떨어질 수 있다 — 실측: (158,774)-(858,778)과
+                // (164,1289)-(865,1293), 둘 다 정답 상자 762~1306 안이다.
+                // dedup()의 기하 규칙(밴드/얇은조각)은 이 간격을 못 넘는다.
+                //
+                // 여기서는 **어느 영역에서 나왔는지**를 알고 있으므로
+                // 기하로 추측할 필요가 없다. 같은 텍스트가 이미 있고 그
+                // 결과를 낸 영역이 지금 영역과 맞닿아 있으면(둘을 25%씩
+                // 부풀렸을 때 겹치면) 같은 코드다. 떨어져 있는 같은 내용
+                // 라벨 2장은 이 조건에 안 걸린다.
+                for (auto& r : sHits) {
+                    bool same = false;
+                    for (size_t k = 0; k < stretched.size() && !same; ++k)
+                        if (stretched[k].symbol.text == r.symbol.text &&
+                            k < srcRect.size() && rectsTouch(srcRect[k], rc))
+                            same = true;
+                    if (same) continue;
+                    stretched.push_back(r);
+                    srcRect.push_back(rc);
+                }
             }
             if (take(dedup(std::move(stretched)))) return true;
         }

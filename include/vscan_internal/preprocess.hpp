@@ -83,6 +83,33 @@ void boxBlur3x3(const GrayView& src, GrayImage& out);
 void verticalBlur(const GrayView& src, int radius, GrayImage& out);
 
 /*
+ * [행 단위 이진화 — 1D 전용]
+ *
+ * 행마다 **그 행 자신의** 백분위수(pct / 100-pct)를 재서 중간값으로 가른다.
+ * 구조가 없는 행(범위가 minRange 미만)은 흰색으로 민다.
+ *
+ * 왜 블록이 아니라 행인가. 1D 코드는 한 행이 코드 전체를 담고 있고,
+ * 그 행 안에서 밝은 요소와 어두운 요소가 반드시 둘 다 나온다. 그래서
+ * 행 하나의 히스토그램이 그 행의 임계를 정하는 데 필요한 정보를 다 갖는다.
+ * 블록 단위(localAdaptiveBinarize)는 블록이 굵은 요소 안에 통째로 들어가는
+ * 경우를 이웃에서 빌려 메워야 하는데, 대비가 아주 낮으면 그 추정이 무너진다.
+ *
+ * 실측(module 8, 대비 0.05 — 다른 모든 전처리가 실패하는 구간): 코드 행의
+ * 런 개수는 대비 1.0일 때와 **정확히 같다**(Codabar 81, Code93 99, ITF 49,
+ * UPC-E 35). 진폭만 19계조로 줄었을 뿐 정보는 그대로다. 행 단위 임계는
+ * 그 19계조 안에서 정확히 갈라서 일곱 종(Codabar/Code39/Code93/DataBar/
+ * ITF/PDF417/UPC-E)을 전부 연다. 같은 이미지에 블록 이진화를 걸면 넷이
+ * 안 열린다.
+ *
+ * 세로 평균을 앞에 넣어야 한다(verticalBlur 반경 1이면 충분). 잡음이
+ * 행 백분위수를 흔들기 때문이다.
+ *
+ * 막대가 세로일 때만 맞는 가정이다 — 기울어진 코드나 2D에는 쓰지 말 것.
+ * 반환값 false는 "구조가 있는 행이 너무 적다"는 뜻이다.
+ */
+bool rowBinarize(const GrayView& src, GrayImage& out, int pct = 10, int minRange = 10);
+
+/*
  * [프레임 노이즈 추정 — 전처리를 고르기 위한 사전 측정]
  *
  * 왜 필요한가. 지금 파이프라인은 어떤 프레임이든 풀프레임 두 번(coarse +
