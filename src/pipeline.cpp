@@ -842,13 +842,42 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     //    변별력이 없다.
                     // 이 비용은 CI 기준선에 반영돼 있다.
                     // [[vscan-lite-pitch-equalize]]
-                    struct PitchTry { int rows, win, pct; };
-                    static constexpr PitchTry kTries[] = {{1, 13, 10}, {9, 21, 5}, {9, 13, 10}};
+                    // 네 번째 벌은 **행 이진화를 앞에 넣는다**. 가장 강한
+                    // 곡률에서는 회색조의 런 경계가 흐려 피치 추정이 흔들리는데,
+                    // 행 단위로 먼저 흑백을 만들면 런이 깨끗해져서 추정이 선다.
+                    // 그때는 백분위수를 30까지 올려도 된다(회색조에서는 30이면
+                    // 하나도 안 열렸다 — 2모듈 런을 1모듈로 착각하기 때문인데,
+                    // 이진화된 뒤에는 런 길이가 정확하다).
+                    // 실측: PDF417 곡면 0.1이 여기서만 열린다.
+                    struct PitchTry { int rows, win, pct; bool rowbin; };
+                    static constexpr PitchTry kTries[] = {
+                        {1, 13, 10, false}, {9, 21, 5, false}, {9, 13, 10, false},
+                        {3, 31, 30, true},
+                    };
+                    GrayImage rbCrop;
+                    bool rbDone = false, rbOk = false;
                     for (const PitchTry& t : kTries) {
                         if (&t != kTries && budgetExceeded()) break;
+                        const GrayImage* srcImg = &crop;
+                        if (t.rowbin) {
+                            // 납작한 크롭(가로가 세로의 3배 이상)에서만 돈다.
+                            // 이 벌이 필요했던 것은 PDF417 곡면 0.1 하나이고,
+                            // 그 크롭이 1055x201이다. 조건 없이 돌리면 코퍼스
+                            // p95가 439 -> 584ms(+33%)가 된다 — 사다리 맨
+                            // 끝에서 프레임마다 디코드를 한 번 더 도는 값이다.
+                            if (crop.height * 3 > crop.width) break;
+                            if (!rbDone) {
+                                GrayImage vb;
+                                verticalBlur(GrayView(crop), 1, vb);
+                                rbOk = rowBinarize(GrayView(vb), rbCrop);
+                                rbDone = true;
+                            }
+                            if (!rbOk) continue;
+                            srcImg = &rbCrop;
+                        }
                         GrayImage eq;
                         PitchMap pmap;
-                        if (!pitchEqualize(GrayView(crop), eq, &pmap, t.rows, t.win, t.pct)) continue;
+                        if (!pitchEqualize(GrayView(*srcImg), eq, &pmap, t.rows, t.win, t.pct)) continue;
                         sHits = roiPipe.processViewCore(GrayView(eq));
                         if (sHits.empty()) continue;
                         // 가로만 바뀌었으므로 x는 역사상, y는 여백만 뺀다.
