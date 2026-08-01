@@ -1831,18 +1831,31 @@ bool isStackedBand(const BBox& a, const BBox& b) {
 // 그래서 두 상자를 **긴 쪽 크기에 비례하는 여유**만큼 부풀린 뒤 겹침을
 // 본다. 비례로 하는 이유는 위 예처럼 바코드가 길수록 스캔 행 간격도
 // 그만큼 벌어질 수 있어서다(고정 상수는 코드 크기가 바뀌면 깨진다).
-// 여유 10%면 위 두 케이스 모두 겹침비 0.72로 걸린다.
+//
+// 여유는 50%다. 처음에는 10%였는데 그건 **평평한 코드**의 스캔 행 간격만
+// 보고 정한 값이었다. 곡면/회전이 섞이면 같은 코드의 밴드가 훨씬 멀리
+// 흩어진다 — 실측(난수 코퍼스 1000장, 씨드 7에서 나온 오디코딩 9건):
+//   ITF 곡면: "52934743"(507,951)-(832,958) / 정답(335,1113)-(912,1119)
+//             / "43425562"(421,1229)-(790,1232)   세로 간격 110~155px,
+//             코드 길이 577px의 10%(58px)로는 원리적으로 못 닿는다.
+//   ITF 회전: 정답(496,384)-(633,1079) / "043028"(680,531)-(685,883)
+//             부분 밴드가 정답 상자의 **바깥**에 있다(x 680 > 633).
+// 50%면 이 셋이 다 걸리고, 그러면서 텍스트 조건(한쪽이 다른 쪽의 부분
+// 문자열)이 함께 걸려 있어야 하므로 서로 다른 코드를 지울 위험은 남지
+// 않는다 — 같은 자리에서 한쪽 내용이 다른 쪽의 부분 문자열인 별개 코드는
+// 실질적으로 없다.
 // [[vscan-lite-dedup-partial-scan]]
 bool onSameBarcodeBand(const BBox& a, const BBox& b) {
     const double span = std::max({a.x1 - a.x0, a.y1 - a.y0, b.x1 - b.x0, b.y1 - b.y0});
-    const double m = 0.10 * span;
+    const double m = 0.50 * span;
     const BBox ia{a.x0 - m, a.y0 - m, a.x1 + m, a.y1 + m};
     const BBox ib{b.x0 - m, b.y0 - m, b.x1 + m, b.y1 + m};
     return containRatio(ia, ib) >= 0.5;
 }
 }
 
-std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
+namespace {
+std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
     // 겹치는 타일 경계에서 같은 코드가 두 번 검출될 수 있다.
     // 같은 심볼로지 + 같은 텍스트 + (겹침이 크거나 중심점이 가까우면) 하나만 남긴다.
     //
@@ -1909,12 +1922,43 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
             }
             // 같은 텍스트이거나, 한쪽이 다른 쪽의 부분 문자열이거나.
             // 후자는 1D 부분 스캔 — 아래 기하 조건까지 만족할 때만 지운다.
+            const auto keptBox = bboxOf(kept.symbol);
             const bool sameText = kept.symbol.text == cand.symbol.text;
             const bool candIsPart = textContains(kept.symbol.text, cand.symbol.text);
             const bool keptIsPart = textContains(cand.symbol.text, kept.symbol.text);
-            if (!sameText && !candIsPart && !keptIsPart) continue;
 
-            auto keptBox = bboxOf(kept.symbol);
+            /*
+             * [내용이 아예 다른 얇은 조각 = 어긋난 스캔]
+             *
+             * 부분 스캔이 항상 부분 **문자열**로 나오지는 않는다. ITF는
+             * 숫자를 두 개씩 엮어 넣으므로 시작 위치가 한 요소만 밀려도
+             * 전혀 다른 숫자열이 나온다. EAN/UPC도 마찬가지다.
+             * 실측(난수 코퍼스 씨드 7):
+             *   "857212726494" (204,159)-(405,883) 201x724   <- 정답
+             *   "920234"       (724,526)-(729,919)   5x393   <- 두께 5px
+             *   "4936922291805"(1523,1004)-(1704,1387) 181x383
+             *   "19369224"     (1489,1152)-(1504,1333) 15x181
+             * 둘 다 문자열 관계가 전혀 없어서 부분 스캔 규칙을 못 탄다.
+             *
+             * 그런데 **두께 5px / 15px짜리 코드는 물리적으로 없다.** 긴 축이
+             * 90% 이상 정렬되고 두께가 상대의 35% 미만이면 그건 라벨이
+             * 아니라 심볼을 스쳐 지나간 스캔 한 줄이다(isThinSlice의 기준
+             * 그대로). 같은 심볼로지 + 같은 자리(부풀린 겹침)까지 겹치면
+             * 어긋난 스캔으로 보고 얇은 쪽을 버린다.
+             *
+             * 텍스트가 같을 때는 이미 아래에서 잡고 있었다. 여기서 넓히는
+             * 것은 "내용까지 다른" 경우인데, 그건 오히려 더 위험한 쪽이다 —
+             * 남겨두면 호출자가 없는 품번을 받는다.
+             */
+            if (!sameText && !candIsPart && !keptIsPart) {
+                if (isThinSlice(candBox, keptBox) && onSameBarcodeBand(candBox, keptBox)) {
+                    isDup = true;
+                    if (areaOf(candBox) > areaOf(keptBox)) kept = std::move(cand);
+                    break;
+                }
+                continue;
+            }
+
             auto keptCenter = centerOf(kept.symbol);
             double dx = candCenter.first - keptCenter.first;
             double dy = candCenter.second - keptCenter.second;
@@ -1938,6 +1982,29 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
         if (!isDup) out.push_back(std::move(cand));
     }
     return out;
+}
+}  // namespace
+
+/*
+ * [고정점까지 반복한다]
+ * 한 번만 돌면 **입력 순서에 결과가 달린다**. 실측(난수 코퍼스 씨드 7,
+ * 회전 ITF): 입력이
+ *   '04302847' / '043028' / '30284797' / '0430284797'
+ * 순으로 들어오면, 먼저 자리를 잡은 '04302847'이 '043028'을 흡수하지만
+ * '30284797'은 그 텍스트의 부분 문자열이 아니라(길이가 같다) 살아남는다.
+ * 그 뒤 '0430284797'이 들어와 앵커를 자기로 바꾸는데, 이미 통과한
+ * '30284797'은 다시 검사되지 않는다 — '0430284797'의 부분 문자열인데도.
+ *
+ * 한 번 더 돌리면 그때는 앵커가 긴 쪽이라 잡힌다. out이 몇 개짜리 벡터라
+ * 반복 비용은 무시할 수 있다. 4회는 안전장치일 뿐 실제로는 2회에서 멈춘다.
+ */
+std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
+    for (int iter = 0; iter < 4; ++iter) {
+        const size_t before = in.size();
+        in = dedupOnce(std::move(in));
+        if (in.size() == before) break;
+    }
+    return in;
 }
 
 } // namespace vscan
