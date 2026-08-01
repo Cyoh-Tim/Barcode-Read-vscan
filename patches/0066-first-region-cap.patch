@@ -1,0 +1,95 @@
+From 11816391276edda4a7e6a989c2edae198d28d9a3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 1 Aug 2026 18:40:04 +0000
+Subject: [PATCH 66/66] =?UTF-8?q?=EA=BC=AC=EB=A6=AC=20=EC=9E=90=EB=A5=B4?=
+ =?UTF-8?q?=EA=B8=B0=202:=20=EC=B2=AB=20=EC=98=81=EC=97=AD=20=EA=B0=80?=
+ =?UTF-8?q?=EC=82=B0=EC=97=90=20=EC=A0=88=EB=8C=80=20=EC=83=81=ED=95=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+직전 커밋의 예산은 첫 영역에 배수(4.5배)만 걸었다. 그러면 첫 패스가 비싼
+프레임(클러터가 많고 코드가 여럿인 프레임)은 배수만으로도 예산이 커진다 —
+첫 패스 140ms면 630ms다. 그 구간이 남은 꼬리를 만들고 있었다.
+
+배수와 절대 상한 중 이른 쪽을 쓰게 했다(상한 200ms). 상한 150은 고정
+40종을 39/40으로 떨어뜨리고, 300은 최대값이 540 -> 868ms로 늘어난다.
+200이 40/40을 지키면서 가장 낮은 값이다.
+
+최종 측정(500장씩, full 경로, reps=2 최소값):
+                    검출      p50    p90    p95    p99    최대
+  easy  기준      91.86%    30.2   59.1   69.5  344.3  439.6
+  easy  현재      91.80%    31.4   57.6   68.0  167.8  253.7
+  mixed 기준      69.11%    45.9  326.7  497.4  991.9 1181.7
+  mixed 현재      67.34%    47.0  204.4  260.4  415.9  540.5
+  hard  기준      39.21%   264.4  832.1  975.1 1254.0 1399.8
+  hard  현재      35.24%   148.9  376.7  398.4  465.4  475.4
+
+꼬리가 mixed에서 p90 -37% / p95 -48% / p99 -58% / 최대 -54%,
+hard에서 p50 -44% / p90 -55% / 최대 -66%다. 검출은 mixed -1.8%p,
+hard -4.0%p. hard는 애초에 물리 한계 근처(모듈 2.2~8px, 열화 2~4겹)라
+사다리를 끝까지 도는 프레임이 많고, 그만큼 자를 때 잃는 것도 크다.
+
+회귀: 고정 40종 40/40/40, 14종 x 19각도 100% / 오디코딩 0,
+축 스윕 1699장 99.65%(대비 2 / 노이즈 1 / 원근 1 — 전부 예산에 잘린 것),
+오디코딩 0 / 중복 0, 게이트 통과.
+
+[목표 대비] "어떤 난수 프레임에서도 깨끗한 프레임의 3배 안"은 절반만
+달성했다. 같은 분위수끼리 비교하면 mixed/easy가 p50 1.5배 / p99 2.5배 /
+최대 2.1배로 3배 안이지만, p90 3.6배 / p95 3.8배는 아직 넘는다.
+프레임 단위로 봐도 총시간/첫패스 비율이 p90 1.4배인데 p99 6.9배다 —
+그 꼬리는 예산 하한(150ms)이 만든다. 하한을 빼면 비율은 3배 안으로
+들어오지만 첫 패스가 싼 프레임의 깊은 구제가 죽어 40종이 36/40이 된다.
+"비율 3배"와 "싼 프레임도 충분한 절대 시간"은 서로 맞바꾸는 관계다.
+
+PROJECT_NOTES §3.47
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018HhKdVcvwi6dQ6WxyRrvc5
+---
+ include/vscan_internal/pipeline.hpp | 8 ++++++++
+ src/pipeline.cpp                    | 9 ++++++---
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/include/vscan_internal/pipeline.hpp b/include/vscan_internal/pipeline.hpp
+index cebbdda..3978edb 100644
+--- a/include/vscan_internal/pipeline.hpp
++++ b/include/vscan_internal/pipeline.hpp
+@@ -355,6 +355,14 @@ struct PipelineConfig {
+      */
+     float frameBudgetXFirstRegion = 4.5f;
+ 
++    /*
++     * [첫 영역 가산의 절대 상한] 첫 패스가 비싼 프레임(클러터가 많고 코드가
++     * 여럿인 프레임)은 배수만으로도 예산이 커진다 — 첫 패스 140ms면 4.5배가
++     * 630ms다. 그 구간이 꼬리를 만든다. 배수와 이 상한 중 **이른 쪽**을 쓴다.
++     * 0이면 상한 없음.
++     */
++    int frameBudgetFirstRegionCapMs = 200;
++
+     /*
+      * [빈 프레임 조기 종료] 0 = 켜짐(기본), 1 = 끔.
+      *
+diff --git a/src/pipeline.cpp b/src/pipeline.cpp
+index f257405..e8bb3cc 100644
+--- a/src/pipeline.cpp
++++ b/src/pipeline.cpp
+@@ -77,9 +77,12 @@ void Pipeline::armSelfBudget(double firstPassMs) {
+                           std::max(0.0, total - firstPassMs) * 1000.0));
+     if (!deadlineActive_ || self < deadline_) { deadline_ = self; deadlineActive_ = true; }
+     // 첫 영역용 마감은 더 멀리 잡는다(위 frameBudgetXFirstRegion 주석).
+-    const double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
+-                                                              cfg_.frameBudgetXFirstPass),
+-                                       static_cast<double>(cfg_.frameBudgetFloorMs));
++    double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
++                                                        cfg_.frameBudgetXFirstPass),
++                                 static_cast<double>(cfg_.frameBudgetFloorMs));
++    if (cfg_.frameBudgetFirstRegionCapMs > 0)
++        totalFirst = std::min(totalFirst,
++                              firstPassMs + static_cast<double>(cfg_.frameBudgetFirstRegionCapMs));
+     deadlineFirst_ = std::chrono::steady_clock::now() +
+                      std::chrono::microseconds(static_cast<long long>(
+                          std::max(0.0, totalFirst - firstPassMs) * 1000.0));
+-- 
+2.43.0
+
