@@ -61,7 +61,12 @@ if(VSCAN_USE_ZBAR)
   set(ZBAR_CONFIGURE_ARGS
     --prefix=${ZBAR_INSTALL_DIR}
     --disable-video --disable-doc --without-jpeg --without-imagemagick
-    --without-x --without-dbus --with-gtk=no --with-python=no --without-qt --without-java
+    # --without-xshm이 없으면 **크로스 빌드에서 configure가 죽는다.**
+    # --without-x를 줘도 zbar는 XShm 확장을 따로 검사해서 -lXext를 찾는다.
+    # 호스트(x86)에는 libXext가 깔려 있어 통과하지만 Yocto sysroot에는 보통
+    # 없다 — 그래서 실기 빌드에서만 터진다(2026-08-02 aarch64 크로스로 확인).
+    --without-x --without-xshm --without-dbus --with-gtk=no --with-python=no
+    --without-qt --without-java
     --enable-shared --disable-static --disable-nls
     --enable-codes=ean\ upc\ code39\ code93\ code128\ codabar\ databar\ composite\ qrcode\ i25
   )
@@ -76,7 +81,13 @@ if(VSCAN_USE_ZBAR)
       CXX=${CMAKE_CXX_COMPILER}\ ${CMAKE_CXX_COMPILER_ARG1}
     BUILD_COMMAND make -j
     INSTALL_COMMAND make install
-    BUILD_IN_SOURCE 1
+    # [소스 트리에서 빌드하지 않는다]
+    # 예전에는 BUILD_IN_SOURCE 1이었다. 두 가지가 걸렸다:
+    #  - 호스트(x86)로 한 번 빌드한 뒤 aarch64로 크로스 빌드하면 **x86 오브젝트가
+    #    남아 있어 링크가 죽는다**("Relocations in generic ELF (EM: 62)").
+    #    실기 빌드 직전에만 터지는 종류라 더 나쁘다(2026-08-02 확인).
+    #  - 산출물이 벤더 소스 트리를 더럽혀서 .gitignore로 덮어야 했다.
+    # zbar는 autoreconf가 끝난 상태로 커밋돼 있어 VPATH 빌드가 된다.
     BUILD_BYPRODUCTS
       ${ZBAR_INSTALL_DIR}/lib/libzbar${CMAKE_SHARED_LIBRARY_SUFFIX}
   )

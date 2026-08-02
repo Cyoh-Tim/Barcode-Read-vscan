@@ -154,15 +154,16 @@ struct Code25Spec {
  * 2of5 미검출). 2of5는 시작/정지 패턴이 방향을 증명해주므로 뒤집어서 한 번
  * 더 시도해도 오디코딩이 늘지 않는다. Pharmacode와 다른 점이 이것이다.
  */
-std::vector<Run> reversedRuns(const std::vector<Run>& in) {
-    std::vector<Run> out;
+// 주사선마다 벡터를 새로 만들면 프레임당 수백 번 malloc이 돈다.
+// A53처럼 할당이 비싼 쪽에서 특히 나쁘다 — 버퍼를 밖에서 받아 재사용한다.
+void reversedRuns(const std::vector<Run>& in, std::vector<Run>& out) {
+    out.clear();
     out.reserve(in.size());
     int pos = 0;
     for (auto it = in.rbegin(); it != in.rend(); ++it) {
         out.push_back({it->bar, pos, it->len});
         pos += it->len;
     }
-    return out;
 }
 
 bool decode25At(const std::vector<Run>& runs, size_t at, const Code25Spec& spec,
@@ -347,7 +348,7 @@ std::vector<DecodedSymbol> LinearDecoder::decode(const GrayView& image) {
 
     constexpr int kScanLines = 21;
     std::vector<Hit> acc;
-    std::vector<Run> runs;
+    std::vector<Run> runs, rev;
 
     // 가로/세로 두 방향. 주사선은 양 끝 8%를 피해서 고르게 뿌린다 —
     // 잘라온 ROI라도 가장자리 한두 줄은 이웃 픽셀이 섞여 있는 경우가 많다.
@@ -373,7 +374,7 @@ std::vector<DecodedSymbol> LinearDecoder::decode(const GrayView& image) {
             // 2of5는 정방향/역방향 둘 다 본다. 역방향 좌표는 선 길이에서 되돌린다.
             if (opt_.industrial2of5 || opt_.coop2of5) {
                 const int lineLen = vertical ? image.height : image.width;
-                const std::vector<Run> rev = reversedRuns(runs);
+                reversedRuns(runs, rev);
                 for (int dir = 0; dir < 2; ++dir) {
                     const std::vector<Run>& rr = dir == 0 ? runs : rev;
                     for (size_t i = 0; i < rr.size(); ++i) {

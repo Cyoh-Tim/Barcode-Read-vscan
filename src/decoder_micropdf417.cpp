@@ -355,12 +355,13 @@ bool lineRuns(const GrayView& img, bool vertical, int k, std::vector<Run>& out) 
     return out.size() >= 20;
 }
 
-std::vector<Run> reversedRuns(const std::vector<Run>& in) {
-    std::vector<Run> out;
+// 주사선마다 새로 만들지 않는다 — 버퍼를 밖에서 받아 재사용한다.
+// 프레임당 수백 번의 malloc은 A53에서 그대로 비용이다.
+void reversedRuns(const std::vector<Run>& in, std::vector<Run>& out) {
+    out.clear();
     out.reserve(in.size());
     int pos = 0;
     for (auto it = in.rbegin(); it != in.rend(); ++it) { out.push_back({it->bar, pos, it->len}); pos += it->len; }
-    return out;
 }
 
 // RAP 6원소를 18비트 정수로 눌러 담는다(각 원소 1..5). 표 조회용.
@@ -373,13 +374,29 @@ int packRap(const int* r) {
     return key;
 }
 
+/*
+ * [std::map을 쓰지 않는다]
+ * RAP 조회는 프레임당 수십만 번 돈다. 적흑트리는 노드가 흩어져 있어
+ * A53의 작은 캐시에서 특히 나쁘다. 52개짜리 표는 **정렬된 평탄 배열 +
+ * 이진 탐색**이면 416바이트라 L1에 통째로 들어간다.
+ */
 struct RapIndex {
-    std::map<int, int> side, center;
+    std::array<std::pair<int, int>, 52> side, center;   // {키, RAP 인덱스}
     RapIndex() {
         for (int i = 0; i < 52; ++i) {
-            side[packRap(kRapSide[i])] = i;
-            center[packRap(kRapCenter[i])] = i;
+            side[i] = {packRap(kRapSide[i]), i};
+            center[i] = {packRap(kRapCenter[i]), i};
         }
+        auto byKey = [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+            return a.first < b.first;
+        };
+        std::sort(side.begin(), side.end(), byKey);
+        std::sort(center.begin(), center.end(), byKey);
+    }
+    static int find(const std::array<std::pair<int, int>, 52>& t, int key) {
+        auto it = std::lower_bound(t.begin(), t.end(), key,
+                                   [](const std::pair<int, int>& a, int k) { return a.first < k; });
+        return (it != t.end() && it->first == key) ? it->second : -1;
     }
 };
 const RapIndex& rapIndex() { static const RapIndex r; return r; }
@@ -398,9 +415,8 @@ int matchRap(const std::vector<Run>& runs, size_t at, double unit, bool centerTa
     for (int i = 0; i < 6; ++i) sum += q[i];
     if (sum != 10) return -1;
     const int key = packRap(q);
-    const auto& m = centerTable ? rapIndex().center : rapIndex().side;
-    auto it = m.find(key);
-    return it == m.end() ? -1 : it->second;
+    const RapIndex& ix = rapIndex();
+    return RapIndex::find(centerTable ? ix.center : ix.side, key);
 }
 
 // 17모듈 코드워드 하나(막대4 + 공백4 = 8원소)를 zxing으로 푼다.
@@ -706,7 +722,8 @@ std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
     scanPdf417Composite(image, results);
 
     std::vector<RowParse> parses;
-    std::vector<Run> runs;
+    std::vector<Run> runs, rev;
+    std::vector<int> preF, preR;
 
     /*
      * 네 방향을 다 본다 — 가로/세로 x 정방향/역방향. 0/90/180/270도를
@@ -723,8 +740,9 @@ std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
         for (int line = 0; line < extent; line += step) {
             if (!lineRuns(image, vertical, line, runs)) continue;
             if (runs.size() > 4096) continue;
-            const std::vector<Run> rev = reversedRuns(runs);
-            std::vector<int> preF(runs.size() + 1, 0), preR(runs.size() + 1, 0);
+            reversedRuns(runs, rev);
+            preF.assign(runs.size() + 1, 0);
+            preR.assign(runs.size() + 1, 0);
             for (size_t k = 0; k < runs.size(); ++k) {
                 preF[k + 1] = preF[k] + runs[k].len;
                 preR[k + 1] = preR[k] + rev[k].len;

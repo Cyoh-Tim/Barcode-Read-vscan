@@ -1,4 +1,5 @@
 #include "vscan_internal/preprocess.hpp"
+#include <cstdint>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -460,6 +461,7 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
             acc -= px(x - r);
             acc += px(x + r + 1);
         }
+        // (가로 패스는 누적합이 순차 의존이라 원리적으로 벡터화가 안 된다)
     }
     // [세로 패스는 행 단위로] 열을 하나씩 세로로 훑으면 매 접근이 다른
     // 캐시 라인이라(스트라이드 W) 반경과 무관하게 느려진다 — 실측
@@ -471,12 +473,42 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
         const int* __restrict in = rowAt(y);
         for (int x = 0; x < W; ++x) colSum[x] += in[x];
     }
+    /*
+     * [나눗셈 하나가 NEON을 통째로 막는다]
+     * `colSum[x] / n`은 n이 실행시 결정되는 정수 나눗셈이라 gcc가 벡터화를
+     * 포기한다 — aarch64 -O3 -mcpu=cortex-a53로 뽑아보면 이 함수 전체에서
+     * SIMD 명령이 3개뿐이었다. 곱셈+시프트로 바꾸면 4레인씩 돈다(24개).
+     *
+     * [정확해야 한다 — 근사로 넘어가면 안 된다]
+     * 처음엔 M=ceil(2^16/n)로 그냥 바꿨는데 **전 범위 전수 검사에서 최대 2까지
+     * 어긋났다.** 이 블러는 flattenIllumination의 나눗수로 쓰이므로 값이
+     * 흔들리면 조용히 검출이 달라진다.
+     *
+     * 정확 조건은 알려져 있다: M = ceil(2^K/n)일 때
+     *     floor(x*M / 2^K) == floor(x/n)  (0 <= x <= N)
+     * 이 성립할 필요충분조건은 (M*n - 2^K) * N <= 2^K 이다. 여기에 int
+     * 오버플로가 안 나는 조건(N*M < 2^31)을 더해 **실행시에 검사하고,
+     * 안 맞으면 나눗셈으로 되돌린다.** K=21에서 n<=387이면 대체로 통과한다
+     * (파이썬으로 n=3..401 전수 x 전 범위 검증: 불일치 0).
+     */
+    constexpr int kShift = 21;
+    const int64_t N = 255LL * n;
+    const int M = static_cast<int>((1 << kShift) / n + (((1 << kShift) % n) ? 1 : 0));
+    const bool fastDiv = (static_cast<int64_t>(M) * n - (1 << kShift)) * N <= (1 << kShift) &&
+                         N * M < (1LL << 31);
+
     for (int y = 0; y < H; ++y) {
         uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
-        for (int x = 0; x < W; ++x) o[x] = static_cast<uint8_t>(colSum[x] / n);
+        const int* __restrict cs = colSum.data();
+        if (fastDiv) {
+            for (int x = 0; x < W; ++x) o[x] = static_cast<uint8_t>((cs[x] * M) >> kShift);
+        } else {
+            for (int x = 0; x < W; ++x) o[x] = static_cast<uint8_t>(cs[x] / n);
+        }
         const int* __restrict sub = rowAt(y - r);
         const int* __restrict add = rowAt(y + r + 1);
-        for (int x = 0; x < W; ++x) colSum[x] += add[x] - sub[x];
+        int* __restrict cw = colSum.data();
+        for (int x = 0; x < W; ++x) cw[x] += add[x] - sub[x];
     }
 }
 
