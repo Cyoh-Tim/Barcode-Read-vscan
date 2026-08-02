@@ -357,6 +357,17 @@ typedef struct {
      * 작은 값을 꼭 읽어야 하면 4나 2로 내리되 유령을 각오할 것.
      */
     int pharmacode_min_bars;
+
+    /*
+     * [MicroPDF417] 0 = 기본(꺼짐), 1 = 켬.
+     *
+     * zxing-cpp v2.2.1에 포맷 자체가 없어서 직접 만들었다. GS1 Composite의
+     * 2D 성분(CC-A/CC-B)도 MicroPDF417이라 이것이 그쪽의 전제이기도 하다.
+     *
+     * 위의 세 심볼로지와 달리 오디코딩 위험은 낮다 — RAP 표와 GF(929)
+     * 리드-솔로몬을 통과해야 결과가 나온다. 끄는 이유는 비용이다.
+     */
+    int enable_micro_pdf417;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

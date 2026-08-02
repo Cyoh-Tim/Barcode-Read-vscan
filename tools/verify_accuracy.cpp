@@ -351,6 +351,7 @@ int main(int argc, char** argv) {
             c.enable_industrial_2of5 = getenv("VSCAN_IND25") != nullptr;
             c.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
             c.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
+            c.enable_micro_pdf417   = getenv("VSCAN_MPDF") != nullptr;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) c.pharmacode_min_bars = atoi(mb);
             c.disable_1d_deskew_rescue = noDeskew;
             c.disable_blank_frame_skip = noBlankSkip;
@@ -384,6 +385,7 @@ int main(int argc, char** argv) {
             cfg.enable_industrial_2of5 = getenv("VSCAN_IND25") != nullptr;
             cfg.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
             cfg.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
+            cfg.enable_micro_pdf417   = getenv("VSCAN_MPDF") != nullptr;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
             cfg.disable_1d_deskew_rescue = noDeskew;
             cfg.disable_blank_frame_skip = noBlankSkip;

@@ -116,6 +116,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->enable_coop_2of5) pcfg.enableCoop2of5 = true;
         if (cfg->enable_pharmacode) pcfg.enablePharmacode = true;
         if (cfg->pharmacode_min_bars > 0) pcfg.pharmacodeMinBars = cfg->pharmacode_min_bars;
+        if (cfg->enable_micro_pdf417) pcfg.enableMicroPdf417 = true;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

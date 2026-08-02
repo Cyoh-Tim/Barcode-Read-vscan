@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include "vscan_internal/decoder_zxing.hpp"
 #include "vscan_internal/decoder_linear.hpp"
+#include "vscan_internal/decoder_micropdf417.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
 #include <cstdlib>
@@ -42,6 +43,8 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
         if (cfg_.pharmacodeMinBars > 0) lo.minPharmacodeBars = cfg_.pharmacodeMinBars;
         decoders_.push_back(std::make_unique<LinearDecoder>(lo));
     }
+    if (cfg_.enableMicroPdf417)
+        decoders_.push_back(std::make_unique<MicroPdf417Decoder>());
 #ifdef VSCAN_HAVE_ZBAR
     // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
     // cfg_를 복사하므로 자동으로 같이 따라간다.

@@ -77,6 +77,7 @@ int main(int argc, char** argv) {
     cfg.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
     cfg.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
     if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
+    cfg.enable_micro_pdf417    = getenv("VSCAN_MPDF") != nullptr;
     vscan_pipeline_t* pipeline = vscan_create(&cfg);
     if (!pipeline) { fprintf(stderr, "vscan_create 실패\n"); return 1; }
 

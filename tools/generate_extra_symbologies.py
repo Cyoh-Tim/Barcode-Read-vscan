@@ -19,6 +19,14 @@ BWIPP를 호출해서 만든다 — 생성 경로가 완전히 독립이므로 �
 
     python3 tools/generate_extra_symbologies.py --outdir /tmp/x            # 자체 생성
     python3 tools/generate_extra_symbologies.py --outdir /tmp/x --bwipp    # BWIPP 생성
+    python3 tools/generate_extra_symbologies.py --outdir /tmp/m --micropdf417
+
+## MicroPDF417은 BWIPP가 필요하다
+
+--micropdf417은 자체 생성 경로가 없다. 인코더를 직접 쓰면 디코더와 같은
+표를 공유하게 돼서(공통 원인 오류) 시험의 의미가 없어지고, 무엇보다
+고수준 인코딩까지 직접 쓰는 건 디코더를 두 번 쓰는 일이다. 그래서
+BWIPP(treepoem + ghostscript)만 쓴다. 34개 변형 전부 + 열화 축을 낸다.
 
 ## 출력
 
@@ -180,14 +188,91 @@ PAYLOAD = {"IND25": "1234567890", "COOP25": "1234567890", "PHARMA": "1234"}
 SYMNAME = {"IND25": "Industrial-2of5", "COOP25": "COOP-2of5", "PHARMA": "Pharmacode"}
 
 
+MPDF_AXES = [
+    # (태그, 배율, 블러, 노이즈, 대비, 회전)
+    ("mod-12", 6, 0.0,  0.0, 1.00,   0),
+    ("mod-8",  4, 0.0,  0.0, 1.00,   0),
+    ("mod-4",  2, 0.0,  0.0, 1.00,   0),
+    ("mod-2",  1, 0.0,  0.0, 1.00,   0),
+    ("blur-1", 4, 1.0,  0.0, 1.00,   0),
+    ("blur-2", 4, 2.0,  0.0, 1.00,   0),
+    ("blur-3", 4, 3.0,  0.0, 1.00,   0),
+    ("noise-10", 4, 0.0, 10.0, 1.00, 0),
+    ("noise-20", 4, 0.0, 20.0, 1.00, 0),
+    ("noise-30", 4, 0.0, 30.0, 1.00, 0),
+    ("contrast-50", 4, 0.0, 0.0, 0.50, 0),
+    ("contrast-30", 4, 0.0, 0.0, 0.30, 0),
+    ("contrast-15", 4, 0.0, 0.0, 0.15, 0),
+    ("rot-15",  4, 0.0, 0.0, 1.00,  15),
+    ("rot-45",  4, 0.0, 0.0, 1.00,  45),
+    ("rot-90",  4, 0.0, 0.0, 1.00,  90),
+    ("rot-180", 4, 0.0, 0.0, 1.00, 180),
+    ("rot-270", 4, 0.0, 0.0, 1.00, 270),
+]
+MPDF_PAYLOAD = "MPDF417-TEST"
+
+
+def micropdf417_main(outdir, quiet, seed):
+    """MicroPDF417 시험셋: 34개 변형(깨끗) + 한 변형에 열화 축."""
+    import treepoem
+    from PIL import Image
+    variants = _mpdf_variants()
+    rng = np.random.default_rng(seed)
+    os.makedirs(outdir, exist_ok=True)
+    rows_out = []
+
+    def render(r, c, scale):
+        img = treepoem.generate_barcode("micropdf417", MPDF_PAYLOAD,
+                                        options={"version": f"{r}x{c}"}).convert("L")
+        w, h = img.size
+        return np.array(img.resize((w * scale, h * scale), Image.NEAREST))
+
+    def emit(name, a):
+        a = np.clip(a, 0, 255).astype(np.uint8)
+        save_pgm(os.path.join(outdir, name), a)
+        rows_out.append((name, 1, "MicroPDF417:" + MPDF_PAYLOAD, name.split("_")[1].rsplit(".", 1)[0]))
+
+    for cols, rows, ec, *_ in variants:
+        try:
+            a = render(rows, cols, 4)
+        except Exception:
+            continue                       # 이 변형에 payload가 안 들어가면 건너뛴다
+        emit(f"var_{rows}x{cols}.pgm", np.pad(a, quiet, constant_values=255))
+
+    for tag, scale, blur_s, noise_s, contrast, rotdeg in MPDF_AXES:
+        a = np.pad(render(14, 2, scale), quiet, constant_values=255)
+        emit(f"ax_{tag}.pgm", degrade(a, rng, blur_s, noise_s, contrast, rotdeg))
+
+    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
+        for name, n, code, tag in rows_out:
+            f.write("%s\t%d\t%s\t%s\n" % (name, n, code, tag))
+    print("%d장 생성: %s" % (len(rows_out), outdir))
+
+
+def _mpdf_variants():
+    """BWIPP 리소스에서 MicroPDF417 변형표를 읽는다.
+
+    tools/extract_micropdf417_tables.py와 같은 표다. 여기서는 "어떤 변형이
+    있는가"만 필요하므로 그 스크립트의 함수를 그대로 빌려 쓴다.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import extract_micropdf417_tables as ex
+    return ex.metrics(ex.bwipp_resource("micropdf417"), "nonccametrics")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--micropdf417", action="store_true",
+                    help="MicroPDF417 시험셋(BWIPP 필요)")
     ap.add_argument("--bwipp", action="store_true", help="treepoem/BWIPP로 생성(표 교차검증용)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--height", type=int, default=160)
     ap.add_argument("--quiet", type=int, default=120)
     args = ap.parse_args()
+
+    if args.micropdf417:
+        return micropdf417_main(args.outdir, args.quiet, args.seed)
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.seed)

@@ -131,6 +131,16 @@ struct PipelineConfig {
     int  pharmacodeMinBars    = 0;
 
     /*
+     * [MicroPDF417] 기본 OFF(opt-in). zxing-cpp에 포맷 자체가 없어서
+     * 직접 만든 디코더다(decoder_micropdf417.hpp).
+     *
+     * 위의 셋과 달리 **오디코딩 위험은 낮다** — RAP 표 두 벌과 GF(929)
+     * 리드-솔로몬을 통과해야 결과가 나온다. 기본을 끄는 이유는 비용이다:
+     * ROI마다 네 방향(가로/세로 x 정/역)으로 주사선을 훑는다.
+     */
+    bool enableMicroPdf417 = false;
+
+    /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
      * 때만 돈다.
      *

@@ -102,6 +102,7 @@ set(VSCAN_SOURCES
   src/pitch_equalize.cpp
   src/decoder_zxing.cpp
   src/decoder_linear.cpp
+  src/decoder_micropdf417.cpp
   src/pipeline.cpp
   src/gs1.cpp
   src/capture_v4l2.cpp
