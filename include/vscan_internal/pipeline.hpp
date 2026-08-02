@@ -727,7 +727,13 @@ private:
     // 2단계 경로에서 (1)이 두 번 돈다(실측 p95 +50%의 주범).
     enum class RegionPass { CropOnly, RotateOnly, Both };
     std::vector<PipelineResult> tryRegionRescue(const GrayView& image, int need,
-                                                 RegionPass pass = RegionPass::Both);
+                                                 RegionPass pass = RegionPass::Both,
+                                                float energyRatio = 0.20f);
+    // 찾는 이미지와 읽는 이미지를 분리한 판본 (구현은 pipeline.cpp 주석 참고).
+    std::vector<PipelineResult> tryRegionRescueOn(const GrayView& locateView,
+                                                  const GrayView& decodeView, int need,
+                                                  RegionPass pass = RegionPass::Both,
+                                                  float energyRatio = 0.20f);
 
     // [QR 파인더 구제] 파인더 패턴으로 작은 QR을 직접 찾아 ROI 디코드로
     // 넘긴다. [[vscan-lite-qr-finder-locate]]

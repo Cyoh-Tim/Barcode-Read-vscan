@@ -607,6 +607,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                                  std::chrono::steady_clock::now() - rgT0).count());
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:region"); return regionHits; }
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+
     }
 
 
@@ -641,7 +642,19 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     return rescued.empty() ? hits : rescued;
 }
 
-std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int need, RegionPass pass) {
+std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int need, RegionPass pass,
+                                                       float energyRatio) {
+    return tryRegionRescueOn(image, image, need, pass, energyRatio);
+}
+
+/*
+ * locateView에서 영역을 찾고 decodeView에서 잘라 읽는다. 둘이 같으면
+ * 기존 동작 그대로다. 다르게 주는 자리는 "평탄화본에서 찾고 원본에서 읽기".
+ */
+std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateView,
+                                                         const GrayView& decodeView, int need,
+                                                         RegionPass pass, float energyRatio) {
+    const GrayView& image = decodeView;
     // [[vscan-lite-region-rescue]]
     //
     // 원리는 헤더(locate.hpp)에 적어둔 실측 그대로다: zxing이 못 읽는 게
@@ -655,7 +668,16 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
     // 기대 코드 수가 많으면 영역 상한도 그만큼 늘린다 — 상한이 4인데
     // 코드가 12개면 영역 구제가 need를 채울 방법이 원천적으로 없다.
     const int maxRegions = std::min(16, std::max(std::max(1, cfg_.regionRescueMaxRegions), need));
-    auto regions = findCodeRegions(image, maxRegions);
+    auto regions = findCodeRegions(locateView, maxRegions, 32, 4, energyRatio);
+    /*
+     * [프레임을 통째로 덮는 영역은 크롭이 아니다]
+     * 임계를 낮추면 배경까지 이어져서 프레임 전체 상자가 나온다. 그걸
+     * 크롭이라고 넘기면 원본을 한 번 더 도는 것과 같아서 얻는 게 없다.
+     */
+    regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const CodeRegion& r) {
+                      const double a = static_cast<double>(r.bbox.x1 - r.bbox.x0) * (r.bbox.y1 - r.bbox.y0);
+                      return a > 0.60 * static_cast<double>(image.width) * image.height;
+                  }), regions.end());
     if (regions.empty()) return {};
 
     // [헛수고 차단] 영역 하나당 코드는 많아야 하나다. 찾은 영역이 요구
@@ -929,10 +951,18 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                 // 주는 상자가 256x256인데 코드는 126x126이라 여백이 65px다.
                 // 파이썬 실험에서 여백 20px 이상은 실패하고 0~12px이라야
                 // 읽혔으므로, 50%(여백 ~1px)까지는 내려가야 한다.
-                for (int den : {7, 5, 35}) {
+                // 70% -> 50% -> 35%. 실측(QR module 6, 대비 0.05): 로케이터가
+                // 주는 상자가 256x256인데 코드는 126x126이라 여백이 65px다.
+                // 여백 20px 이상은 실패하고 0~12px이라야 읽히므로 50%(여백 ~1px)
+                // 까지는 내려가야 한다.
+                //
+                // **더 촘촘하게 하면 오히려 나빠진다.** {70,55,45,40,36}으로
+                // 다섯 단을 두니 QR이 8/8 -> 7/8로 떨어졌다 — 단이 늘수록
+                // 프레임 예산을 더 쓰고, 그러면 정작 되던 프레임이 뒤 단계에서
+                // 잘린다. 세 단이 실측상 가장 좋다.
+                for (int pct : {70, 50, 35}) {
                     if (!sHits.empty() || budgetExceeded()) break;
-                    const int cw = (den == 35) ? rw * 35 / 100 : rw * den / 10;
-                    const int ch = (den == 35) ? rh * 35 / 100 : rh * den / 10;
+                    const int cw = rw * pct / 100, ch = rh * pct / 100;
                     if (cw < 48 || ch < 48) continue;
                     const int cx = (rw - cw) / 2, cy = (rh - ch) / 2;
                     GrayImage sub;
