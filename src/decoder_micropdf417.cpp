@@ -416,6 +416,78 @@ int codewordAt(const std::vector<Run>& runs, size_t at, double unit) {
     return ZXing::Pdf417::CodewordDecoder::GetCodeword(sym);
 }
 
+
+/* ---------------------------------------------------------------------------
+ * PDF417 (GS1 Composite의 CC-C 전용)
+ *
+ * CC-C는 MicroPDF417이 아니라 **PDF417 심볼**이다. zxing이 그 심볼을 읽긴
+ * 하는데 데이터 계층이 ISO 24723이라 압축해제가 안 맞고 쓰레기 바이트열이
+ * 나온다(§3.50). 제대로 읽으려면 **코드워드를 봐야** 하는데 zxing은 밖으로
+ * 안 준다. 그래서 여기서 직접 뽑는다.
+ *
+ * **정상 PDF417은 건드리지 않는다.** 코드워드[1]이 920(ISO 24723의 링크
+ * 표시)일 때만 결과를 낸다 — 아니면 조용히 빈손으로 돌아간다. zxing이
+ * 이미 잘 읽고 있는 것과 경쟁하지 않으려는 것이다.
+ *
+ * 한 행의 구조:
+ *   시작(8원소 17모듈) + 좌 행지시자(8) + 데이터(8*cols) + 우 행지시자(8)
+ *   + 정지(9원소 18모듈)
+ * 행지시자 값 = 30*(행/3) + f 이고 f가 행%3에 따라 행수/EC등급/열수를 준다.
+ * ------------------------------------------------------------------------- */
+
+const int kPdfStart[8] = {8,1,1,1,1,1,1,3};
+const int kPdfStop[9]  = {7,1,1,3,1,1,1,2,1};
+
+struct Pdf417Row {
+    int leftCw = -1, rightCw = -1;
+    int from = 0, to = 0, line = 0;
+    std::vector<int> cws;
+};
+
+// runs[at]에서 PDF417 한 행을 읽는다. 열 수는 정지 패턴이 나올 때까지 세서 정한다.
+bool parsePdf417Row(const std::vector<Run>& runs, size_t at, Pdf417Row& out, int minRun) {
+    constexpr double kMaxIndividual = 0.5;
+    if (at + 8 > runs.size() || !runs[at].bar) return false;
+    /*
+     * [싼 거름망] 시작 패턴의 첫 원소는 8모듈이고 PDF417에서 가장 넓다.
+     * 그 줄의 최소 런의 4배가 안 되면 시작일 수 없다. 이걸 안 넣었더니
+     * 모든 막대 위치에서 코드워드를 끝까지 풀어보느라 opt-in 비용이
+     * 2.26배가 됐다(실측 340 -> 769ms).
+     */
+    if (runs[at].len < minRun * 4) return false;
+
+    int startTotal = 0, startPat = 0;
+    for (int i = 0; i < 8; ++i) { startTotal += runs[at + i].len; startPat += kPdfStart[i]; }
+    const double unit = static_cast<double>(startTotal) / startPat;
+    if (unit < 0.9) return false;
+    for (int i = 0; i < 8; ++i)
+        if (std::fabs(runs[at + i].len - kPdfStart[i] * unit) > unit * kMaxIndividual) return false;
+
+    std::vector<int> cws;
+    size_t p = at + 8;
+    while (cws.size() <= 34) {
+        // 정지 패턴이 먼저인가
+        if (p + 9 <= runs.size()) {
+            bool stopOk = true;
+            for (int i = 0; i < 9; ++i)
+                if (std::fabs(runs[p + i].len - kPdfStop[i] * unit) > unit * kMaxIndividual) { stopOk = false; break; }
+            if (stopOk && cws.size() >= 3) {
+                out.leftCw = cws.front();
+                out.rightCw = cws.back();
+                out.cws.assign(cws.begin() + 1, cws.end() - 1);
+                out.from = runs[at].start;
+                out.to = runs[p + 8].start + runs[p + 8].len;
+                return true;
+            }
+        }
+        const int v = codewordAt(runs, p, unit);
+        if (v < 0) return false;
+        cws.push_back(v);
+        p += 8;
+    }
+    return false;
+}
+
 struct RowParse {
     int cols = 0;
     int leftIdx = -1, centerIdx = -1, rightIdx = -1;
@@ -425,13 +497,19 @@ struct RowParse {
 };
 
 // runs[at]부터 cols열짜리 한 행을 읽어본다.
-bool parseRow(const std::vector<Run>& runs, size_t at, int cols, RowParse& out) {
+bool parseRow(const std::vector<Run>& runs, const std::vector<int>& pre,
+              size_t at, int cols, RowParse& out) {
     const ColGeom& g = kColGeom[cols];
     const int nRuns = 6 + 8 * g.k1 + (cols >= 3 ? 6 + 8 * g.k2 : 0) + 6 + 1;
     if (at + static_cast<size_t>(nRuns) > runs.size()) return false;
 
-    int total = 0;
-    for (int i = 0; i < nRuns; ++i) total += runs[at + i].len;
+    /*
+     * [누적합] 창의 폭 합을 매번 더하면 안 된다. 시작 위치 x 열 수 네 벌 x
+     * 주사선 400줄 x 네 방향이라 이 덧셈이 지배적이 된다 — 실측으로
+     * opt-in을 켰을 때 난수 코퍼스 평균이 330 -> 795ms(2.4배)였고 그 대부분이
+     * 여기였다. 줄마다 누적합을 한 번 만들면 O(1)이 된다.
+     */
+    const int total = pre[at + nRuns] - pre[at];
     const double unit = static_cast<double>(total) / g.widthModules;
     if (unit < 0.9) return false;
 
@@ -479,9 +557,153 @@ bool parseRow(const std::vector<Run>& runs, size_t at, int cols, RowParse& out) 
 
 } // namespace
 
+namespace {
+
+/*
+ * CC-C 한 번 훑기. 정상 PDF417은 코드워드[1]이 920이 아니므로 여기서
+ * 아무것도 안 나온다 — zxing이 읽던 것을 방해하지 않는다.
+ */
+void scanPdf417Composite(const GrayView& image, std::vector<DecodedSymbol>& results) {
+    std::vector<Run> runs;
+    const int extent = image.height;
+    const int step = std::max(1, extent / 400);
+
+    // 같은 심볼의 행끼리 묶는다 — 양 끝 좌표가 거의 같아야 한다(§3.49와 같은 이유).
+    struct Cluster { int from, to, lineMin, lineMax; std::vector<Pdf417Row> rows; };
+    std::vector<Cluster> clusters;
+
+    for (int line = 0; line < extent; line += step) {
+        if (!lineRuns(image, false, line, runs)) continue;
+        if (runs.size() > 4096) continue;
+        // 한 행은 최소 41원소(1열: 시작8 + 코드워드3x8 + 정지9)다.
+        if (runs.size() < 41) continue;
+        int minRun = 1 << 30;
+        for (const Run& r : runs) minRun = std::min(minRun, r.len);
+        if (minRun <= 0) minRun = 1;
+        for (size_t i = 0; i < runs.size(); ++i) {
+            if (!runs[i].bar) continue;
+            Pdf417Row row;
+            if (!parsePdf417Row(runs, i, row, minRun)) continue;
+            row.line = line;
+            Cluster* hit = nullptr;
+            for (Cluster& c : clusters) {
+                const int tol = std::max(4, (c.to - c.from) / 12);
+                if (std::abs(row.from - c.from) > tol || std::abs(row.to - c.to) > tol) continue;
+                hit = &c;
+                break;
+            }
+            if (!hit) { clusters.push_back({row.from, row.to, line, line, {}}); hit = &clusters.back(); }
+            hit->lineMin = std::min(hit->lineMin, line);
+            hit->lineMax = std::max(hit->lineMax, line);
+            /*
+             * 같은 행인지는 **(좌 지시자, 우 지시자) 쌍**으로 본다.
+             * 좌만 보면 안 된다 — 한 삼중조 안에서 행%3==0의 좌 f는 (행수-1)/3,
+             * 행%3==2의 좌 f는 열수-1이라 값이 같아질 수 있고, 그러면 서로 다른
+             * 두 행이 하나로 합쳐진다.
+             */
+            bool dup = false;
+            for (Pdf417Row& r : hit->rows)
+                if (r.leftCw == row.leftCw && r.rightCw == row.rightCw) { dup = true; break; }
+            if (!dup) hit->rows.push_back(row);
+        }
+    }
+
+    for (const Cluster& c : clusters) {
+        if (c.rows.size() < 3) continue;
+        std::vector<Pdf417Row> rows = c.rows;
+        std::sort(rows.begin(), rows.end(),
+                  [](const Pdf417Row& a, const Pdf417Row& b) { return a.line < b.line; });
+
+        /*
+         * [행 번호는 행지시자가 정확히 알려준다 — 간격으로 추정하면 안 된다]
+         * 처음엔 주사선 간격으로 번호를 매겼는데, 행마다 처음 잡힌 줄이
+         * 들쭉날쭉해서 번호가 겹쳤다(실측: 9행짜리인데 마지막 번호가 6).
+         * 지시자 값 = 30*(행/3) + f 이므로 **행/3은 나눗셈 한 번으로 나온다.**
+         * y 순서로 훑으면서 앞 행보다 크고 그 삼중조에 드는 최소값을 준다.
+         * 행이 하나 빠져도 번호가 안 밀린다.
+         */
+        std::vector<int> rowNo(rows.size());
+        {
+            int prev = -1;
+            bool numbered = true;
+            for (size_t i = 0; i < rows.size(); ++i) {
+                const int tri = rows[i].leftCw / 30;
+                int r = std::max(prev + 1, tri * 3);
+                if (r > tri * 3 + 2) { numbered = false; break; }
+                rowNo[i] = r;
+                prev = r;
+            }
+            if (!numbered) continue;
+        }
+
+        {
+            const int off = 0;
+            int rowsHi = -1, rowsLo = -1, nCols = -1, ecLevel = -1;
+            bool ok = true;
+            for (size_t i = 0; i < rows.size() && ok; ++i) {
+                const int r = rowNo[i] + off;
+                if (rows[i].leftCw / 30 != r / 3 || rows[i].rightCw / 30 != r / 3) { ok = false; break; }
+                const int fl = rows[i].leftCw % 30, fr = rows[i].rightCw % 30;
+                auto set = [&](int& slot, int v) { if (slot < 0) slot = v; else if (slot != v) ok = false; };
+                switch (r % 3) {
+                    case 0: set(rowsHi, fl);      set(nCols, fr + 1); break;
+                    case 1: set(ecLevel, fl / 3); set(rowsLo, fl % 3); set(rowsHi, fr); break;
+                    default: set(nCols, fl + 1);  set(ecLevel, fr / 3); set(rowsLo, fr % 3); break;
+                }
+            }
+            if (!ok || nCols <= 0 || nCols > 30 || ecLevel < 0 || ecLevel > 8) continue;
+            if (rowsHi < 0 || rowsLo < 0) continue;
+            const int nRows = 3 * rowsHi + rowsLo + 1;
+            if (nRows < 3 || nRows > 90) continue;
+            if (rowNo.back() + off >= nRows) continue;
+
+            const int ec = 1 << (ecLevel + 1);
+            std::vector<int> cws(static_cast<size_t>(nRows) * nCols, 0);
+            int filled = 0;
+            bool shapeOk = true;
+            for (size_t i = 0; i < rows.size(); ++i) {
+                if (static_cast<int>(rows[i].cws.size()) != nCols) { shapeOk = false; break; }
+                std::copy(rows[i].cws.begin(), rows[i].cws.end(),
+                          cws.begin() + static_cast<size_t>(rowNo[i] + off) * nCols);
+                filled++;
+            }
+            if (!shapeOk) continue;
+            const int missing = nRows - filled;
+            if (missing * nCols > ec / 2) continue;
+
+            int fixed = 0;
+            if (!microPdf417CorrectErrors(cws, ec, &fixed)) continue;
+
+            // codewords[0]은 길이 서술자, [1]이 920이면 GS1 Composite CC-C다.
+            const int len = cws[0];
+            if (len < 3 || len > static_cast<int>(cws.size())) continue;
+            if (cws[1] != 920) continue;
+
+            std::vector<int> data(cws.begin() + 1, cws.begin() + len);
+            const std::vector<uint8_t> bits = gs1CompositeBitsFromByteCompaction(data);
+            std::string text;
+            if (bits.empty() || !decodeGs1CompositeBits(bits, text)) continue;
+
+            DecodedSymbol s;
+            s.symbology = Symbology::GS1_COMPOSITE;
+            s.text = text;
+            s.rawBytes.assign(text.begin(), text.end());
+            s.isGS1 = true;
+            s.position = {{{c.from, c.lineMin}, {c.to, c.lineMin}, {c.to, c.lineMax}, {c.from, c.lineMax}}};
+            results.push_back(std::move(s));
+            break;
+        }
+    }
+}
+
+} // namespace
+
 std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
     std::vector<DecodedSymbol> results;
     if (image.empty() || image.width < 38 || image.height < 4) return results;
+
+    // CC-C(PDF417 기반 Composite)를 먼저 본다. 정상 PDF417에서는 빈손이다.
+    scanPdf417Composite(image, results);
 
     std::vector<RowParse> parses;
     std::vector<Run> runs;
@@ -502,13 +724,19 @@ std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
             if (!lineRuns(image, vertical, line, runs)) continue;
             if (runs.size() > 4096) continue;
             const std::vector<Run> rev = reversedRuns(runs);
+            std::vector<int> preF(runs.size() + 1, 0), preR(runs.size() + 1, 0);
+            for (size_t k = 0; k < runs.size(); ++k) {
+                preF[k + 1] = preF[k] + runs[k].len;
+                preR[k + 1] = preR[k] + rev[k].len;
+            }
             for (int dir = 0; dir < 2; ++dir) {
                 const std::vector<Run>& rr = dir == 0 ? runs : rev;
+                const std::vector<int>& pre = dir == 0 ? preF : preR;
                 for (size_t i = 0; i < rr.size(); ++i) {
                     if (!rr[i].bar) continue;
                     for (int cols = 1; cols <= 4; ++cols) {
                         RowParse rp;
-                        if (!parseRow(rr, i, cols, rp)) continue;
+                        if (!parseRow(rr, pre, i, cols, rp)) continue;
                         if (dir == 1) {
                             const int f = lineLen - rp.to, t = lineLen - rp.from;
                             rp.from = f; rp.to = t;
