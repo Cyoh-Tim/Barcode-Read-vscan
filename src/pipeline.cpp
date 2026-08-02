@@ -427,7 +427,29 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [큰 코드 폴백] 타일보다 큰 코드는 어느 타일에도 온전히 안 들어간다.
     // 예전에는 processViewCore() 안에 있었는데, 여기로 뺀 이유는 예산
     // 기준을 정직하게 만들기 위해서다 — 아래 참고.
-    {
+    /*
+     * [이 폴백의 값을 실측했다 — 켤지 말지는 배치가 정한다]
+     *
+     * 실패 프레임마다 프레임 전체를 한 번 더(단일 스레드로) 훑는 값이다.
+     * 난수 코퍼스 150장 실측(2회, 값이 같았다):
+     *
+     *   켬  266/504 검출, 평균 89.6ms, p95 306ms
+     *   끔  265/504 검출, 평균 76.9ms, p95 242ms
+     *
+     * **코드 1개(504분의 1)를 벌고 평균 +17%, p95 +23%를 쓴다.** 40종
+     * 회귀는 켜도 꺼도 40/40이고 총합만 1408 -> 1183ms로 준다.
+     *
+     * 그래도 기본은 **켬**이다. 이건 `[[vscan-lite-tile-large-code]]`에
+     * 실제 사고로 기록된 안전망이다 — 1536px 프레임의 1200px 코드가 4타일
+     * + overlap 500 구성에서 **통째로 미검출**됐다. 난수 코퍼스에 그런
+     * 큰 코드가 드물 뿐, 그 배치에서는 이 폴백이 검출의 전부다.
+     * 둘째 역할도 있다: 자기 보정 예산의 기준이 core+이 폴백이라, 빼면
+     * 예산이 작아져 뒤 구제가 과하게 잘린다(§3.47, 실측 67.6 -> 65.6%).
+     *
+     * 코드가 타일 창(프레임높이/스레드수 + overlap)보다 작다는 것을 아는
+     * 배치라면 꺼서 17%를 가져가면 된다.
+     */
+    if (!cfg_.disableTileFallback) {
         Stage st("tilefb");
         auto big = dedup(decodeTile(view, 0));
         if (!big.empty()) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
@@ -453,6 +475,37 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 여기부터는 구제 단계(DPM/1D 회전)다 — 실패 프레임에서만 도는,
     // 가장 비싼 구간이다. 예산을 넘겼으면 여기서 끊는다.
     if (budgetExceeded()) return hits;
+
+    /*
+     * [S4를 full 경로에도 — 저대비 프레임은 영역 경로를 먼저 본다]
+     *
+     * 2단계 경로에는 이 순서 뒤집기가 이미 있었는데(`[[vscan-lite-lowcontrast-
+     * region-first]]`) full 경로에는 없었다. 그래서 full에서는 저대비 프레임이
+     * 노이즈 구제 -> DPM 구제를 **각각 프레임 하나씩 다시 도는 값**으로 지나간
+     * 뒤에야 영역 구제에 닿는다. 자기 보정 예산이 그 전에 끊으면 영역 구제는
+     * 아예 안 돈다.
+     *
+     * 대비가 무너진 프레임은 원리적으로 풀프레임 패스로 못 읽는다(zxing의
+     * 이진화가 8x8 블록 명암 폭 24를 "구조 없음"으로 본다 — §3.25). 그러니
+     * 저대비로 판정되면 그 두 구제를 건너뛰고 영역부터 보는 게 맞다.
+     *
+     * **건너뛰는 게 아니라 순서만 바꾼다.** 영역이 빈손이면 아래 구제들이
+     * 그대로 이어서 돈다 — 잘못 짚었을 때의 손해 상한이 "원래 순서와 같은
+     * 총합"이다.
+     */
+    if (cfg_.enableRegionRescue && !regionCropDone_ &&
+        estimateLocalRange(view) < cfg_.lowContrastRange) {
+        const auto rgT0 = std::chrono::steady_clock::now();
+        auto early = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
+        prof().add("region-early", std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - rgT0).count());
+        if ((int)early.size() >= std::max(1, cfg_.minExpectedCodes)) {
+            adaptiveObserve(early);
+            prof().dump("성공:region-early");
+            return early;
+        }
+        if (early.size() > hits.size()) hits = std::move(early);
+    }
 
     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
     // DPM/회전 구제보다 먼저 시도한다 — 필터 한 번 + 코어 패스 한 번으로
@@ -524,10 +577,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 없는 전역 전처리라 1D 회전 구제보다 먼저 시도한다(더 싸다).
     // [[vscan-lite-dpm-rescue]]
     if (cfg_.enableDPMRescue) {
+        Stage st("dpm");
         GrayImage closed;
         morphologicalCloseInverted(view, cfg_.dpmKernelSize, closed);
         auto dpmHits = processViewCore(GrayView(closed));
-        if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) return dpmHits;
+        if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+            prof().dump("성공:dpm");
+            return dpmHits;
+        }
     }
 
     // [영역 구제 — 큰 프레임 속 작은 코드]
@@ -557,8 +614,12 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // [QR 파인더 구제] 영역 구제까지 실패했다면 코드가 작고 여러 개일 수
     // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
     if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
+        Stage st("qrfinder");
         auto qrHits = tryQrFinderRescue(view, std::max(1, cfg_.minExpectedCodes));
-        if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) return qrHits;
+        if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+            prof().dump("성공:qrfinder");
+            return qrHits;
+        }
         if (qrHits.size() > hits.size()) hits = std::move(qrHits);
     }
 
@@ -569,9 +630,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 찾아내는 진짜 검출 능력 확장이라, two_stage뿐 아니라 순수 풀옵션
     // 경로(processView/vscan_process_gray)에도 있어야 맞다.
     // [[vscan-lite-1d-deskew-rescue]]
-    if (!cfg_.enable1DDeskewRescue || budgetExceeded()) return hits;
+    if (!cfg_.enable1DDeskewRescue || budgetExceeded()) {
+        prof().dump(hits.empty() ? "실패:끝" : "부분:끝");
+        return hits;
+    }
     int need = std::max(1, cfg_.minExpectedCodes);
+    Stage st("deskew1d");
     auto rescued = tryDeskewRescue1D(view, need);
+    prof().dump(rescued.empty() ? (hits.empty() ? "실패:끝" : "부분:끝") : "성공:deskew1d");
     return rescued.empty() ? hits : rescued;
 }
 

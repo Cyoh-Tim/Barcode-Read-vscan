@@ -159,6 +159,15 @@ struct PipelineConfig {
     bool enableDotCode = false;
 
     /*
+     * [큰 코드용 풀프레임 폴백 끄기] 기본 false(= 폴백 켬).
+     *
+     * 타일 스캔이 빈손일 때 프레임 전체를 한 번 더 훑는 단계다. 실측 값은
+     * pipeline.cpp의 해당 자리 주석에 있다 — 코드 1개/504를 벌고 평균 +17%.
+     * 코드가 타일 창보다 작다는 것을 아는 배치에서만 켤 것.
+     */
+    bool disableTileFallback = false;
+
+    /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
      * 때만 돈다.
      *
