@@ -2637,6 +2637,46 @@ DPM은 상용 SDK들이 전용 모드를 별도 기능으로 파는 영역이라
    일반 PDF417 대조군은 1이다. 즉 **MicroPDF417 디코더를 직접 만들어야
    하고, 그게 1번·4번과 커버 상태표의 MicroPDF417 세 자리를 한꺼번에
    여는 관문**이다. 미구현 갭 중 값이 가장 큰 항목이 여기로 바뀐다.
+4b. **MicroPDF417 — 지금 미구현 갭에서 값이 가장 큰 항목** (2026-08-02 착수 전 조사).
+   하나가 커버 상태표의 **세 자리**를 동시에 연다: MicroPDF417 자체 +
+   GS1 Composite(EAN/UPC 위) + GS1 Composite(GS1-128/DataBar 위).
+
+   **재사용 가능한 것 — 링크해서 실제로 돌려 확인했다**(읽어보고 판단한 게 아니다):
+
+   | 조각 | 위치 | 상태 |
+   |---|---|---|
+   | 막대폭 8개 -> 심볼 -> 코드워드 | `Pdf417::CodewordDecoder::GetDecodedValue/GetCodeword` | ✅ 밖에서 링크됨, 동작 확인 |
+   | 고수준 압축해제(Text/Byte/Numeric) | `Pdf417::Decode(codewords)` | ✅ 밖에서 링크됨, 동작 확인 |
+   | GF(929) 리드-솔로몬 | `PDFScanningDecoder.cpp`의 `DecodeErrorCorrection` | ❌ **못 쓴다** |
+
+   EC가 막히는 이유가 구체적이다 — `ZXING_EXPORT_TEST_ONLY` 매크로가
+   `ZXING_BUILD_FOR_TEST` 없이는 `static`으로 펴진다(`ZXTestSupport.h`).
+   우리 빌드는 `BUILD_UNIT_TESTS=OFF`라 심볼이 안 나온다. 선택지는 둘:
+   (a) 벤더 빌드에 그 정의를 켠다(zxing 빌드 설정을 건드린다),
+   (b) GF(929) RS 복호를 직접 쓴다(150줄 남짓, 잘 알려진 알고리즘).
+   **(b)를 권한다** — 벤더 설정을 건드리면 zxing 업그레이드 때마다 재확인해야 한다.
+
+   또 하나 주의: `Pdf417::Decode`는 `codewords[0]`을 **길이 서술자**로 읽는다
+   (`for codeIndex=1; codeIndex < codewords[0]`). MicroPDF417에는 길이
+   서술자가 없고 데이터 개수가 variant로 고정이므로, 앞에 길이를 **합성해서**
+   넣어야 한다.
+
+   **새로 써야 하는 것**:
+   - 표 세 개. BWIPP(MIT)의 `micropdf417` 리소스에서 뽑는다 —
+     `raps`(52개 RAP 패턴), `nonccametrics`(변형 표), `ccametrics`(CC-A용).
+     전부 작다. 큰 `clusters` 표(4.6KB)는 **필요 없다** — zxing의
+     `GetCodeword`가 이미 클러스터 0/3/6을 처리한다.
+     BWIPP 압축 정수 포맷을 먼저 풀어야 한다(`\x88`=1바이트, `\x86`=2바이트).
+   - **검출이 진짜 공수다.** MicroPDF417에는 PDF417 같은 시작/정지 패턴이
+     없고 행마다 좌/우 RAP(행 주소 패턴)로 시작·끝난다. RAP 열을 찾아
+     행 번호와 클러스터를 알아내고, 거기서 variant(열 수/행 수/EC 개수)를
+     역산해야 한다.
+   - 격자 샘플링 -> 코드워드 조립.
+
+   순서: 표 추출 -> 알려진 심볼 하나로 "격자를 손으로 준 상태에서 EC+고수준까지
+   통과"를 먼저 증명 -> 그 다음에 검출. 검출을 먼저 하면 실패했을 때 표가
+   틀린 건지 검출이 틀린 건지 못 가린다.
+
 5. **DotCode** — 난이도 높음.
    **오픈소스 디코더가 존재하지 않음.** `TimZaman/openbarcode`도 Code39/128/DataMatrix/QR만.
    상용 SDK(barKoder, Scandit, Dynamsoft)들이 "DotCode 읽기 1등"을 마케팅 포인트로
