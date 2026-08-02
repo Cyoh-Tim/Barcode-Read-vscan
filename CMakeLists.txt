@@ -103,6 +103,7 @@ set(VSCAN_SOURCES
   src/decoder_zxing.cpp
   src/decoder_linear.cpp
   src/decoder_micropdf417.cpp
+  src/gs1_composite.cpp
   src/pipeline.cpp
   src/gs1.cpp
   src/capture_v4l2.cpp

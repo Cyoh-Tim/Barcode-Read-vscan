@@ -20,6 +20,7 @@ BWIPP를 호출해서 만든다 — 생성 경로가 완전히 독립이므로 �
     python3 tools/generate_extra_symbologies.py --outdir /tmp/x            # 자체 생성
     python3 tools/generate_extra_symbologies.py --outdir /tmp/x --bwipp    # BWIPP 생성
     python3 tools/generate_extra_symbologies.py --outdir /tmp/m --micropdf417
+    python3 tools/generate_extra_symbologies.py --outdir /tmp/c --composite
 
 ## MicroPDF417은 BWIPP가 필요하다
 
@@ -260,11 +261,52 @@ def _mpdf_variants():
     return ex.metrics(ex.bwipp_resource("micropdf417"), "nonccametrics")
 
 
+# GS1 Composite: (선형 종류, 선형 데이터, 2D 페이로드, 기대 2D 문자열)
+# 기대 문자열은 AI와 값을 이어 붙이고 가변 길이 뒤에 0x1D를 넣은 것이다
+# (gs1.cpp의 parseGS1이 먹는 형식).
+GS = "\x1d"
+COMPOSITE_CASES = [
+    ("gs1-128composite", "(01)03412345678900", "(99)ABCDEF",        "99ABCDEF"),
+    ("gs1-128composite", "(01)03412345678900", "(99)1234-abcd",     "991234-abcd"),
+    ("gs1-128composite", "(01)03412345678900", "(17)250630(10)L9",  "1725063010L9"),
+    ("gs1-128composite", "(01)03412345678900", "(10)LOT123",        "10LOT123"),
+    ("gs1-128composite", "(01)03412345678900", "(90)12X(21)SER1",   "9012X" + GS + "21SER1"),
+    ("databaromnicomposite", "(01)03412345678900", "(99)ABC123",    "99ABC123"),
+    ("ean13composite", "9771234567003", "(99)Hello",                "99Hello"),
+]
+
+
+def composite_main(outdir, quiet):
+    """GS1 Composite 시험셋: CC-A / CC-B 각각 + 선형 종류 세 가지."""
+    import treepoem
+    from PIL import Image
+    os.makedirs(outdir, exist_ok=True)
+    rows_out = []
+    for idx, (btype, linear, payload, want) in enumerate(COMPOSITE_CASES):
+        for ver in ("a", "b"):
+            try:
+                img = treepoem.generate_barcode(btype, linear + "|" + payload,
+                                                options={"ccversion": ver}).convert("L")
+            except Exception:
+                continue
+            w, h = img.size
+            a = np.array(img.resize((w * 6, h * 6), Image.NEAREST))
+            name = "cc%s_%02d.pgm" % (ver, idx)
+            save_pgm(os.path.join(outdir, name), np.pad(a, quiet, constant_values=255))
+            rows_out.append((name, "GS1-Composite:" + want))
+    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
+        for name, code in rows_out:
+            f.write("%s\t1\t%s\t-\n" % (name, code))
+    print("%d장 생성: %s" % (len(rows_out), outdir))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--micropdf417", action="store_true",
                     help="MicroPDF417 시험셋(BWIPP 필요)")
+    ap.add_argument("--composite", action="store_true",
+                    help="GS1 Composite 시험셋(BWIPP 필요)")
     ap.add_argument("--bwipp", action="store_true", help="treepoem/BWIPP로 생성(표 교차검증용)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--height", type=int, default=160)
@@ -273,6 +315,8 @@ def main():
 
     if args.micropdf417:
         return micropdf417_main(args.outdir, args.quiet, args.seed)
+    if args.composite:
+        return composite_main(args.outdir, args.quiet)
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.seed)

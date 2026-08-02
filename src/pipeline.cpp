@@ -4,6 +4,7 @@
 #include "vscan_internal/decoder_zxing.hpp"
 #include "vscan_internal/decoder_linear.hpp"
 #include "vscan_internal/decoder_micropdf417.hpp"
+#include "vscan_internal/gs1_composite.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
 #include <cstdlib>
@@ -2290,6 +2291,54 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
             const auto bj = bboxOf(in[j].symbol);
             const bool apart = bi.x0 > bj.x1 || bj.x0 > bi.x1 || bi.y0 > bj.y1 || bj.y0 > bi.y1;
             if (!apart) { drop[i] = 1; break; }
+        }
+    }
+
+    /*
+     * [GS1 Composite의 CC-C는 zxing이 깨진 글자로 읽는다 — 그건 버린다]
+     *
+     * CC-C는 PDF417 심볼이라 zxing이 기본 경로에서 읽어버리는데, 데이터 계층이
+     * ISO 24723이라 PDF417 압축해제로는 못 푼다. 결과는 valid=1인 쓰레기
+     * 바이트열이다(실측: `[PDF417] l\x08!\x8a9%...`). 기본 설정에서 나오는
+     * 오디코딩이라 opt-in과 무관하게 막아야 한다.
+     *
+     * **내용만으로는 못 가른다.** 실측으로 확인했다 — 정상 PDF417 페이로드
+     * 19장이 19장 모두 ISO 24723 스트림으로 "성공" 파싱된다. 그래서
+     * 재해석(다시 라벨 붙이기)은 하지 않고, 세 조건이 다 맞을 때만 **버린다**:
+     *   1) 내용이 대부분 인쇄 불가 바이트다 (정상 PDF417 텍스트는 여기서 걸린다)
+     *   2) ISO 24723 스트림으로 파싱된다
+     *   3) 같은 프레임에 GS1 선형 심볼이 있다 (Composite의 정의가 그것이다)
+     * 버리면 미검출이 되는데, 그게 없는 문자열을 만들어내는 것보다 낫다(§3.18).
+     *
+     * 제대로 읽으려면 PDF417 코드워드를 직접 뽑아 첫 코드워드가 920인지
+     * 봐야 한다 — zxing은 코드워드를 밖으로 안 준다. §4의 남은 항목.
+     * [[vscan-lite-gs1-composite]]
+     */
+    bool hasGs1Linear = false;
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (drop[i]) continue;
+        const Symbology sy = in[i].symbol.symbology;
+        if (sy == Symbology::GS1_128 || sy == Symbology::GS1_DATABAR ||
+            sy == Symbology::EAN_UPC || sy == Symbology::CODE128)
+            hasGs1Linear = true;
+    }
+    if (hasGs1Linear) {
+        for (size_t i = 0; i < in.size(); ++i) {
+            if (drop[i] || in[i].symbol.symbology != Symbology::PDF417) continue;
+            // **text가 아니라 rawBytes를 본다** — zxing이 text를 UTF-8로 인코딩해서
+            // 0x80 이상 바이트가 두 배로 늘어나 있다(실측으로 여기서 한 번 틀렸다).
+            const std::vector<uint8_t>& t = in[i].symbol.rawBytes;
+            if (t.size() < 8) continue;
+            size_t odd = 0;
+            for (uint8_t ch : t)
+                if (ch < 0x20 || ch >= 0x7f) odd++;
+            if (odd * 2 < t.size()) continue;          // 절반 미만이면 평범한 텍스트다
+            std::vector<uint8_t> bits;
+            bits.reserve(t.size() * 8);
+            for (uint8_t ch : t)
+                for (int k = 7; k >= 0; --k) bits.push_back(static_cast<uint8_t>((ch >> k) & 1));
+            std::string dummy;
+            if (decodeGs1CompositeBits(bits, dummy)) drop[i] = 1;
         }
     }
 

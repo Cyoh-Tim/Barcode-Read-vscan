@@ -14,6 +14,7 @@
 #include "pdf417/PDFCodewordDecoder.h"
 #include "pdf417/PDFDecoder.h"
 #include "DecoderResult.h"
+#include "vscan_internal/gs1_composite.hpp"
 
 namespace vscan {
 namespace {
@@ -516,8 +517,16 @@ std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
                         rp.cols = cols;
                         // 방향/축을 열 수와 함께 묶어두려고 부호로 표시한다
                         rp.cols = cols * 4 + axis * 2 + dir;
+                        /*
+                         * [열 수를 하나 찾았다고 멈추면 안 된다]
+                         * 처음엔 첫 성공에서 break했다. 그런데 **같은 자리에서
+                         * 더 작은 열 수가 우연히 맞는 일이 있다** — 실측으로
+                         * 4열 3행 심볼의 첫 행이 cols=1로 먼저 맞아버려서
+                         * 그 행을 통째로 잃었고, 행이 하나 빠지니(4코드워드,
+                         * EC 4개로는 2개까지만 정정) 심볼 전체가 미검출이 됐다.
+                         * 전부 시도해서 다 담고, 진짜인지는 뒤의 변형 대조가 가린다.
+                         */
                         parses.push_back(std::move(rp));
-                        break;   // 한 자리에서 열 수는 하나만 맞는다
                     }
                 }
             }
@@ -630,27 +639,43 @@ std::vector<DecodedSymbol> MicroPdf417Decoder::decode(const GrayView& image) {
                 fprintf(stderr, "\n");
             }
             /*
-             * [GS1 Composite의 2D 성분은 여기서 멈춘다 — 내보내면 오디코딩이다]
+             * [GS1 Composite의 2D 성분은 데이터 계층이 다른 규격이다]
              *
-             * 심볼 계층은 잘 읽힌다(리드-솔로몬 통과, 코드워드 확보). 그런데
-             * **고수준 인코딩이 다른 규격이다** — MicroPDF417 자체는 ISO 24728
-             * 이지만 Composite의 2D 성분은 ISO 24723의 범용 인코딩을 쓴다.
-             * 그대로 Pdf417::Decode()에 넣으면 valid=1이 나오면서 글자가 깨진다
-             * (실측: (99)1234-abcd -> "N\tHF PGRPS}IBD"). 그건 미검출보다
-             * 나쁘므로(§3.18) 내보내지 않는다.
+             * 심볼 계층은 여기까지 잘 읽힌다(리드-솔로몬 통과). 그런데
+             * MicroPDF417 자체는 ISO 24728이고 Composite의 2D 성분은
+             * **ISO 24723의 범용 인코딩**을 쓴다. 그대로 Pdf417::Decode()에
+             * 넣으면 valid=1이 나오면서 글자가 깨진다
+             * (실측: (99)1234-abcd -> "N\tHF PGRPS}IBD").
              *
-             * 판별은 실측으로 확인한 두 가지다:
-             *   - CC-A: 전용 변형표(kVariantsCCA)로만 맞는다. 첫 코드워드는
-             *           모드 래치가 아니라 그냥 데이터다(예: 419).
-             *   - CC-B: 표준 변형표를 쓰지만 **첫 코드워드가 920**이다
-             *           (ISO 24723의 링크 표시). 그 뒤가 901(Byte Latch)이라
-             *           풀면 패킹된 비트열이 나온다.
+             * 판별은 실측으로 확인한 것이다:
+             *   - CC-A: 전용 변형표(kVariantsCCA)로만 맞는다.
+             *   - CC-B: 표준 변형표를 쓰지만 **첫 코드워드가 920**이다.
              *   - 단독 MicroPDF417: 첫 코드워드가 900(Text Latch)이다.
-             *
-             * ISO 24723 인코딩을 구현하면 이 자리에서 두 종을 살릴 수 있다
-             * (PROJECT_NOTES §4의 남은 항목).
+             * [[vscan-lite-gs1-composite]]
              */
-            if (isCCA || (dataCount > 0 && cws[0] == 920)) continue;
+            const bool isCCB = dataCount > 0 && cws[0] == 920;
+            if (isCCA || isCCB) {
+                std::vector<int> dataCws(cws.begin(), cws.begin() + dataCount);
+                const std::vector<uint8_t> bits =
+                    isCCB ? gs1CompositeBitsFromByteCompaction(dataCws)
+                          : gs1CompositeBitsFromCCA(dataCws);
+                std::string text;
+                if (bits.empty() || !decodeGs1CompositeBits(bits, text)) continue;
+
+                DecodedSymbol s;
+                s.symbology = Symbology::GS1_COMPOSITE;
+                s.text = text;
+                s.rawBytes.assign(text.begin(), text.end());
+                s.isGS1 = true;
+                const int a0 = c.from, a1 = c.to;
+                const int b0 = c.lineMin, b1 = c.lineMax;
+                const int x0 = axis ? b0 : a0, x1 = axis ? b1 : a1;
+                const int y0 = axis ? a0 : b0, y1 = axis ? a1 : b1;
+                s.position = {{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}};
+                results.push_back(std::move(s));
+                decoded = true;
+                continue;
+            }
 
             auto res = ZXing::Pdf417::Decode(hi);
             if (!res.isValid()) continue;
