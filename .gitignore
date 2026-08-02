@@ -33,3 +33,14 @@ __pycache__/
 .DS_Store
 # 셸 리다이렉트 실수로 생기는 잔여물(파일명이 숫자 하나)
 /[0-9]
+
+# zbar를 소스 안에서(BUILD_IN_SOURCE) 구성하면 생기는 산출물.
+# 빌드 경로가 그대로 박히므로 커밋하면 안 된다 — 한 번 섞여 들어갔었다.
+third_party/zbar/Makefile
+third_party/zbar/*/Makefile
+third_party/zbar/po/Makefile.in
+third_party/zbar/*.pc
+third_party/zbar/config.h
+third_party/zbar/configure~
+third_party/zbar/test/check_dbus.sh
+third_party/zbar/test/test_examples.sh
