@@ -112,6 +112,10 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
         if (cfg->enable_qr_finder_rescue) pcfg.enableQrFinderRescue = true;
         if (cfg->disable_auto_denoise) pcfg.autoDenoise = 0;
+        if (cfg->enable_industrial_2of5) pcfg.enableIndustrial2of5 = true;
+        if (cfg->enable_coop_2of5) pcfg.enableCoop2of5 = true;
+        if (cfg->enable_pharmacode) pcfg.enablePharmacode = true;
+        if (cfg->pharmacode_min_bars > 0) pcfg.pharmacodeMinBars = cfg->pharmacode_min_bars;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

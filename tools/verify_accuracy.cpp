@@ -345,6 +345,13 @@ int main(int argc, char** argv) {
             c.fast_locate = paths[i].fast;
             c.enable_dpm_rescue = dpmRescue;
             c.max_frame_ms = maxFrameMs;
+            // opt-in 심볼로지(Industrial 2of5 / COOP 2of5 / Pharmacode).
+            // 기본이 꺼져 있는 것들이라 회귀에는 안 걸리고, 유령 검출을
+            // 재려고 환경변수로 켠다.
+            c.enable_industrial_2of5 = getenv("VSCAN_IND25") != nullptr;
+            c.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
+            c.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
+            if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) c.pharmacode_min_bars = atoi(mb);
             c.disable_1d_deskew_rescue = noDeskew;
             c.disable_blank_frame_skip = noBlankSkip;
             c.disable_denoise_rescue = noDenoise;
@@ -371,6 +378,13 @@ int main(int argc, char** argv) {
             cfg.fast_locate = paths[i].fast;
             cfg.enable_dpm_rescue = dpmRescue;
             cfg.max_frame_ms = maxFrameMs;
+            // opt-in 심볼로지(Industrial 2of5 / COOP 2of5 / Pharmacode).
+            // 기본이 꺼져 있는 것들이라 회귀에는 안 걸리고, 유령 검출을
+            // 재려고 환경변수로 켠다.
+            cfg.enable_industrial_2of5 = getenv("VSCAN_IND25") != nullptr;
+            cfg.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
+            cfg.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
+            if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
             cfg.disable_1d_deskew_rescue = noDeskew;
             cfg.disable_blank_frame_skip = noBlankSkip;
             cfg.disable_denoise_rescue = noDenoise;

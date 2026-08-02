@@ -71,6 +71,12 @@ int main(int argc, char** argv) {
     cfg.tile_threads = 0;            // 0 = hardware_concurrency() 자동
     cfg.tile_overlap_px = 500;
     cfg.enable_zbar_fastpath = 1;    // 1D fast-path 켜기 (VSCAN_USE_ZBAR로 빌드된 경우)
+    // opt-in 심볼로지는 환경변수로 켠다 — 이 예제를 그 심볼로지 확인에도
+    // 쓸 수 있게 하려는 것뿐이고, 실제 앱은 cfg 필드를 직접 채우면 된다.
+    cfg.enable_industrial_2of5 = getenv("VSCAN_IND25") != nullptr;
+    cfg.enable_coop_2of5       = getenv("VSCAN_COOP25") != nullptr;
+    cfg.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
+    if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
     vscan_pipeline_t* pipeline = vscan_create(&cfg);
     if (!pipeline) { fprintf(stderr, "vscan_create 실패\n"); return 1; }
 

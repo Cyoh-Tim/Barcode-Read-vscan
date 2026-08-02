@@ -111,6 +111,26 @@ struct PipelineConfig {
     bool zbarAsRescue = true;
 
     /*
+     * [zxing에 없는 1D 심볼로지 — 전부 기본 OFF(opt-in)]
+     *
+     * Industrial(Standard) 2of5 / COOP 2of5 / Pharmacode. zxing-cpp에
+     * 포맷 자체가 없어서 실측 검출이 0이던 것들이다(decoder_linear.hpp).
+     *
+     * ZBar와 같은 이유로 **설정 항목**이다 — addDecoder()로 붙이면 ROI
+     * 구제가 만드는 임시 Pipeline에 안 따라가서 경로마다 결과가 달라진다.
+     * cfg_는 복사되므로 여기 두면 자동으로 물려받는다.
+     * [[vscan-lite-zbar-in-subpipelines]]
+     *
+     * 켤 때는 오디코딩을 각오해야 한다 — 셋 다 체크디짓이 없다.
+     * 방어 장치는 decoder_linear.hpp의 주석 참고.
+     */
+    bool enableIndustrial2of5 = false;
+    bool enableCoop2of5       = false;
+    bool enablePharmacode     = false;
+    // 0이면 LinearDecoderOptions의 기본값(6)을 쓴다. vscan.h의 설명 참고.
+    int  pharmacodeMinBars    = 0;
+
+    /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
      * 때만 돈다.
      *

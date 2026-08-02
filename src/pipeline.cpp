@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "vscan_internal/decoder_zxing.hpp"
+#include "vscan_internal/decoder_linear.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
 #include <cstdlib>
@@ -30,6 +31,17 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
                                                          cfg_.tryDownscale, cfg_.tryCode39ExtendedMode,
                                                          cfg_.minLineCount, cfg_.validateITFCheckSum,
                                                          cfg_.downscaleThreshold));
+
+    // zxing에 포맷이 없는 1D 심볼로지. 셋 다 꺼져 있으면 등록조차 안 한다 —
+    // 디코더 목록이 하나면 파이프라인이 스레드를 안 띄우는 빠른 길을 탄다.
+    if (cfg_.enableIndustrial2of5 || cfg_.enableCoop2of5 || cfg_.enablePharmacode) {
+        LinearDecoderOptions lo;
+        lo.industrial2of5 = cfg_.enableIndustrial2of5;
+        lo.coop2of5       = cfg_.enableCoop2of5;
+        lo.pharmacode     = cfg_.enablePharmacode;
+        if (cfg_.pharmacodeMinBars > 0) lo.minPharmacodeBars = cfg_.pharmacodeMinBars;
+        decoders_.push_back(std::make_unique<LinearDecoder>(lo));
+    }
 #ifdef VSCAN_HAVE_ZBAR
     // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
     // cfg_를 복사하므로 자동으로 같이 따라간다.
@@ -2250,6 +2262,34 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
             drop[i] = drop[j] = 1;
         }
     }
+    /*
+     * [증명할 것이 없는 심볼로지는 겹치면 진다]
+     *
+     * Pharmacode는 시작/정지 패턴도 체크디짓도 없다 — "가는/굵은 막대의
+     * 나열"이 곧 값이라 어떤 막대열도 유효한 값으로 읽힌다. 그래서 다른
+     * 코드의 막대열 위에서 유령이 뜬다. 실측(코드 693개 500장 난수 코퍼스,
+     * Pharmacode는 한 장도 없음): 원근+글레어로 깨진 **ITF** 위에서
+     * Pharmacode 95가 나왔다.
+     *
+     * 디코더 안에서는 못 막는다. LinearDecoder는 자기가 낸 2of5만 볼 수
+     * 있고 zxing이 낸 ITF는 못 본다. 모든 디코더의 결과가 처음 만나는
+     * 자리가 여기라서 여기서 건다 — **같은 자리에서 다른 심볼로지가
+     * 나왔으면 Pharmacode를 버린다.** 반대 방향(진짜 Pharmacode 위에
+     * 다른 코드가 뜨는 것)은 그 코드들이 시작/정지 패턴으로 자기를
+     * 증명하므로 대칭이 아니다.
+     * [[vscan-lite-pharmacode-shadowed]]
+     */
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (drop[i] || in[i].symbol.symbology != Symbology::PHARMACODE) continue;
+        const auto bi = bboxOf(in[i].symbol);
+        for (size_t j = 0; j < in.size(); ++j) {
+            if (i == j || drop[j] || in[j].symbol.symbology == Symbology::PHARMACODE) continue;
+            const auto bj = bboxOf(in[j].symbol);
+            const bool apart = bi.x0 > bj.x1 || bj.x0 > bi.x1 || bi.y0 > bj.y1 || bj.y0 > bi.y1;
+            if (!apart) { drop[i] = 1; break; }
+        }
+    }
+
     std::vector<PipelineResult> out;
     out.reserve(in.size());
     for (size_t i = 0; i < in.size(); ++i)

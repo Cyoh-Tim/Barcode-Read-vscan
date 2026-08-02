@@ -101,6 +101,7 @@ set(VSCAN_SOURCES
   src/deskew_persp.cpp
   src/pitch_equalize.cpp
   src/decoder_zxing.cpp
+  src/decoder_linear.cpp
   src/pipeline.cpp
   src/gs1.cpp
   src/capture_v4l2.cpp
