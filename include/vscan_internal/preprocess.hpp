@@ -245,7 +245,18 @@ int estimateLocalRange(const GrayView& src, int rowStep = 16, int colStep = 8);
  * 오히려 뭉갠다. ROI 안의 히스토그램으로 만들면 그런 일이 없다.
  * [[vscan-lite-roi-contrast-stretch]]
  */
-bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200);
+/*
+ * ROI의 계조를 0~255로 편다. 이미 충분히 쓰고 있으면(span >= minSpan) false.
+ *
+ * `measureNum/measureDen`은 **범위를 재는 창**을 안쪽으로 좁힌다(기본 1/1 =
+ * 전체). 왜 필요한가 — ROI 크롭에는 코드 주변 장면이 같이 들어오는데,
+ * 그 장면이 고대비면 lo/hi를 그쪽이 정해버려서 **정작 코드는 하나도 안
+ * 펴진다**. 실측(QR module 6, 대비 0.05): 코드 자체의 변조는 13계조인데
+ * 크롭 전체 span은 117이라 스트레칭이 사실상 항등이 되고 미검출이었다.
+ * 안쪽 60%에서만 재면 같은 크롭이 읽힌다.
+ */
+bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan = 200,
+                     int measureNum = 1, int measureDen = 1);
 
 /*
  * [국소 적응 이진화 — 초저대비 전용]

@@ -894,9 +894,19 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                     boxBlur3x3(GrayView(boosted), smoothed);
                     if (budgetExceeded()) break;
                     sHits = roiPipe.processViewCore(GrayView(smoothed));
-                    if (sHits.empty())
+                    // [중괄호 없으면 성공한 결과를 덮어쓴다]
+                    // 원래 이 자리가 중괄호 없이
+                    //     if (sHits.empty())
+                    //         if (budgetExceeded()) break;
+                    //         sHits = ...(boosted);
+                    // 이었다. 두 번째 줄만 if에 묶이고 세 번째 줄은
+                    // **무조건** 돌아서, 뭉갠 판본이 읽어낸 결과를 펴기만 한
+                    // 판본의 결과로 덮어썼다. 바로 위 주석이 설명하는
+                    // "뭉갠 쪽을 먼저 본다"가 실제로는 동작하지 않고 있었다.
+                    if (sHits.empty()) {
                         if (budgetExceeded()) break;
                         sHits = roiPipe.processViewCore(GrayView(boosted));
+                    }
                 }
                 // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
                 // ROI가 이미 계조를 200 이상 쓰고 있으면(stretchContrast가

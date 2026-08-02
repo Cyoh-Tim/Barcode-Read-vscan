@@ -611,20 +611,34 @@ bool rowBinarize(const GrayView& src, GrayImage& out, int pct, int minRange) {
     return structured * 4 >= H;
 }
 
-bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan) {
+bool stretchContrast(const GrayView& src, GrayImage& out, int minSpan,
+                     int measureNum, int measureDen) {
     const int W = src.width, H = src.height;
     if (W <= 0 || H <= 0) return false;
     const int stride = src.stride > 0 ? src.stride : W;
 
+    // [범위를 재는 창을 안쪽으로 좁힐 수 있다]
+    // 크롭에 딸려 들어온 고대비 장면이 lo/hi를 정해버리면 정작 코드는
+    // 안 펴진다 — 근거는 헤더 주석의 실측.
+    int mx0 = 0, my0 = 0, mx1 = W, my1 = H;
+    if (measureDen > 0 && measureNum > 0 && measureNum < measureDen) {
+        const int mw = std::max(8, W * measureNum / measureDen);
+        const int mh = std::max(8, H * measureNum / measureDen);
+        mx0 = (W - mw) / 2; my0 = (H - mh) / 2;
+        mx1 = mx0 + std::min(mw, W); my1 = my0 + std::min(mh, H);
+        if (mx1 > W) { mx0 = 0; mx1 = W; }
+        if (my1 > H) { my0 = 0; my1 = H; }
+    }
+
     int hist[256] = {0};
-    for (int y = 0; y < H; ++y) {
+    for (int y = my0; y < my1; ++y) {
         const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
-        for (int x = 0; x < W; ++x) ++hist[row[x]];
+        for (int x = mx0; x < mx1; ++x) ++hist[row[x]];
     }
 
     // 하위/상위 0.5%를 잘라낸다. 최소/최대를 그대로 쓰면 먼지 한 점이나
     // 반사광 한 픽셀이 전체 범위를 정해버린다.
-    const long total = static_cast<long>(W) * H;
+    const long total = static_cast<long>(mx1 - mx0) * (my1 - my0);
     const long cut = static_cast<long>(total * 0.005);
     int lo = 0, hi = 255;
     for (long acc = 0, i = 0; i < 256; ++i) { acc += hist[i]; if (acc > cut) { lo = static_cast<int>(i); break; } }
