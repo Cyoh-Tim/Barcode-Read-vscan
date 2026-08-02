@@ -908,6 +908,52 @@ std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int
                         sHits = roiPipe.processViewCore(GrayView(boosted));
                     }
                 }
+                /*
+                 * [그래도 빈손이면 크롭을 좁혀가며 다시 편다]
+                 *
+                 * 저대비 코드는 **프레임이 저대비인 게 아니라 코드만** 저대비인
+                 * 경우가 많다. 그러면 영역 크롭에 딸려 들어온 고대비 장면이
+                 * 스트레치의 lo/hi를 정해버려서 코드는 거의 안 펴진다.
+                 * 실측(QR module 6, 대비 0.05): 코드 영역 span 34인데 크롭
+                 * 전체 span 117 -> 코드의 13계조가 28계조로만 펴지고,
+                 * zxing의 8x8 블록 판정(폭 24 미만 = 구조 없음)을 아슬아슬하게
+                 * 지난다. 같은 이미지를 여백 0~12px로 좁혀 자르면 **보통
+                 * 스트레치로도** 읽힌다(0.05와 0.10 둘 다).
+                 *
+                 * 영역 상자는 에너지 로케이터가 준 것이라 코드가 대체로
+                 * 가운데 있다. 그래서 중앙부를 70% -> 50%로 좁혀가며 편다.
+                 * 좁힐수록 장면이 빠지고 코드가 범위를 정하게 된다.
+                 * [[vscan-lite-lowcontrast-inner-stretch]]
+                 */
+                // 70% -> 50% -> 35%. 실측(QR module 6, 대비 0.05): 로케이터가
+                // 주는 상자가 256x256인데 코드는 126x126이라 여백이 65px다.
+                // 파이썬 실험에서 여백 20px 이상은 실패하고 0~12px이라야
+                // 읽혔으므로, 50%(여백 ~1px)까지는 내려가야 한다.
+                for (int den : {7, 5, 35}) {
+                    if (!sHits.empty() || budgetExceeded()) break;
+                    const int cw = (den == 35) ? rw * 35 / 100 : rw * den / 10;
+                    const int ch = (den == 35) ? rh * 35 / 100 : rh * den / 10;
+                    if (cw < 48 || ch < 48) continue;
+                    const int cx = (rw - cw) / 2, cy = (rh - ch) / 2;
+                    GrayImage sub;
+                    sub.width = cw; sub.height = ch;
+                    sub.pixels.resize(static_cast<size_t>(cw) * ch);
+                    for (int r = 0; r < ch; ++r)
+                        std::memcpy(sub.pixels.data() + static_cast<size_t>(r) * cw,
+                                    crop.pixels.data() + static_cast<size_t>(cy + r) * rw + cx, cw);
+                    GrayImage sb;
+                    if (!stretchContrast(GrayView(sub), sb)) continue;
+                    GrayImage sm;
+                    boxBlur3x3(GrayView(sb), sm);
+                    for (const GrayImage* cand : {&sm, &sb}) {
+                        if (!sHits.empty() || budgetExceeded()) break;
+                        sHits = roiPipe.processViewCore(GrayView(*cand));
+                    }
+                    if (!sHits.empty())
+                        for (auto& r : sHits)
+                            for (auto& pt : r.symbol.position) { pt.first += cx; pt.second += cy; }
+                }
+
                 // [저대비일 때만] 국소 이진화는 어디까지나 대비 도구다.
                 // ROI가 이미 계조를 200 이상 쓰고 있으면(stretchContrast가
                 // false를 돌려준 경우) 실패 원인이 대비가 아니므로 돌 이유가
