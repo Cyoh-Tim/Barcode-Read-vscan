@@ -47,10 +47,13 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
     }
     if (cfg_.enableMicroPdf417)
         decoders_.push_back(std::make_unique<MicroPdf417Decoder>());
-    if (cfg_.enablePostalJapan) {
+    if (cfg_.enablePostalJapan || cfg_.enablePostalImb) {
         PostalOptions po;
-        po.japanPost = true;
-        decoders_.push_back(std::make_unique<PostalDecoder>(po));
+        po.japanPost = cfg_.enablePostalJapan;
+        po.imb = cfg_.enablePostalImb;
+        // 타일이 아니라 프레임 전체를 본다 — 이유는 pipeline.hpp의
+        // fullFrameDecoders_ 주석.
+        fullFrameDecoders_.push_back(std::make_unique<PostalDecoder>(po));
     }
 #ifdef VSCAN_HAVE_ZBAR
     // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이
@@ -181,6 +184,7 @@ uint32_t symbologyBit(Symbology s) {
 void Pipeline::applyFormatMask(uint32_t mask) {
     cfg_.formatMask = mask;                       // 하위 파이프라인이 상속받는다
     for (auto& d : decoders_) d->setFormatMask(mask);
+    for (auto& d : fullFrameDecoders_) d->setFormatMask(mask);
 }
 
 void Pipeline::adaptiveObserve(const std::vector<PipelineResult>& hits) {
@@ -259,17 +263,22 @@ std::vector<PipelineResult> Pipeline::process(const Frame& frame) {
 }
 
 std::vector<PipelineResult> Pipeline::decodeTile(const GrayView& tile, int yOffset) {
+    return runDecoders(decoders_, tile, yOffset);
+}
+
+std::vector<PipelineResult> Pipeline::runDecoders(
+    const std::vector<std::unique_ptr<IDecoder>>& ds, const GrayView& tile, int yOffset) {
     // 디코더가 여러 개(예: zxing-cpp + ZBar fast-path) 등록된 경우, 서로
     // 독립적인 읽기 전용 연산이므로 순차 실행 대신 동시에 돌린다. 디코더가
     // 하나뿐이면(기본 구성) std::async 오버헤드 없이 바로 호출한다.
     std::vector<std::vector<DecodedSymbol>> perDecoder;
-    if (decoders_.size() <= 1) {
-        perDecoder.reserve(decoders_.size());
-        for (auto& decoder : decoders_) perDecoder.push_back(decoder->decode(tile));
+    if (ds.size() <= 1) {
+        perDecoder.reserve(ds.size());
+        for (auto& decoder : ds) perDecoder.push_back(decoder->decode(tile));
     } else {
         std::vector<std::future<std::vector<DecodedSymbol>>> futures;
-        futures.reserve(decoders_.size());
-        for (auto& decoder : decoders_) {
+        futures.reserve(ds.size());
+        for (auto& decoder : ds) {
             futures.push_back(std::async(std::launch::async,
                                           [&decoder, &tile] { return decoder->decode(tile); }));
         }
@@ -300,7 +309,10 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image, boo
     if (image.height < 200) nThreads = 1;
 
     if (nThreads <= 1) {
-        return dedup(decodeTile(image, 0));
+        auto r = decodeTile(image, 0);
+        auto ff = runDecoders(fullFrameDecoders_, image, 0);
+        r.insert(r.end(), std::make_move_iterator(ff.begin()), std::make_move_iterator(ff.end()));
+        return dedup(std::move(r));
     }
 
     // 프레임을 수평 스트립으로 분할. 겹침(overlap)을 둬서 타일 경계에
@@ -318,11 +330,23 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image, boo
             return decodeTile(tile, y0);
         }));
     }
+    // 프레임 전체를 봐야 하는 디코더는 타일과 나란히, 원본 뷰로 한 번 돈다.
+    std::future<std::vector<PipelineResult>> fullFrameFuture;
+    if (!fullFrameDecoders_.empty()) {
+        fullFrameFuture = std::async(std::launch::async, [this, image]() {
+            return runDecoders(fullFrameDecoders_, image, 0);
+        });
+    }
 
     std::vector<PipelineResult> merged;
     for (auto& f : futures) {
         auto part = f.get();
         merged.insert(merged.end(), part.begin(), part.end());
+    }
+    if (fullFrameFuture.valid()) {
+        auto part = fullFrameFuture.get();
+        merged.insert(merged.end(), std::make_move_iterator(part.begin()),
+                      std::make_move_iterator(part.end()));
     }
 
     if (merged.empty() && tileFallback) {
@@ -2301,6 +2325,37 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
     }
 
     /*
+     * [4-state 우편 심볼 안에서 나온 다른 코드는 그 막대들을 잘못 읽은 것이다]
+     *
+     * 우편 바코드는 굵기가 다 같은 막대가 65~67개 늘어선 것이라, 1D 리더가
+     * 그 위에서 유효한 코드를 만들어내기 쉽다. 실측: IMB를 270도로 세운
+     * 프레임에서 zxing이 EAN-13 "6211122121212"를 냈고 **체크디짓까지
+     * 우연히 맞았다** — 체크디짓으로는 못 거른다.
+     *
+     * 우편 쪽은 CRC-11(IMB) 또는 mod 19 검사 심볼(일본우편)을 통과한
+     * 것이라 증명 강도가 비교가 안 된다. 그래서 우편 심볼의 사각형에
+     * **완전히 들어가는** 다른 심볼은 버린다. "겹치면"이 아니라 "들어가면"인
+     * 이유는, 회전 프레임에서 사각형이 스치듯 겹치는 진짜 코드를 안 죽이려는
+     * 것이다. 우편이 꺼져 있으면(기본) 이 규칙은 걸릴 상대가 없다 —
+     * 기본 설정에서 저 EAN 유령이 남는 것은 §8에 알려진 이슈로 적었다.
+     * [[vscan-lite-postal]]
+     */
+    for (size_t j = 0; j < in.size(); ++j) {
+        if (drop[j]) continue;
+        const Symbology sj = in[j].symbol.symbology;
+        if (sj != Symbology::POSTAL_JAPAN && sj != Symbology::POSTAL_IMB) continue;
+        const auto bj = bboxOf(in[j].symbol);
+        for (size_t i = 0; i < in.size(); ++i) {
+            if (i == j || drop[i]) continue;
+            const Symbology si = in[i].symbol.symbology;
+            if (si == Symbology::POSTAL_JAPAN || si == Symbology::POSTAL_IMB) continue;
+            const auto bi = bboxOf(in[i].symbol);
+            if (bi.x0 >= bj.x0 && bi.x1 <= bj.x1 && bi.y0 >= bj.y0 && bi.y1 <= bj.y1)
+                drop[i] = 1;
+        }
+    }
+
+    /*
      * [GS1 Composite의 CC-C는 zxing이 깨진 글자로 읽는다 — 그건 버린다]
      *
      * CC-C는 PDF417 심볼이라 zxing이 기본 경로에서 읽어버리는데, 데이터 계층이
@@ -2345,6 +2400,33 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
                 for (int k = 7; k >= 0; --k) bits.push_back(static_cast<uint8_t>((ch >> k) & 1));
             std::string dummy;
             if (decodeGs1CompositeBits(bits, dummy)) drop[i] = 1;
+        }
+    }
+
+    /*
+     * [CC-C를 우리가 제대로 읽었으면, 같은 자리의 PDF417은 그것의 깨진 판이다]
+     *
+     * 위의 내용 기반 규칙은 "인쇄 불가 바이트가 절반 넘게"를 요구하는데
+     * 실측으로 그게 자주 모자란다. CC-C 시험셋 7장 중 4장에서 zxing이 낸
+     * 쓰레기가 절반을 못 넘겨서 그대로 살아남았다:
+     *   `t\x08!\x8a9%!\x08B\x10` -> 인쇄 불가 4 / 전체 10
+     * 임계를 낮추면 정상 PDF417까지 물리므로 그 방향은 막다른 길이다.
+     *
+     * 여기서는 내용을 안 본다. **같은 자리에서 GS1_COMPOSITE가 이미 나왔다면**
+     * 그 PDF417은 같은 물리 심볼을 잘못 푼 것이다 — CC-C의 2D 성분이 곧
+     * PDF417 심볼이기 때문이다. 우리 CC-C 경로는 코드워드[1]==920을 확인하고
+     * 내므로(§3.50) 근거가 내용 추측이 아니라 구조다. 위 규칙은 우리가 CC-C를
+     * 못 읽은 경우를 위해 남겨둔다(그때는 겹칠 상대가 없다).
+     * [[vscan-lite-gs1-composite]]
+     */
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (drop[i] || in[i].symbol.symbology != Symbology::PDF417) continue;
+        const auto bi = bboxOf(in[i].symbol);
+        for (size_t j = 0; j < in.size(); ++j) {
+            if (drop[j] || in[j].symbol.symbology != Symbology::GS1_COMPOSITE) continue;
+            const auto bj = bboxOf(in[j].symbol);
+            const bool apart = bi.x0 > bj.x1 || bj.x0 > bi.x1 || bi.y0 > bj.y1 || bj.y0 > bi.y1;
+            if (!apart) { drop[i] = 1; break; }
         }
     }
 

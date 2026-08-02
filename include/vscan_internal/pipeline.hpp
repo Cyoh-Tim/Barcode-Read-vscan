@@ -146,6 +146,8 @@ struct PipelineConfig {
      * (decoder_postal.hpp). 검사 심볼(mod 19)이 있어 오디코딩 위험은 낮다.
      */
     bool enablePostalJapan = false;
+    // IMB(USPS Intelligent Mail). CRC-11이 있어 오디코딩 위험이 낮다.
+    bool enablePostalImb = false;
 
     /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
@@ -583,6 +585,31 @@ public:
 
 private:
     std::vector<std::unique_ptr<IDecoder>> decoders_;
+    /*
+     * [타일이 아니라 프레임 전체를 봐야 하는 디코더]
+     *
+     * 4-state 우편 바코드는 막대가 65~67개 늘어선 **길고 얇은** 심볼이다.
+     * 90/270도로 세워지면 프레임 높이를 거의 다 차지하는데, 타일링은
+     * 프레임을 가로 띠로 자르므로 어느 타일에도 온전히 안 들어간다.
+     * 큰 코드용 풀프레임 폴백이 있긴 하지만 그건 **타일이 빈손일 때만**
+     * 돈다(`[[vscan-lite-tile-large-code]]`).
+     *
+     * 실측으로 여기서 물렸다. IMB를 270도로 세운 프레임에서 zxing이
+     * 엉뚱한 자리를 EAN-13 "6211122121212"로 읽어버린다(체크디짓까지
+     * 우연히 맞는다). 그러면 타일 결과가 비지 않으니 폴백이 안 돌고
+     * IMB는 통째로 사라진다. 90도는 그 유령이 안 떠서 폴백이 돌아
+     * 읽혔다 — 즉 **읽히느냐가 남의 오디코딩 유무에 달려 있었다.**
+     *
+     * 그래서 우편 디코더는 타일 목록에서 빼고 프레임 전체에 한 번만
+     * 돌린다. 비용은 실측으로 이렇다:
+     *   - 우편 시험셋(길고 얇은 프레임) full 경로 평균 16.0 -> 11.1ms.
+     *     타일마다 겹쳐 돌던 것이 한 번으로 줄어든 만큼이다.
+     *   - 난수 코퍼스 120장은 **거의 그대로**다(켜면 +11%, 이 변경 전후
+     *     같은 값). 큰 프레임에서는 타일 겹침 비율이 작아서 줄어들 것이
+     *     별로 없다. "비용도 준다"고 쓸 뻔했는데 재보니 아니었다.
+     * [[vscan-lite-postal]]
+     */
+    std::vector<std::unique_ptr<IDecoder>> fullFrameDecoders_;
     PipelineConfig cfg_;
 
     // processViewTracked() 상태: 직전 프레임에서 검출된 심볼들의 bounding box
@@ -652,6 +679,10 @@ private:
     GrayView preprocessFrame(const GrayView& image);
 
     std::vector<PipelineResult> decodeTile(const GrayView& tile, int yOffset);
+    // 주어진 디코더 목록을 한 뷰에 돌린다. decodeTile()의 알맹이이고,
+    // fullFrameDecoders_를 따로 돌릴 때도 같은 것을 쓴다.
+    static std::vector<PipelineResult> runDecoders(
+        const std::vector<std::unique_ptr<IDecoder>>& ds, const GrayView& view, int yOffset);
     static std::vector<PipelineResult> dedup(std::vector<PipelineResult> in);
 
     // processView()의 실제 작업(타일링/병합). 공개 processView()는 이걸

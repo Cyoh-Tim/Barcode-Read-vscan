@@ -7,13 +7,13 @@
 namespace vscan {
 
 // 벤치마킹 대상 스펙에 맞춘 심볼로지 열거형.
-// zxing-cpp가 지원하지 않는 것(GS1_COMPOSITE, DOTCODE, PHARMACODE, POSTAL_*)은
-// custom 디코더가 채워야 하는 자리표시자로 남겨둔다.
+// zxing-cpp가 지원하지 않는 것은 자체 디코더가 채운다. 지금 남은 자리표시자는
+// DOTCODE 하나뿐이다(§4 로드맵).
 enum class Symbology {
     QR, MICRO_QR,
     DATA_MATRIX, GS1_DATA_MATRIX,
     PDF417, MICRO_PDF417,
-    GS1_COMPOSITE,      // TODO: 미구현
+    GS1_COMPOSITE,      // 자체 (CC-A/CC-B/CC-C, 기본 OFF)
     DOTCODE,            // TODO: 미구현
     CODE39, CODE39_FULL_ASCII, TRIOPTIC_CODE39,
     ITF, INDUSTRIAL_2OF5, COOP_2OF5,
@@ -22,9 +22,9 @@ enum class Symbology {
     GS1_DATABAR,
     CODE93,
     EAN_UPC,
-    PHARMACODE,          // TODO: 미구현
-    POSTAL_JAPAN,        // TODO: 미구현
-    POSTAL_IMB,          // TODO: 미구현
+    PHARMACODE,          // 자체 (기본 OFF)
+    POSTAL_JAPAN,        // 자체 (기본 OFF)
+    POSTAL_IMB,          // 자체 (기본 OFF)
     UNKNOWN,
 };
 

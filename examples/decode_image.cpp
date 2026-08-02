@@ -79,6 +79,7 @@ int main(int argc, char** argv) {
     if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
     cfg.enable_micro_pdf417    = getenv("VSCAN_MPDF") != nullptr;
     cfg.enable_postal_japan    = getenv("VSCAN_JPPOST") != nullptr;
+    cfg.enable_postal_imb      = getenv("VSCAN_IMB") != nullptr;
     vscan_pipeline_t* pipeline = vscan_create(&cfg);
     if (!pipeline) { fprintf(stderr, "vscan_create 실패\n"); return 1; }
 

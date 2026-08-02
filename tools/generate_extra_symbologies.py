@@ -22,6 +22,7 @@ BWIPP를 호출해서 만든다 — 생성 경로가 완전히 독립이므로 �
     python3 tools/generate_extra_symbologies.py --outdir /tmp/m --micropdf417
     python3 tools/generate_extra_symbologies.py --outdir /tmp/c --composite
     python3 tools/generate_extra_symbologies.py --outdir /tmp/j --japanpost
+    python3 tools/generate_extra_symbologies.py --outdir /tmp/i --imb
 
 ## MicroPDF417은 BWIPP가 필요하다
 
@@ -32,8 +33,17 @@ BWIPP(treepoem + ghostscript)만 쓴다. 34개 변형 전부 + 열화 축을 낸
 
 ## 출력
 
-<outdir>/*.pgm 과 labels.tsv (verify_accuracy가 읽는 형식과 동일:
-파일명 <TAB> 코드수 <TAB> 심볼로지:텍스트 ... <TAB> 태그)
+<outdir>/*.pgm 과 labels.tsv. 열 배치는 verify_accuracy의 `loadLabels`가
+읽는 것과 **정확히 같아야 한다**:
+
+    파일명 <TAB> 코드수 <TAB> 태그(,) <TAB> 정답텍스트(|) <TAB> 심볼로지(|) <TAB> 코드태그(|)
+
+2026-08-02까지 이 스크립트는 3열에 "심볼로지:텍스트"를, 4열에 태그를 넣고
+있었다. verify_accuracy는 3열을 태그로, 4열을 정답 텍스트로 읽으므로
+**정답이 "-" 한 글자로 들어갔고, 읽어낸 코드는 전부 "정답에 없는 코드"
+= 오디코딩으로 집계됐다**. 실제로 IMB 13장이 검출 13/13인데 misdec=13으로
+찍혔다. 검출 수치는 맞았지만 텍스트 대조는 처음부터 아무것도 검증하지
+않고 있었다. 지금은 `write_labels()` 하나로 통일해서 그 자리를 막았다.
 """
 import argparse
 import math
@@ -155,6 +165,27 @@ def save_pgm(path, img):
         f.write(img.tobytes())
 
 
+def write_labels(outdir, rows):
+    """rows = [(파일명, 심볼로지, 정답텍스트, 태그), ...]
+
+    열 배치는 verify_accuracy의 loadLabels가 읽는 것과 같아야 한다(위 주석).
+    태그 열에는 심볼로지 이름도 같이 넣어서 심볼로지별 집계가 되게 한다.
+
+    정답텍스트/심볼로지는 리스트도 된다. 한 장에 코드가 둘 이상 있는
+    경우(GS1 Composite는 선형 성분 + 2D 성분 두 개다)에 **둘 다 적어야**
+    한다. 하나만 적으면 나머지 하나가 "정답에 없는 코드" = 오디코딩으로
+    잘못 집계된다.
+    """
+    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
+        for name, sym, text, tag in rows:
+            texts = [text] if isinstance(text, str) else list(text)
+            syms = [sym] if isinstance(sym, str) else list(sym)
+            tags = ",".join(syms) + ("," + tag if tag and tag != "-" else "")
+            f.write("%s\t%d\t%s\t%s\t%s\t%s\n"
+                    % (name, len(texts), tags, "|".join(texts), "|".join(syms), tag or "-"))
+    print("%d장 생성: %s" % (len(rows), outdir))
+
+
 # --- BWIPP 경로 (독립 검증용) -----------------------------------------------
 
 def bwipp_render(kind, text, module, quiet):
@@ -232,7 +263,7 @@ def micropdf417_main(outdir, quiet, seed):
     def emit(name, a):
         a = np.clip(a, 0, 255).astype(np.uint8)
         save_pgm(os.path.join(outdir, name), a)
-        rows_out.append((name, 1, "MicroPDF417:" + MPDF_PAYLOAD, name.split("_")[1].rsplit(".", 1)[0]))
+        rows_out.append((name, "MicroPDF417", MPDF_PAYLOAD, name.split("_")[1].rsplit(".", 1)[0]))
 
     for cols, rows, ec, *_ in variants:
         try:
@@ -245,10 +276,7 @@ def micropdf417_main(outdir, quiet, seed):
         a = np.pad(render(14, 2, scale), quiet, constant_values=255)
         emit(f"ax_{tag}.pgm", degrade(a, rng, blur_s, noise_s, contrast, rotdeg))
 
-    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
-        for name, n, code, tag in rows_out:
-            f.write("%s\t%d\t%s\t%s\n" % (name, n, code, tag))
-    print("%d장 생성: %s" % (len(rows_out), outdir))
+    write_labels(outdir, rows_out)
 
 
 def _mpdf_variants():
@@ -265,26 +293,43 @@ def _mpdf_variants():
 # GS1 Composite: (선형 종류, 선형 데이터, 2D 페이로드, 기대 2D 문자열)
 # 기대 문자열은 AI와 값을 이어 붙이고 가변 길이 뒤에 0x1D를 넣은 것이다
 # (gs1.cpp의 parseGS1이 먹는 형식).
+#
+# Composite는 **한 장에 코드가 둘**이다 — 선형 성분과 2D 성분. 정답에 둘
+# 다 적어야 한다. 선형 쪽 기대 문자열은 심볼로지마다 표기가 다르다:
+# GS1-128은 괄호 AI 그대로, DataBar는 AI 없이 값만, EAN-13은 숫자 그대로.
+# (입력 데이터에서 그대로 유도되는 값이지 출력에서 베껴온 값이 아니다.)
 GS = "\x1d"
 COMPOSITE_CASES = [
-    ("gs1-128composite", "(01)03412345678900", "(99)ABCDEF",        "99ABCDEF"),
-    ("gs1-128composite", "(01)03412345678900", "(99)1234-abcd",     "991234-abcd"),
-    ("gs1-128composite", "(01)03412345678900", "(17)250630(10)L9",  "1725063010L9"),
-    ("gs1-128composite", "(01)03412345678900", "(10)LOT123",        "10LOT123"),
-    ("gs1-128composite", "(01)03412345678900", "(90)12X(21)SER1",   "9012X" + GS + "21SER1"),
-    ("databaromnicomposite", "(01)03412345678900", "(99)ABC123",    "99ABC123"),
-    ("ean13composite", "9771234567003", "(99)Hello",                "99Hello"),
+    ("gs1-128composite", "(01)03412345678900", "(99)ABCDEF",        "99ABCDEF",
+     "GS1-128", "(01)03412345678900"),
+    ("gs1-128composite", "(01)03412345678900", "(99)1234-abcd",     "991234-abcd",
+     "GS1-128", "(01)03412345678900"),
+    ("gs1-128composite", "(01)03412345678900", "(17)250630(10)L9",  "1725063010L9",
+     "GS1-128", "(01)03412345678900"),
+    ("gs1-128composite", "(01)03412345678900", "(10)LOT123",        "10LOT123",
+     "GS1-128", "(01)03412345678900"),
+    ("gs1-128composite", "(01)03412345678900", "(90)12X(21)SER1",   "9012X" + GS + "21SER1",
+     "GS1-128", "(01)03412345678900"),
+    ("databaromnicomposite", "(01)03412345678900", "(99)ABC123",    "99ABC123",
+     "GS1-DataBar", "03412345678900"),
+    ("ean13composite", "9771234567003", "(99)Hello",                "99Hello",
+     "EAN/UPC", "9771234567003"),
 ]
 
 
 def composite_main(outdir, quiet):
-    """GS1 Composite 시험셋: CC-A / CC-B 각각 + 선형 종류 세 가지."""
+    """GS1 Composite 시험셋: CC-A / CC-B / CC-C + 선형 종류 세 가지.
+
+    CC-C는 2D 성분이 MicroPDF417이 아니라 **PDF417**이다. EAN/UPC 위에는
+    올릴 수 없어서(규격상 CC-A/CC-B만) 그 조합은 BWIPP가 거부하고, 아래
+    try/except가 건너뛴다.
+    """
     import treepoem
     from PIL import Image
     os.makedirs(outdir, exist_ok=True)
     rows_out = []
-    for idx, (btype, linear, payload, want) in enumerate(COMPOSITE_CASES):
-        for ver in ("a", "b"):
+    for idx, (btype, linear, payload, want, linsym, linwant) in enumerate(COMPOSITE_CASES):
+        for ver in ("a", "b", "c"):
             try:
                 img = treepoem.generate_barcode(btype, linear + "|" + payload,
                                                 options={"ccversion": ver}).convert("L")
@@ -294,11 +339,8 @@ def composite_main(outdir, quiet):
             a = np.array(img.resize((w * 6, h * 6), Image.NEAREST))
             name = "cc%s_%02d.pgm" % (ver, idx)
             save_pgm(os.path.join(outdir, name), np.pad(a, quiet, constant_values=255))
-            rows_out.append((name, "GS1-Composite:" + want))
-    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
-        for name, code in rows_out:
-            f.write("%s\t1\t%s\t-\n" % (name, code))
-    print("%d장 생성: %s" % (len(rows_out), outdir))
+            rows_out.append((name, [linsym, "GS1-Composite"], [linwant, want], "cc" + ver))
+    write_labels(outdir, rows_out)
 
 
 JP_PAYLOADS = ["1234567", "123-4567", "1234567ABC", "9876543A12", "100-0001", "5300012K9"]
@@ -329,13 +371,13 @@ def japanpost_main(outdir, quiet, seed):
         w, h = img.size
         return np.array(img.resize((w * scale, h * scale), Image.NEAREST))
 
-    def emit(name, a, want):
+    def emit(name, a, want, tag):
         a = np.ascontiguousarray(np.clip(a, 0, 255).astype(np.uint8))
         save_pgm(os.path.join(outdir, name), a)
-        rows_out.append((name, "PostalJP:" + want))
+        rows_out.append((name, "PostalJP", want, tag))
 
     for i, d in enumerate(JP_PAYLOADS):
-        emit("jp_%02d.pgm" % i, np.pad(render(d, 6), quiet, constant_values=255), d)
+        emit("jp_%02d.pgm" % i, np.pad(render(d, 6), quiet, constant_values=255), d, "clean")
 
     D = "1234567ABC"
     for tag, scale, blur_s, noise_s, contrast, rotdeg in JP_AXES:
@@ -346,17 +388,69 @@ def japanpost_main(outdir, quiet, seed):
             a = degrade(a, rng, blur_s, noise_s, contrast, 0)
         else:
             a = degrade(a, rng, blur_s, noise_s, contrast, rotdeg)
-        emit("jpax_%s.pgm" % tag, a, D)
+        emit("jpax_%s.pgm" % tag, a, D, tag)
 
-    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
-        for name, code in rows_out:
-            f.write("%s\t1\t%s\t-\n" % (name, code))
-    print("%d장 생성: %s" % (len(rows_out), outdir))
+    write_labels(outdir, rows_out)
+
+
+IMB_PAYLOADS = [
+    "01234567094987654321",
+    "0123456709498765432101234",
+    "01234567094987654321012345678",
+    "0123456709498765432101234567891",
+    "12345678901234567890",
+]
+IMB_AXES = [
+    ("clean",       6, 0.0,  0.0, 1.00,   0),
+    ("mod-4",       4, 0.0,  0.0, 1.00,   0),
+    ("mod-2",       2, 0.0,  0.0, 1.00,   0),
+    ("blur-2",      6, 2.0,  0.0, 1.00,   0),
+    ("noise-30",    6, 0.0, 30.0, 1.00,   0),
+    ("contrast-30", 6, 0.0,  0.0, 0.30,   0),
+    ("rot-90",      6, 0.0,  0.0, 1.00,  90),
+    ("rot-180",     6, 0.0,  0.0, 1.00, 180),
+    ("rot-270",     6, 0.0,  0.0, 1.00, 270),
+]
+
+
+def imb_main(outdir, quiet, seed):
+    """IMB(USPS Intelligent Mail) 시험셋."""
+    import treepoem
+    from PIL import Image
+    os.makedirs(outdir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    rows_out = []
+
+    def render(data, scale):
+        img = treepoem.generate_barcode("onecode", data).convert("L")
+        w, h = img.size
+        return np.array(img.resize((w * scale, h * scale), Image.NEAREST))
+
+    def emit(name, a, want, tag):
+        a = np.ascontiguousarray(np.clip(a, 0, 255).astype(np.uint8))
+        save_pgm(os.path.join(outdir, name), a)
+        rows_out.append((name, "PostalIMB", want, tag))
+
+    for i, d in enumerate(IMB_PAYLOADS):
+        emit("imb_%02d.pgm" % i, np.pad(render(d, 6), quiet, constant_values=255), d, "clean")
+
+    D = IMB_PAYLOADS[2]
+    for tag, scale, blur_s, noise_s, contrast, rotdeg in IMB_AXES:
+        a = np.pad(render(D, scale), quiet, constant_values=255).astype(float)
+        if rotdeg in (90, 180, 270):
+            a = degrade(np.rot90(a, rotdeg // 90), rng, blur_s, noise_s, contrast, 0)
+        else:
+            a = degrade(a, rng, blur_s, noise_s, contrast, rotdeg)
+        emit("imbax_%s.pgm" % tag, a, D, tag)
+
+    write_labels(outdir, rows_out)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--imb", action="store_true",
+                    help="IMB(USPS Intelligent Mail) 시험셋(BWIPP 필요)")
     ap.add_argument("--japanpost", action="store_true",
                     help="일본우편 고객 바코드 시험셋(BWIPP 필요)")
     ap.add_argument("--micropdf417", action="store_true",
@@ -375,6 +469,8 @@ def main():
         return composite_main(args.outdir, args.quiet)
     if args.japanpost:
         return japanpost_main(args.outdir, args.quiet, args.seed)
+    if args.imb:
+        return imb_main(args.outdir, args.quiet, args.seed)
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.seed)
@@ -395,12 +491,9 @@ def main():
             img = degrade(base, rng, blur, noise, contrast, rot)
             name = "%s_%s.pgm" % (kind.lower(), tag)
             save_pgm(os.path.join(args.outdir, name), img)
-            rows.append((name, 1, "%s:%s" % (SYMNAME[kind], text), tag))
+            rows.append((name, SYMNAME[kind], text, tag))
 
-    with open(os.path.join(args.outdir, "labels.tsv"), "w") as f:
-        for name, n, code, tag in rows:
-            f.write("%s\t%d\t%s\t%s\n" % (name, n, code, tag))
-    print("%d장 생성: %s" % (len(rows), args.outdir))
+    write_labels(args.outdir, rows)
 
 
 if __name__ == "__main__":

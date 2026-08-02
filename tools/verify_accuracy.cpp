@@ -353,6 +353,7 @@ int main(int argc, char** argv) {
             c.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
             c.enable_micro_pdf417   = getenv("VSCAN_MPDF") != nullptr;
             c.enable_postal_japan   = getenv("VSCAN_JPPOST") != nullptr;
+            c.enable_postal_imb     = getenv("VSCAN_IMB") != nullptr;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) c.pharmacode_min_bars = atoi(mb);
             c.disable_1d_deskew_rescue = noDeskew;
             c.disable_blank_frame_skip = noBlankSkip;
@@ -388,6 +389,7 @@ int main(int argc, char** argv) {
             cfg.enable_pharmacode      = getenv("VSCAN_PHARMA") != nullptr;
             cfg.enable_micro_pdf417   = getenv("VSCAN_MPDF") != nullptr;
             cfg.enable_postal_japan   = getenv("VSCAN_JPPOST") != nullptr;
+            cfg.enable_postal_imb     = getenv("VSCAN_IMB") != nullptr;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
             cfg.disable_1d_deskew_rescue = noDeskew;
             cfg.disable_blank_frame_skip = noBlankSkip;

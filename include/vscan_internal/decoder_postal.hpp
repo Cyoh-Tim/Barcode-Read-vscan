@@ -31,6 +31,12 @@ namespace vscan {
  */
 struct PostalOptions {
     bool japanPost = false;
+    /*
+     * [IMB — USPS Intelligent Mail] 같은 4-state지만 구조가 딴판이다.
+     * 시작/정지 패턴이 없고 65개 막대의 어센더/디센더 비트가 13비트 문자
+     * 10개에 흩뿌려져 있다. CRC-11이 강한 검증이라 오디코딩 위험은 낮다.
+     */
+    bool imb = false;
 };
 
 class PostalDecoder : public IDecoder {

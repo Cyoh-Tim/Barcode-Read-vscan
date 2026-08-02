@@ -30,7 +30,7 @@ typedef enum {
     VSCAN_SYM_GS1_DATA_MATRIX,
     VSCAN_SYM_PDF417,
     VSCAN_SYM_MICRO_PDF417,
-    VSCAN_SYM_GS1_COMPOSITE,   /* 미구현: 항상 검출되지 않음 */
+    VSCAN_SYM_GS1_COMPOSITE,   /* CC-A/CC-B/CC-C, enable_micro_pdf417 필요 */
     VSCAN_SYM_DOTCODE,         /* 미구현 */
     VSCAN_SYM_CODE39,
     VSCAN_SYM_CODE39_FULL_ASCII,
@@ -44,9 +44,9 @@ typedef enum {
     VSCAN_SYM_GS1_DATABAR,
     VSCAN_SYM_CODE93,
     VSCAN_SYM_EAN_UPC,
-    VSCAN_SYM_PHARMACODE,      /* 미구현 */
-    VSCAN_SYM_POSTAL_JAPAN,    /* 미구현 */
-    VSCAN_SYM_POSTAL_IMB,      /* 미구현 */
+    VSCAN_SYM_PHARMACODE,      /* enable_pharmacode 필요 */
+    VSCAN_SYM_POSTAL_JAPAN,    /* enable_postal_japan 필요 */
+    VSCAN_SYM_POSTAL_IMB,      /* enable_postal_imb 필요 */
 } vscan_symbology_t;
 
 typedef struct {
@@ -375,6 +375,12 @@ typedef struct {
      * 오디코딩 위험은 낮고, 비용은 ROI마다 막대 상하단을 재는 훑기다.
      */
     int enable_postal_japan;
+
+    /*
+     * [IMB — USPS Intelligent Mail] 0 = 기본(꺼짐), 1 = 켬.
+     * 65막대 4-state. CRC-11이 있어 오디코딩 위험은 낮다.
+     */
+    int enable_postal_imb;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,
