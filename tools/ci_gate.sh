@@ -140,6 +140,40 @@ if [ "$SWEEP_FAIL" = 1 ]; then
 fi
 echo "   14종 x 19각도 전부 100% / 오디코딩 0"
 
+# [5도 격자는 오디코딩을 대부분 못 본다 — 세밀 스윕을 따로 건다]
+#
+# 위 스윕이 "오디코딩 0"이라고 말하지만 그건 **5도 배수 각도에서만**이다.
+# 1도 간격으로 다시 재보면 다르다(2026-08-02 실측, module 4):
+#
+#   ITF     5도 간격 19장 -> 오디코딩 1 / 1도 간격 91장 -> **오디코딩 13**
+#   CODE128 5도 간격      -> 0          / 1도 간격(module 3) -> **2**
+#
+# CODE128의 두 건은 44도와 46도다. 45도 정각에서는 정상이라 5도 격자가
+# 원리적으로 못 본다. 이걸 모른 채 "오디코딩 0"이라고 적어둘 수는 없다.
+#
+# 0으로 만드는 방법은 있다 — ITF는 체크섬 강제(validate_itf_checksum)로
+# 13 -> 0이 되고 검출 손실이 없다. 다만 그건 **배치 결정**이라(체크디짓
+# 없는 ITF를 쓰는 배치는 그 코드를 전부 잃는다) 기본값으로 켤 수 없다.
+# 그래서 여기서는 0을 요구하지 않고 **현재 값을 상한으로 고정**한다 —
+# 나빠지는 것만 잡는다.
+echo ">> [3.5/5] 세밀 각도 스윕 (1도 간격, 오디코딩 상한 고정)"
+FINE_FAIL=0
+fine_sweep() {  # $1=심볼로지 $2=모듈 $3=오디코딩 상한
+  local OUT MD
+  OUT=$(python3 "$ROOT/tools/generate_corpus.py" --sweep angle:0:90:1 \
+          --base sym=$1,module=$2,count=1 --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+        | "$VERIFY" --stdin --paths full --reps 1 2>/dev/null | grep -E "^full " | tr -s ' ')
+  MD=$(echo "$OUT" | cut -d' ' -f5)
+  echo "   $1(module $2) 91각도: 오디코딩 ${MD:-?} (상한 $3)"
+  if [ "${MD:-999}" -gt "$3" ]; then FINE_FAIL=1; fi
+}
+fine_sweep ITF 4 "${FINE_MAX_ITF:-13}"
+fine_sweep CODE128 3 "${FINE_MAX_C128:-2}"
+if [ "$FINE_FAIL" = 1 ]; then
+  echo "!! 세밀 각도 스윕에서 오디코딩이 상한을 넘었다"
+  exit 1
+fi
+
 echo ">> [4/5] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
 python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
         --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \

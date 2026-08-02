@@ -121,6 +121,8 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->enable_postal_imb) pcfg.enablePostalImb = true;
         if (cfg->enable_dotcode) pcfg.enableDotCode = true;
         if (cfg->disable_tile_fallback) pcfg.disableTileFallback = true;
+        if (cfg->validate_itf_checksum) pcfg.validateITFCheckSum = true;
+        if (cfg->min_line_count > 0) pcfg.minLineCount = cfg->min_line_count;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }
