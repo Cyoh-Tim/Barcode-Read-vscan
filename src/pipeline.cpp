@@ -5,6 +5,7 @@
 #include "vscan_internal/decoder_linear.hpp"
 #include "vscan_internal/decoder_micropdf417.hpp"
 #include "vscan_internal/gs1_composite.hpp"
+#include "vscan_internal/decoder_dotcode.hpp"
 #include "vscan_internal/decoder_postal.hpp"
 #include "vscan_internal/preprocess.hpp"
 #include "vscan_internal/deskew1d.hpp"
@@ -54,6 +55,13 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
         // 타일이 아니라 프레임 전체를 본다 — 이유는 pipeline.hpp의
         // fullFrameDecoders_ 주석.
         fullFrameDecoders_.push_back(std::make_unique<PostalDecoder>(po));
+    }
+    if (cfg_.enableDotCode) {
+        DotCodeOptions dco;
+        dco.enabled = true;
+        // 우편과 같은 이유로 프레임 전체를 본다 — 점 격자가 타일 경계에
+        // 걸리면 어느 타일에도 온전히 안 들어간다.
+        fullFrameDecoders_.push_back(std::make_unique<DotCodeDecoder>(dco));
     }
 #ifdef VSCAN_HAVE_ZBAR
     // 설정으로 켰으면 여기서 등록한다 — 내부에서 만드는 임시 Pipeline들이

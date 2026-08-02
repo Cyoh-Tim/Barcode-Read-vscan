@@ -31,7 +31,7 @@ typedef enum {
     VSCAN_SYM_PDF417,
     VSCAN_SYM_MICRO_PDF417,
     VSCAN_SYM_GS1_COMPOSITE,   /* CC-A/CC-B/CC-C, enable_micro_pdf417 필요 */
-    VSCAN_SYM_DOTCODE,         /* 미구현 */
+    VSCAN_SYM_DOTCODE,         /* enable_dotcode 필요 */
     VSCAN_SYM_CODE39,
     VSCAN_SYM_CODE39_FULL_ASCII,
     VSCAN_SYM_TRIOPTIC_CODE39,
@@ -381,6 +381,14 @@ typedef struct {
      * 65막대 4-state. CRC-11이 있어 오디코딩 위험은 낮다.
      */
     int enable_postal_imb;
+
+    /*
+     * [DotCode] 0 = 기본(꺼짐), 1 = 켬.
+     * 점 격자 심볼이고 **파인더 패턴이 없다**. 켜면 프레임 전체에서 어두운
+     * 점 뭉치를 찾아 격자를 맞추는 단계가 붙는다 — 자체 심볼로지 중 가장
+     * 비싼 축이다. GF(113) 리드-솔로몬이 강한 검증이라 오디코딩 위험은 낮다.
+     */
+    int enable_dotcode;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
     cfg.enable_micro_pdf417    = getenv("VSCAN_MPDF") != nullptr;
     cfg.enable_postal_japan    = getenv("VSCAN_JPPOST") != nullptr;
     cfg.enable_postal_imb      = getenv("VSCAN_IMB") != nullptr;
+    cfg.enable_dotcode        = getenv("VSCAN_DOTCODE") != nullptr;
     vscan_pipeline_t* pipeline = vscan_create(&cfg);
     if (!pipeline) { fprintf(stderr, "vscan_create 실패\n"); return 1; }
 

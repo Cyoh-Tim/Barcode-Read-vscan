@@ -119,6 +119,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->enable_micro_pdf417) pcfg.enableMicroPdf417 = true;
         if (cfg->enable_postal_japan) pcfg.enablePostalJapan = true;
         if (cfg->enable_postal_imb) pcfg.enablePostalImb = true;
+        if (cfg->enable_dotcode) pcfg.enableDotCode = true;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }

@@ -23,6 +23,7 @@ BWIPP를 호출해서 만든다 — 생성 경로가 완전히 독립이므로 �
     python3 tools/generate_extra_symbologies.py --outdir /tmp/c --composite
     python3 tools/generate_extra_symbologies.py --outdir /tmp/j --japanpost
     python3 tools/generate_extra_symbologies.py --outdir /tmp/i --imb
+    python3 tools/generate_extra_symbologies.py --outdir /tmp/d --dotcode
 
 ## MicroPDF417은 BWIPP가 필요하다
 
@@ -446,9 +447,71 @@ def imb_main(outdir, quiet, seed):
     write_labels(outdir, rows_out)
 
 
+DOTCODE_PAYLOADS = [
+    "DOTCODE-TEST", "Hello, World!", "0123456789012345678",
+    "ABCdef123XYZ", "2026-08-02-LOT99", "1234567890123456",
+]
+DOTCODE_AXES = [
+    # (태그, 배율, 블러, 노이즈, 대비, 회전)
+    ("clean",       3, 0.0,  0.0, 1.00,   0),
+    ("scale-2",     2, 0.0,  0.0, 1.00,   0),
+    ("scale-5",     5, 0.0,  0.0, 1.00,   0),
+    ("blur-1",      3, 1.0,  0.0, 1.00,   0),
+    ("blur-2",      3, 2.0,  0.0, 1.00,   0),
+    ("noise-10",    3, 0.0, 10.0, 1.00,   0),
+    ("noise-20",    3, 0.0, 20.0, 1.00,   0),
+    ("contrast-50", 3, 0.0,  0.0, 0.50,   0),
+    ("contrast-30", 3, 0.0,  0.0, 0.30,   0),
+    ("rot-15",      3, 0.0,  0.0, 1.00,  15),
+    ("rot-30",      3, 0.0,  0.0, 1.00,  30),
+    ("rot-45",      3, 0.0,  0.0, 1.00,  45),
+    ("rot-90",      3, 0.0,  0.0, 1.00,  90),
+    ("rot-180",     3, 0.0,  0.0, 1.00, 180),
+]
+
+
+def dotcode_main(outdir, quiet, seed):
+    """DotCode 시험셋: 페이로드 6종(깨끗) + 한 페이로드에 열화/회전 축.
+
+    DotCode는 자체 생성 경로가 없다 — 인코더를 직접 쓰면 디코더와 같은 표를
+    공유하게 돼서(공통 원인 오류) 시험의 뜻이 없어진다. BWIPP만 쓴다.
+    """
+    import treepoem
+    from PIL import Image
+    os.makedirs(outdir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    rows_out = []
+
+    def render(data, scale):
+        img = treepoem.generate_barcode("dotcode", data).convert("L")
+        w, h = img.size
+        return np.array(img.resize((w * scale, h * scale), Image.NEAREST))
+
+    def emit(name, a, want, tag):
+        a = np.ascontiguousarray(np.clip(a, 0, 255).astype(np.uint8))
+        save_pgm(os.path.join(outdir, name), a)
+        rows_out.append((name, "DotCode", want, tag))
+
+    for i, d in enumerate(DOTCODE_PAYLOADS):
+        emit("dc_%02d.pgm" % i, np.pad(render(d, 3), quiet, constant_values=255), d, "clean")
+
+    D = DOTCODE_PAYLOADS[0]
+    for tag, scale, blur_s, noise_s, contrast, rotdeg in DOTCODE_AXES:
+        a = np.pad(render(D, scale), quiet, constant_values=255).astype(float)
+        if rotdeg in (90, 180, 270):
+            a = degrade(np.rot90(a, rotdeg // 90), rng, blur_s, noise_s, contrast, 0)
+        else:
+            a = degrade(a, rng, blur_s, noise_s, contrast, rotdeg)
+        emit("dcax_%s.pgm" % tag, a, D, tag)
+
+    write_labels(outdir, rows_out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--dotcode", action="store_true",
+                    help="DotCode 시험셋 (BWIPP 필요)")
     ap.add_argument("--imb", action="store_true",
                     help="IMB(USPS Intelligent Mail) 시험셋(BWIPP 필요)")
     ap.add_argument("--japanpost", action="store_true",
@@ -471,6 +534,8 @@ def main():
         return japanpost_main(args.outdir, args.quiet, args.seed)
     if args.imb:
         return imb_main(args.outdir, args.quiet, args.seed)
+    if args.dotcode:
+        return dotcode_main(args.outdir, args.quiet, args.seed)
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.seed)

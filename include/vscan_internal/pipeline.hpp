@@ -150,6 +150,15 @@ struct PipelineConfig {
     bool enablePostalImb = false;
 
     /*
+     * [DotCode] 점 격자. 파인더가 없어서 프레임 전체에서 점 뭉치를 찾고
+     * 회전 격자를 맞춰야 한다 — 자체 심볼로지 중 가장 비싸다.
+     * 우편과 같은 이유로 **타일이 아니라 프레임 전체**에 돌린다
+     * (fullFrameDecoders_ 주석 참고): 점 격자가 타일 경계에 걸리면
+     * 어느 타일에도 온전히 안 들어간다.
+     */
+    bool enableDotCode = false;
+
+    /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
      * 때만 돈다.
      *
