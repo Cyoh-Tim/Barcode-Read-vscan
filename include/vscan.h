@@ -368,6 +368,13 @@ typedef struct {
      * 리드-솔로몬을 통과해야 결과가 나온다. 끄는 이유는 비용이다.
      */
     int enable_micro_pdf417;
+
+    /*
+     * [일본우편 고객 바코드] 0 = 기본(꺼짐), 1 = 켬.
+     * 4-state 바코드라 정보가 막대 높이에 있다. 검사 심볼(mod 19)이 있어
+     * 오디코딩 위험은 낮고, 비용은 ROI마다 막대 상하단을 재는 훑기다.
+     */
+    int enable_postal_japan;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

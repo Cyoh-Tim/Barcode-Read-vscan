@@ -30,7 +30,7 @@ const char* symbologyName(vscan::Symbology s) {
         case Symbology::CODE93: return "Code93";
         case Symbology::EAN_UPC: return "EAN/UPC";
         case Symbology::PHARMACODE: return "Pharmacode";
-        case Symbology::POSTAL_JAPAN: return "PostalJP(TODO)";
+        case Symbology::POSTAL_JAPAN: return "PostalJP";
         case Symbology::POSTAL_IMB: return "PostalIMB(TODO)";
         default: return "Unknown";
     }

@@ -141,6 +141,13 @@ struct PipelineConfig {
     bool enableMicroPdf417 = false;
 
     /*
+     * [일본우편 고객 바코드] 기본 OFF(opt-in). 4-state라 정보가 막대 폭이
+     * 아니라 높이에 있어서 다른 1D와 코드를 공유하지 않는다
+     * (decoder_postal.hpp). 검사 심볼(mod 19)이 있어 오디코딩 위험은 낮다.
+     */
+    bool enablePostalJapan = false;
+
+    /*
      * [QR 파인더 구제] **기본 OFF (opt-in)**. 다른 모든 단계가 실패했을
      * 때만 돈다.
      *

@@ -21,6 +21,7 @@ BWIPP를 호출해서 만든다 — 생성 경로가 완전히 독립이므로 �
     python3 tools/generate_extra_symbologies.py --outdir /tmp/x --bwipp    # BWIPP 생성
     python3 tools/generate_extra_symbologies.py --outdir /tmp/m --micropdf417
     python3 tools/generate_extra_symbologies.py --outdir /tmp/c --composite
+    python3 tools/generate_extra_symbologies.py --outdir /tmp/j --japanpost
 
 ## MicroPDF417은 BWIPP가 필요하다
 
@@ -300,9 +301,64 @@ def composite_main(outdir, quiet):
     print("%d장 생성: %s" % (len(rows_out), outdir))
 
 
+JP_PAYLOADS = ["1234567", "123-4567", "1234567ABC", "9876543A12", "100-0001", "5300012K9"]
+JP_AXES = [
+    ("clean",      6, 0.0,  0.0, 1.00,   0),
+    ("mod-4",      4, 0.0,  0.0, 1.00,   0),
+    ("mod-2",      2, 0.0,  0.0, 1.00,   0),
+    ("blur-2",     6, 2.0,  0.0, 1.00,   0),
+    ("noise-20",   6, 0.0, 20.0, 1.00,   0),
+    ("noise-40",   6, 0.0, 40.0, 1.00,   0),
+    ("contrast-30", 6, 0.0, 0.0, 0.30,   0),
+    ("rot-90",     6, 0.0,  0.0, 1.00,  90),
+    ("rot-180",    6, 0.0,  0.0, 1.00, 180),
+    ("rot-270",    6, 0.0,  0.0, 1.00, 270),
+]
+
+
+def japanpost_main(outdir, quiet, seed):
+    """일본우편 시험셋: 페이로드 6종(깨끗) + 한 페이로드에 열화/회전 축."""
+    import treepoem
+    from PIL import Image
+    os.makedirs(outdir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    rows_out = []
+
+    def render(data, scale):
+        img = treepoem.generate_barcode("japanpost", data).convert("L")
+        w, h = img.size
+        return np.array(img.resize((w * scale, h * scale), Image.NEAREST))
+
+    def emit(name, a, want):
+        a = np.ascontiguousarray(np.clip(a, 0, 255).astype(np.uint8))
+        save_pgm(os.path.join(outdir, name), a)
+        rows_out.append((name, "PostalJP:" + want))
+
+    for i, d in enumerate(JP_PAYLOADS):
+        emit("jp_%02d.pgm" % i, np.pad(render(d, 6), quiet, constant_values=255), d)
+
+    D = "1234567ABC"
+    for tag, scale, blur_s, noise_s, contrast, rotdeg in JP_AXES:
+        a = np.pad(render(D, scale), quiet, constant_values=255).astype(float)
+        # 90의 배수는 회전 보간 없이 정확히 돌린다 — 4-state는 막대 끝이 생명이다
+        if rotdeg in (90, 180, 270):
+            a = np.rot90(a, rotdeg // 90)
+            a = degrade(a, rng, blur_s, noise_s, contrast, 0)
+        else:
+            a = degrade(a, rng, blur_s, noise_s, contrast, rotdeg)
+        emit("jpax_%s.pgm" % tag, a, D)
+
+    with open(os.path.join(outdir, "labels.tsv"), "w") as f:
+        for name, code in rows_out:
+            f.write("%s\t1\t%s\t-\n" % (name, code))
+    print("%d장 생성: %s" % (len(rows_out), outdir))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--japanpost", action="store_true",
+                    help="일본우편 고객 바코드 시험셋(BWIPP 필요)")
     ap.add_argument("--micropdf417", action="store_true",
                     help="MicroPDF417 시험셋(BWIPP 필요)")
     ap.add_argument("--composite", action="store_true",
@@ -317,6 +373,8 @@ def main():
         return micropdf417_main(args.outdir, args.quiet, args.seed)
     if args.composite:
         return composite_main(args.outdir, args.quiet)
+    if args.japanpost:
+        return japanpost_main(args.outdir, args.quiet, args.seed)
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.seed)
