@@ -505,6 +505,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
             return early;
         }
         if (early.size() > hits.size()) hits = std::move(early);
+
     }
 
     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
@@ -607,6 +608,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                                  std::chrono::steady_clock::now() - rgT0).count());
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:region"); return regionHits; }
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+
 
     }
 
@@ -960,6 +962,35 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                 // 다섯 단을 두니 QR이 8/8 -> 7/8로 떨어졌다 — 단이 늘수록
                 // 프레임 예산을 더 쓰고, 그러면 정작 되던 프레임이 뒤 단계에서
                 // 잘린다. 세 단이 실측상 가장 좋다.
+                /*
+                 * [먼저 국소 변동으로 코드 경계를 찾아본다]
+                 *
+                 * 아래 중앙부 사다리는 "코드가 상자 가운데 있다"는 가정에
+                 * 기대는 대용품이다. 경계를 실제로 찾을 수 있으면 그게 낫다 —
+                 * tightenToLocalVariation()은 밝기가 아니라 국소 변동을 보므로
+                 * 저대비 코드에도 듣는다(tightenToContent()는 전역 임계라
+                 * 명암 24 미만이면 아예 false다).
+                 * [[vscan-lite-lowcontrast-tighten]]
+                 */
+                if (sHits.empty() && !budgetExceeded()) {
+                    GrayImage tightC;
+                    int tcx = 0, tcy = 0;
+                    if (tightenToLocalVariation(GrayView(crop), tightC, 8, 6, 8, &tcx, &tcy)) {
+                        GrayImage tb;
+                        if (stretchContrast(GrayView(tightC), tb)) {
+                            GrayImage tsm;
+                            boxBlur3x3(GrayView(tb), tsm);
+                            for (const GrayImage* cand : {&tsm, &tb}) {
+                                if (!sHits.empty() || budgetExceeded()) break;
+                                sHits = roiPipe.processViewCore(GrayView(*cand));
+                            }
+                        }
+                        if (!sHits.empty())
+                            for (auto& r : sHits)
+                                for (auto& pt : r.symbol.position) { pt.first += tcx; pt.second += tcy; }
+                    }
+                }
+
                 for (int pct : {70, 50, 35}) {
                     if (!sHits.empty() || budgetExceeded()) break;
                     const int cw = rw * pct / 100, ch = rh * pct / 100;

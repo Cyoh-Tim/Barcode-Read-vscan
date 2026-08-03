@@ -1002,4 +1002,80 @@ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx, int* of
     return true;
 }
 
+bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx, int minRange,
+                             int marginPx, int* offX, int* offY) {
+    const int W = src.width, H = src.height;
+    if (W < 64 || H < 64 || blockPx < 4) return false;
+    const int stride = src.stride > 0 ? src.stride : W;
+    const int bx = W / blockPx, by = H / blockPx;
+    if (bx < 4 || by < 4) return false;
+
+    // 1) 칸별 (최대 - 최소)
+    std::vector<uint8_t> live(static_cast<size_t>(bx) * by, 0);
+    for (int j = 0; j < by; ++j) {
+        for (int i = 0; i < bx; ++i) {
+            int lo = 255, hi = 0;
+            for (int y = j * blockPx; y < (j + 1) * blockPx; ++y) {
+                const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+                for (int x = i * blockPx; x < (i + 1) * blockPx; ++x) {
+                    const int v = row[x];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+            }
+            live[static_cast<size_t>(j) * bx + i] = (hi - lo >= minRange) ? 1 : 0;
+        }
+    }
+
+    // 2) 가장 큰 연결 덩어리(4-연결)의 상자
+    std::vector<int> lab(live.size(), 0);
+    std::vector<int> stack;
+    int best = 0, bx0 = 0, by0 = 0, bx1 = 0, by1 = 0, cur = 0;
+    for (int j = 0; j < by; ++j) {
+        for (int i = 0; i < bx; ++i) {
+            const size_t k = static_cast<size_t>(j) * bx + i;
+            if (!live[k] || lab[k]) continue;
+            ++cur;
+            lab[k] = cur;
+            stack.push_back(static_cast<int>(k));
+            int n = 0, x0 = i, x1 = i, y0 = j, y1 = j;
+            while (!stack.empty()) {
+                const int c = stack.back(); stack.pop_back();
+                const int ci = c % bx, cj = c / bx;
+                ++n;
+                if (ci < x0) x0 = ci; if (ci > x1) x1 = ci;
+                if (cj < y0) y0 = cj; if (cj > y1) y1 = cj;
+                const int di[4] = {-1, 1, 0, 0}, dj[4] = {0, 0, -1, 1};
+                for (int d = 0; d < 4; ++d) {
+                    const int ni = ci + di[d], nj = cj + dj[d];
+                    if (ni < 0 || ni >= bx || nj < 0 || nj >= by) continue;
+                    const size_t nk = static_cast<size_t>(nj) * bx + ni;
+                    if (live[nk] && !lab[nk]) { lab[nk] = cur; stack.push_back(static_cast<int>(nk)); }
+                }
+            }
+            if (n > best) { best = n; bx0 = x0; bx1 = x1; by0 = y0; by1 = y1; }
+        }
+    }
+    if (best < 4) return false;
+
+    int x0 = std::max(0, bx0 * blockPx - marginPx);
+    int y0 = std::max(0, by0 * blockPx - marginPx);
+    int x1 = std::min(W - 1, (bx1 + 1) * blockPx - 1 + marginPx);
+    int y1 = std::min(H - 1, (by1 + 1) * blockPx - 1 + marginPx);
+    const int tw = x1 - x0 + 1, th = y1 - y0 + 1;
+    if (tw < 32 || th < 32) return false;
+    if (static_cast<double>(tw) * th > 0.80 * static_cast<double>(W) * H) return false;
+
+    out.width = tw;
+    out.height = th;
+    out.pixels.resize(static_cast<size_t>(tw) * th);
+    for (int y = 0; y < th; ++y)
+        std::memcpy(out.pixels.data() + static_cast<size_t>(y) * tw,
+                    src.pixels + static_cast<size_t>(y0 + y) * stride + x0, tw);
+    if (offX) *offX = x0;
+    if (offY) *offY = y0;
+    return true;
+}
+
 } // namespace vscan
+

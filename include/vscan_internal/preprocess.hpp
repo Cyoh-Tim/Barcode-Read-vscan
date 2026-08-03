@@ -361,6 +361,28 @@ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24,
                       int* offX = nullptr, int* offY = nullptr);
 
 /*
+ * [저대비 코드 경계 찾기 — tightenToContent()가 안 듣는 자리]
+ *
+ * `tightenToContent()`는 크롭 전체의 min/max로 임계를 잡는 전역 방식이라
+ * **저대비 코드에는 원리적으로 안 듣는다** — 명암 폭이 24 미만이면 아예
+ * false를 돌려주고, 크롭에 고대비 장면이 섞여 있으면 그 장면 쪽으로
+ * 상자가 잡힌다.
+ *
+ * 여기서는 밝기가 아니라 **국소 변동**을 본다. blockPx 격자로 나눠
+ * 각 칸의 (최대 - 최소)를 재고, 그 값이 minRange 이상인 칸들 중 가장 큰
+ * 연결 덩어리의 상자를 돌려준다. 코드는 모듈 경계마다 변동이 있으므로
+ * 대비가 낮아도 "변동이 있는 칸"으로 남는다 — 실측(DataMatrix module 6,
+ * 대비 0.05): 코드 자체의 변조가 13계조뿐이지만 배경(평탄한 종이)은
+ * 3계조라 갈린다.
+ *
+ * offX/offY에 잘라낸 위치를 돌려준다(좌표 보정용).
+ * [[vscan-lite-lowcontrast-tighten]]
+ */
+bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx = 8,
+                             int minRange = 6, int marginPx = 8,
+                             int* offX = nullptr, int* offY = nullptr);
+
+/*
  * 정수배 확대(쌍선형) + 언샤프 마스킹.
  *
  * 용도는 **작은 코드 구제**다. 모듈이 2px 안팎이면 인쇄/광학 흐림이
