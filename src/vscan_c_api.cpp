@@ -112,6 +112,10 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->disable_region_rescue) pcfg.enableRegionRescue = false;
         if (cfg->enable_qr_finder_rescue) pcfg.enableQrFinderRescue = true;
         if (cfg->disable_auto_denoise) pcfg.autoDenoise = 0;
+        // 0/음수는 "기본값 유지"다. 0을 "끔"으로 읽으면 구조체를 0으로
+        // 초기화한 기존 호출자가 조용히 기능을 잃는다.
+        if (cfg->auto_denoise_strong_noise > 0)
+            pcfg.autoDenoiseStrongNoise = cfg->auto_denoise_strong_noise;
         if (cfg->enable_industrial_2of5) pcfg.enableIndustrial2of5 = true;
         if (cfg->enable_coop_2of5) pcfg.enableCoop2of5 = true;
         if (cfg->enable_pharmacode) pcfg.enablePharmacode = true;

@@ -410,6 +410,16 @@ GrayView Pipeline::preprocessFrame(const GrayView& image) {
     if (noise < cfg_.autoDenoiseNoise) return image;
 
     boxBlur3x3(image, denoiseBuf_);
+    // [두 번째 겹] 노이즈가 아주 심하면 한 겹으로는 모자란다. 그 두 번째
+    // 겹은 원래 구제 체인 끝의 dnAgain이 하던 일인데, 거기까지 가려면
+    // 실패가 예정된 단계들을 전부 치러야 한다. 같은 판단을 같은 임계로
+    // 여기서 미리 한다. 근거와 실측표는 pipeline.hpp의
+    // autoDenoiseStrongNoise 주석. [[vscan-lite-pre-denoise-strong]]
+    if (cfg_.autoDenoiseStrongNoise > 0 && noise >= cfg_.autoDenoiseStrongNoise) {
+        GrayImage second;
+        boxBlur3x3(GrayView(denoiseBuf_), second);
+        denoiseBuf_ = std::move(second);
+    }
     preDenoised_ = true;
     return GrayView(denoiseBuf_);
 }

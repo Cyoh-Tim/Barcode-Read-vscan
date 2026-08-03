@@ -359,6 +359,10 @@ int main(int argc, char** argv) {
             c.frame_budget_max_ms = getenv("VSCAN_BUDGETMAX") ? atoi(getenv("VSCAN_BUDGETMAX")) : 0;
             c.max_frame_ms = getenv("VSCAN_MAXFRAME") ? atoi(getenv("VSCAN_MAXFRAME")) : 0;
             c.min_line_count = getenv("VSCAN_MINLINES") ? atoi(getenv("VSCAN_MINLINES")) : 0;
+            // 선(先) 디노이즈를 떼어내고 재기 위한 손잡이. 저조도에서
+            // 이게 실제로 일하고 있는지는 껐을 때의 차이로만 알 수 있다.
+            c.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
+            c.auto_denoise_strong_noise = getenv("VSCAN_STRONGDN") ? atof(getenv("VSCAN_STRONGDN")) : -1;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) c.pharmacode_min_bars = atoi(mb);
             c.disable_1d_deskew_rescue = noDeskew;
             c.disable_blank_frame_skip = noBlankSkip;
@@ -397,6 +401,8 @@ int main(int argc, char** argv) {
             cfg.enable_postal_imb     = getenv("VSCAN_IMB") != nullptr;
             cfg.enable_dotcode       = getenv("VSCAN_DOTCODE") != nullptr;
             cfg.validate_itf_checksum = getenv("VSCAN_ITFSUM") != nullptr;
+            cfg.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
+            cfg.auto_denoise_strong_noise = getenv("VSCAN_STRONGDN") ? atof(getenv("VSCAN_STRONGDN")) : -1;
             cfg.frame_budget_max_ms = getenv("VSCAN_BUDGETMAX") ? atoi(getenv("VSCAN_BUDGETMAX")) : 0;
             cfg.max_frame_ms = getenv("VSCAN_MAXFRAME") ? atoi(getenv("VSCAN_MAXFRAME")) : 0;
             cfg.min_line_count = getenv("VSCAN_MINLINES") ? atoi(getenv("VSCAN_MINLINES")) : 0;

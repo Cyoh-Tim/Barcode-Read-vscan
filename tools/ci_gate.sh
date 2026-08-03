@@ -174,6 +174,32 @@ if [ "$FINE_FAIL" = 1 ]; then
   exit 1
 fi
 
+# [3.7] 저조도 — 밝기가 아니라 **SNR**이 축이다
+#
+# 기존 저대비 축(17/18번)은 "종이는 밝은데 잉크가 연한" 것이라 저조도와
+# 물리가 다르다. 카메라는 어두우면 게인을 올려 밝기를 되돌리므로 실기
+# 프레임은 **어둡지 않고 거칠다** — 노이즈만 커진다(§3.61).
+#
+# 여기서 지키는 것은 코드 수와 **평균 시간** 둘 다다. 이 축의 실패
+# 프레임은 폴백 체인을 끝까지 갈아먹어서, 시간이 나빠지는 것 자체가
+# 회귀다(사용자 요구가 실패 프레임 지연 상한이다).
+echo ">> [3.7/5] 저조도 SNR 스윕 (모듈 2/3/4/6px x 노출 6단)"
+LL_DIR="$WORK/lowlight"
+python3 "$ROOT/tools/generate_lowlight.py" --outdir "$LL_DIR" --seed 7 >/dev/null 2>&1
+LL_OUT=$("$VERIFY" "$LL_DIR" --paths 2stage --reps 1 --quiet 2>/dev/null | grep -E "^2stage" | tr -s ' ')
+LL_CODES=$(echo "$LL_OUT" | cut -d' ' -f3 | cut -d/ -f1)
+LL_MISDEC=$(echo "$LL_OUT" | cut -d' ' -f5)
+LL_MEAN=$(echo "$LL_OUT" | cut -d' ' -f7)
+echo "   코드 ${LL_CODES:-?}/48 (하한 ${LL_MIN_CODES:-23}) / 평균 ${LL_MEAN:-?}ms (상한 ${LL_MAX_MEAN:-170}) / 오디코딩 ${LL_MISDEC:-?}"
+if [ "${LL_CODES:-0}" -lt "${LL_MIN_CODES:-23}" ] || [ "${LL_MISDEC:-999}" -gt 0 ]; then
+  echo "!! 저조도 축에서 검출이 하한 미만이거나 오디코딩이 생겼다"
+  exit 1
+fi
+if awk -v a="${LL_MEAN:-999}" -v m="${LL_MAX_MEAN:-170}" 'BEGIN{exit !(a>m)}'; then
+  echo "!! 저조도 실패 프레임의 시간이 상한을 넘었다 — 선 디노이즈가 죽었는지 볼 것"
+  exit 1
+fi
+
 echo ">> [4/5] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
 python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
         --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
