@@ -169,6 +169,11 @@ if(VSCAN_BUILD_EXAMPLE)
   # tools/vscan_decode_file.cpp 상단 주석 참고 (Zxing/Zbar 버전 충돌 방지).
   add_executable(vscan_decode_file tools/vscan_decode_file.cpp)
   target_link_libraries(vscan_decode_file PRIVATE vscan)
+
+  # 현장 자가진단. 정답표 없이 현장 프레임만으로 "어디서 막히는지 +
+  # 어느 손잡이를 돌릴지"를 뽑는다 — tools/field_diagnose.cpp 상단 주석 참고.
+  add_executable(field_diagnose tools/field_diagnose.cpp)
+  target_link_libraries(field_diagnose PRIVATE vscan)
 endif()
 
 # ---------------------------------------------------------------------------
