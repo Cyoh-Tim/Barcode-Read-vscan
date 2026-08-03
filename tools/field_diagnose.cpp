@@ -156,6 +156,8 @@ void cfgNoTileFb(vscan_config_t& c) { c.disable_tile_fallback = 1; }
 void cfgQrFinder(vscan_config_t& c) { c.enable_qr_finder_rescue = 1; }
 void cfgItfSum(vscan_config_t& c) { c.validate_itf_checksum = 1; }
 void cfgLines6(vscan_config_t& c) { c.min_line_count = 6; }
+void cfgDeadline100(vscan_config_t& c) { c.max_frame_ms = 100; }
+void cfgDeadline300(vscan_config_t& c) { c.max_frame_ms = 300; }
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -166,6 +168,10 @@ const Variant kVariants[] = {
     {"QR파인더 구제", "작은 QR이 여럿 흩뿌려진 프레임용 (기본 OFF)", false, cfgQrFinder},
     {"ITF 체크섬 강제", "ITF 유령을 막는다. 체크디짓 없는 ITF는 버려진다", false, cfgItfSum},
     {"스캔라인 6", "1D 부분 스캔 유령을 줄인다. 얇게 잡히는 정상 코드도 같이 잃는다", false, cfgLines6},
+    // [지연 상한] 실기에서 실패 프레임이 5~6초까지 가는 것을 잡는 손잡이.
+    // 2단계 경로로 재야 뜻이 있다(현장 통합이 대개 그쪽이다).
+    {"마감 300ms", "max_frame_ms=300. 실패 프레임의 꼬리를 자른다", true, cfgDeadline300},
+    {"마감 100ms", "max_frame_ms=100. 더 세게 자른다 — 검출을 얼마나 잃는지 보라", true, cfgDeadline100},
 };
 constexpr int kNumVariants = static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
 
@@ -178,6 +184,7 @@ struct Found {
 struct Run {
     std::vector<std::vector<Found>> perFrame;
     double totalMs = 0;
+    double worstMs = 0;   // 큐가 쌓이는지는 평균이 아니라 **꼬리**가 정한다
     int codes = 0;
     int framesWithCode = 0;
 };
@@ -218,6 +225,7 @@ Run runVariant(const Variant& v, const std::vector<Frame>& frames, int reps) {
             vscan_free_result(res);
         }
         r.totalMs += best;
+        if (best > r.worstMs) r.worstMs = best;
         r.codes += static_cast<int>(r.perFrame[i].size());
         if (!r.perFrame[i].empty()) ++r.framesWithCode;
     }
@@ -300,15 +308,15 @@ int main(int argc, char** argv) {
     std::printf("\n[2] 설정별 결과\n");
     // 한글은 printf의 폭 지정이 바이트 기준이라 정렬이 깨진다. 이름을 줄
     // 머리에 따로 찍고 수치만 정렬한다.
-    std::printf("  (검출프레임 / 코드 / 평균ms)\n");
+    std::printf("  (검출프레임 / 코드 / 평균ms / 최대ms)\n");
     std::vector<Run> runs;
     runs.reserve(kNumVariants);
     for (int v = 0; v < kNumVariants; ++v) {
         runs.push_back(runVariant(kVariants[v], frames, reps));
         const Run& r = runs.back();
-        std::printf("  %s\n      %d/%zu 프레임, 코드 %d개, 평균 %.1fms\n      %s\n",
+        std::printf("  %s\n      %d/%zu 프레임, 코드 %d개, 평균 %.1fms, **최대 %.1fms**\n      %s\n",
                     kVariants[v].name, r.framesWithCode, frames.size(), r.codes,
-                    r.totalMs / frames.size(), kVariants[v].why);
+                    r.totalMs / frames.size(), r.worstMs, kVariants[v].why);
     }
 
     // ---- 3) 설정 간 합의 ---------------------------------------------------
@@ -407,6 +415,20 @@ int main(int argc, char** argv) {
                     "     검출이 같은데 평균이 %.0f -> %.0fms다. 단, 타일 창보다 큰\n"
                     "     코드가 들어오는 배치에서는 그 코드를 통째로 잃는다.\n",
                     ++n, base.totalMs / frames.size(), noFb.totalMs / frames.size());
+
+    // [지연] 큐에 쌓이는지는 평균이 아니라 최대가 정한다.
+    if (base.worstMs > 300) {
+        const Run& d300 = runs[6];
+        const Run& d100 = runs[7];
+        std::printf("  %d) **가장 느린 프레임이 %.0fms다.** 컨베이어처럼 프레임이 계속\n"
+                    "     들어오는 배치면 이게 큐에 쌓인다. max_frame_ms로 자를 수 있다:\n"
+                    "       max_frame_ms=300 -> 코드 %d개, 최대 %.0fms\n"
+                    "       max_frame_ms=100 -> 코드 %d개, 최대 %.0fms\n"
+                    "     설정값의 2배쯤까지 넘치는 것이 정상이다(마감을 단계 사이에서만\n"
+                    "     보므로 시작된 단계는 끝까지 간다). 진짜 상한이 필요하면\n"
+                    "     **오래된 프레임을 버리는 큐 정책**이 호출 쪽에 같이 있어야 한다.\n",
+                    ++n, base.worstMs, d300.codes, d300.worstMs, d100.codes, d100.worstMs);
+    }
 
     if (base.framesWithCode < static_cast<int>(frames.size()))
         std::printf("  %d) 검출 실패 프레임이 %zu장 있다. `VSPROF=1`을 주고 그 프레임만\n"

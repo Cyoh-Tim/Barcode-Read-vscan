@@ -356,6 +356,8 @@ int main(int argc, char** argv) {
             c.enable_postal_imb     = getenv("VSCAN_IMB") != nullptr;
             c.enable_dotcode       = getenv("VSCAN_DOTCODE") != nullptr;
             c.validate_itf_checksum = getenv("VSCAN_ITFSUM") != nullptr;
+            c.frame_budget_max_ms = getenv("VSCAN_BUDGETMAX") ? atoi(getenv("VSCAN_BUDGETMAX")) : 0;
+            c.max_frame_ms = getenv("VSCAN_MAXFRAME") ? atoi(getenv("VSCAN_MAXFRAME")) : 0;
             c.min_line_count = getenv("VSCAN_MINLINES") ? atoi(getenv("VSCAN_MINLINES")) : 0;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) c.pharmacode_min_bars = atoi(mb);
             c.disable_1d_deskew_rescue = noDeskew;
@@ -395,6 +397,8 @@ int main(int argc, char** argv) {
             cfg.enable_postal_imb     = getenv("VSCAN_IMB") != nullptr;
             cfg.enable_dotcode       = getenv("VSCAN_DOTCODE") != nullptr;
             cfg.validate_itf_checksum = getenv("VSCAN_ITFSUM") != nullptr;
+            cfg.frame_budget_max_ms = getenv("VSCAN_BUDGETMAX") ? atoi(getenv("VSCAN_BUDGETMAX")) : 0;
+            cfg.max_frame_ms = getenv("VSCAN_MAXFRAME") ? atoi(getenv("VSCAN_MAXFRAME")) : 0;
             cfg.min_line_count = getenv("VSCAN_MINLINES") ? atoi(getenv("VSCAN_MINLINES")) : 0;
             if (const char* mb = getenv("VSCAN_PHARMA_MINBARS")) cfg.pharmacode_min_bars = atoi(mb);
             cfg.disable_1d_deskew_rescue = noDeskew;

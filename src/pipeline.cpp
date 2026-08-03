@@ -103,8 +103,12 @@ Pipeline::BudgetGuard::~BudgetGuard() {
 // 있으면 **더 이른 쪽**을 쓴다.
 void Pipeline::armSelfBudget(double firstPassMs) {
     if (cfg_.frameBudgetXFirstPass <= 0.0f || firstPassMs <= 0.0) return;
-    const double total = std::max(firstPassMs * cfg_.frameBudgetXFirstPass,
-                                  static_cast<double>(cfg_.frameBudgetFloorMs));
+    double total = std::max(firstPassMs * cfg_.frameBudgetXFirstPass,
+                            static_cast<double>(cfg_.frameBudgetFloorMs));
+    // [절대 상한] 상대값만 쓰면 느린 하드웨어에서 예산이 같이 부푼다 —
+    // 근거와 실기 수치는 pipeline.hpp의 frameBudgetMaxMs 주석.
+    if (cfg_.frameBudgetMaxMs > 0)
+        total = std::min(total, static_cast<double>(cfg_.frameBudgetMaxMs));
     const auto self = std::chrono::steady_clock::now() +
                       std::chrono::microseconds(static_cast<long long>(
                           std::max(0.0, total - firstPassMs) * 1000.0));
@@ -116,6 +120,8 @@ void Pipeline::armSelfBudget(double firstPassMs) {
     if (cfg_.frameBudgetFirstRegionCapMs > 0)
         totalFirst = std::min(totalFirst,
                               firstPassMs + static_cast<double>(cfg_.frameBudgetFirstRegionCapMs));
+    if (cfg_.frameBudgetMaxMs > 0)
+        totalFirst = std::min(totalFirst, static_cast<double>(cfg_.frameBudgetMaxMs));
     deadlineFirst_ = std::chrono::steady_clock::now() +
                      std::chrono::microseconds(static_cast<long long>(
                          std::max(0.0, totalFirst - firstPassMs) * 1000.0));

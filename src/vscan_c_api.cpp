@@ -123,6 +123,10 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->disable_tile_fallback) pcfg.disableTileFallback = true;
         if (cfg->validate_itf_checksum) pcfg.validateITFCheckSum = true;
         if (cfg->min_line_count > 0) pcfg.minLineCount = cfg->min_line_count;
+        // 0은 "상한 없음"이라는 뜻이 있어야 하므로, C 구조체의 0(기본 초기화)과
+        // 구분이 안 된다. 음수를 "상한 없음"으로 쓰고 0은 기본값 유지로 둔다.
+        if (cfg->frame_budget_max_ms != 0)
+            pcfg.frameBudgetMaxMs = cfg->frame_budget_max_ms < 0 ? 0 : cfg->frame_budget_max_ms;
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }
