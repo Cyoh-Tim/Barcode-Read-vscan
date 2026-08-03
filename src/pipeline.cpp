@@ -84,6 +84,8 @@ Pipeline::Pipeline(PipelineConfig cfg) : cfg_(cfg) {
 // 재사용하는 호출자(연속 프레임)에서는 **두 번째 프레임부터 이미 지난
 // 마감을 들고 시작**해서 모든 구제가 즉시 잘렸다. 실측으로 40종이 한 장씩
 // 따로 돌리면 40/40인데 한 번에 돌리면 36/40이었다.
+namespace { void overArm(std::chrono::steady_clock::time_point dl, bool on); void overDump(); }
+
 Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
     if (p->deadlineOwned_) return;              // 중첩 호출(ROI 서브 파이프라인 등)
     p->deadlineOwned_ = true;
@@ -94,9 +96,13 @@ Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
                        std::chrono::milliseconds(p->cfg_.maxFrameMs);
         p->deadlineActive_ = true;
     }
+    overArm(p->deadline_, p->deadlineActive_);
 }
 Pipeline::BudgetGuard::~BudgetGuard() {
-    if (owner) { p->deadlineActive_ = false; p->deadlineOwned_ = false; p->firstRectActive_ = false; }
+    if (owner) {
+        overDump();
+        p->deadlineActive_ = false; p->deadlineOwned_ = false; p->firstRectActive_ = false;
+    }
 }
 
 // 첫 패스 시간을 재고 나서 마감을 잡는다. 이미 maxFrameMs로 잡힌 마감이
@@ -113,6 +119,7 @@ void Pipeline::armSelfBudget(double firstPassMs) {
                       std::chrono::microseconds(static_cast<long long>(
                           std::max(0.0, total - firstPassMs) * 1000.0));
     if (!deadlineActive_ || self < deadline_) { deadline_ = self; deadlineActive_ = true; }
+    overArm(deadline_, deadlineActive_);
     // 첫 영역용 마감은 더 멀리 잡는다(위 frameBudgetXFirstRegion 주석).
     double totalFirst = std::max(firstPassMs * std::max(cfg_.frameBudgetXFirstRegion,
                                                         cfg_.frameBudgetXFirstPass),
@@ -148,14 +155,50 @@ struct Prof {
     }
 };
 Prof& prof() { static thread_local Prof p{getenv("VSPROF") != nullptr, {}}; return p; }
+
+// [넘침 계측] VSOVER=1 이면 **마감을 넘긴 뒤에도 돌던 단계**를 뱉는다.
+// maxFrameMs가 설정값의 2배 넘게 넘치는 이유를 찾으려면 "얼마나 넘쳤나"가
+// 아니라 "누가 넘겼나"를 알아야 한다. 마감을 단계 사이에서만 보므로,
+// 마감 이후에 시작했거나 마감을 걸쳐 끝난 단계가 곧 범인이다.
+struct Over {
+    bool on = false;
+    bool active = false;
+    std::chrono::steady_clock::time_point dl;
+    std::vector<std::pair<const char*, double>> rows;
+    void note(const char* k, std::chrono::steady_clock::time_point t0,
+              std::chrono::steady_clock::time_point t1) {
+        if (!on || !active || t1 <= dl) return;
+        // 마감 이후 구간만 센다(마감 전에 시작했으면 걸친 부분만).
+        const auto from = t0 > dl ? t0 : dl;
+        const double ms = std::chrono::duration<double, std::milli>(t1 - from).count();
+        for (auto& r : rows) if (r.first == k) { r.second += ms; return; }
+        rows.push_back({k, ms});
+    }
+    void dump() {
+        if (!on || rows.empty()) return;
+        double t = 0; for (auto& r : rows) t += r.second;
+        fprintf(stderr, "[over] 마감초과 %.1fms |", t);
+        for (auto& r : rows) fprintf(stderr, " %s=%.1f", r.first, r.second);
+        fprintf(stderr, "\n");
+        rows.clear();
+    }
+};
+Over& over() { static thread_local Over o{getenv("VSOVER") != nullptr, false, {}, {}}; return o; }
+void overArm(std::chrono::steady_clock::time_point dl, bool on) {
+    if (!over().on) return;
+    over().dl = dl; over().active = on;
+}
+void overDump() { over().dump(); over().active = false; }
+
 struct Stage {
     const char* key;
     std::chrono::steady_clock::time_point t0;
     explicit Stage(const char* k) : key(k), t0(std::chrono::steady_clock::now()) {}
     ~Stage() {
-        if (!prof().on) return;
-        prof().add(key, std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - t0).count());
+        if (!prof().on && !over().on) return;
+        const auto t1 = std::chrono::steady_clock::now();
+        over().note(key, t0, t1);
+        prof().add(key, std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
 };
 }  // namespace
@@ -465,6 +508,13 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
      * 코드가 타일 창(프레임높이/스레드수 + overlap)보다 작다는 것을 아는
      * 배치라면 꺼서 17%를 가져가면 된다.
      */
+    // [마감 검사를 여기 넣어봤고 값을 못 했다 — 2026-08-03]
+    // VSOVER=1로 재면 마감 초과분의 대부분이 이 단계로 보인다(38~47ms).
+    // 그런데 여기서 건너뛰어도 **프레임이 끝나지 않는다** — 빈손으로
+    // 아래 구제 체인에 떨어지고 거기서 같은 시간을 쓴다. 실측(200장,
+    // reps 3, maxFrameMs=100): 최대 147.5 -> 140.4ms, 평균 37.9 -> 38.2로
+    // 측정 노이즈 수준이다. 넘침을 줄이려면 단계를 건너뛰는 게 아니라
+    // **일 자체를 줄여야 한다**(§3.62).
     if (!cfg_.disableTileFallback) {
         Stage st("tilefb");
         auto big = dedup(decodeTile(view, 0));

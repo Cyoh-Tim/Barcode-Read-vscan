@@ -158,6 +158,10 @@ void cfgItfSum(vscan_config_t& c) { c.validate_itf_checksum = 1; }
 void cfgLines6(vscan_config_t& c) { c.min_line_count = 6; }
 void cfgDeadline100(vscan_config_t& c) { c.max_frame_ms = 100; }
 void cfgDeadline300(vscan_config_t& c) { c.max_frame_ms = 300; }
+// [심볼로지를 좁힌다] 지연을 줄이는 가장 큰 손잡이다 — 마감처럼 결과를
+// 잘라서 버는 게 아니라 **안 할 일을 안 하게** 해서 번다. 근거는 §3.62.
+void cfgQrOnly(vscan_config_t& c) { c.symbology_mask = VSCAN_FMT_QR | VSCAN_FMT_MICRO_QR; }
+void cfgQrOnlyDl(vscan_config_t& c) { cfgQrOnly(c); c.max_frame_ms = 100; }
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -172,6 +176,13 @@ const Variant kVariants[] = {
     // 2단계 경로로 재야 뜻이 있다(현장 통합이 대개 그쪽이다).
     {"마감 300ms", "max_frame_ms=300. 실패 프레임의 꼬리를 자른다", true, cfgDeadline300},
     {"마감 100ms", "max_frame_ms=100. 더 세게 자른다 — 검출을 얼마나 잃는지 보라", true, cfgDeadline100},
+    // [심볼로지 좁히기] 마감보다 먼저 볼 것. 마감은 검출을 잘라서 시간을
+    // 사지만 이건 **공짜에 가깝다** — 안 쓰는 심볼로지를 찾느라 쓰던
+    // 시간이 통째로 없어진다. 프레임에 QR만 있다면 아래 두 줄의 코드 수가
+    // "기본"과 같아야 하고, 시간만 크게 줄어야 한다.
+    {"QR/MicroQR만", "symbology_mask로 심볼로지를 좁힌다. 코드 수가 기본과 같은데"
+  " 시간만 줄면 그만큼이 순수 낭비였다는 뜻이다", true, cfgQrOnly},
+    {"QR/MicroQR만 + 마감100", "위 둘을 같이. 지연을 가장 세게 묶는 조합", true, cfgQrOnlyDl},
 };
 constexpr int kNumVariants = static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
 
@@ -392,7 +403,7 @@ int main(int argc, char** argv) {
     if (!syms.empty() && syms.size() <= 3) {
         std::printf("  %d) **symbology_mask를 좁힐 것.** 이 프레임들에는 ", ++n);
         for (int s : syms) std::printf("%s ", symName(s));
-        std::printf("만 나온다.\n     실측상 2.3~2.9배 빨라지고 검출 손실은 0이었다.\n");
+        std::printf("만 나온다. 아래에 이 프레임들에서 실제로 잰 값이 있다.\n");
     }
 
     if (syms.count(12))
@@ -415,6 +426,26 @@ int main(int argc, char** argv) {
                     "     검출이 같은데 평균이 %.0f -> %.0fms다. 단, 타일 창보다 큰\n"
                     "     코드가 들어오는 배치에서는 그 코드를 통째로 잃는다.\n",
                     ++n, base.totalMs / frames.size(), noFb.totalMs / frames.size());
+
+    // [심볼로지 좁히기] 마감보다 **먼저** 권한다. 마감은 검출을 잘라서
+    // 시간을 사지만 이건 안 쓰는 심볼로지를 찾던 시간이 통째로 없어지는
+    // 것이라 대가가 거의 없다. 다만 그 판단은 우리가 못 한다 — 이 프레임에
+    // QR만 있는지는 배치가 안다. 그래서 "코드 수가 같은가"를 조건으로 건다.
+    {
+        const Run& qr = runs[8];
+        const double baseMean = base.totalMs / frames.size();
+        const double qrMean = qr.totalMs / frames.size();
+        if (qr.codes >= base.codes && qrMean < baseMean * 0.8) {
+            std::printf("  %d) **QR/MicroQR로 좁히면 코드는 %d개로 같은데 평균이\n"
+                        "     %.0f -> %.0fms, 최대가 %.0f -> %.0fms다.** 줄어든 만큼이\n"
+                        "     안 쓰는 심볼로지를 찾던 순수 낭비였다는 뜻이다.\n"
+                        "     **마감(max_frame_ms)보다 이걸 먼저 볼 것** — 마감은 검출을\n"
+                        "     잘라서 시간을 사지만 이건 대가가 없다.\n"
+                        "     단, 이 배치에 정말 그 심볼로지만 들어오는지는 당신이 확인해야\n"
+                        "     한다. 다른 것이 섞이면 그건 통째로 안 읽힌다.\n",
+                        ++n, qr.codes, baseMean, qrMean, base.worstMs, qr.worstMs);
+        }
+    }
 
     // [지연] 큐에 쌓이는지는 평균이 아니라 최대가 정한다.
     if (base.worstMs > 300) {
