@@ -1006,9 +1006,21 @@ bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx, i
                              int marginPx, int* offX, int* offY) {
     const int W = src.width, H = src.height;
     if (W < 64 || H < 64 || blockPx < 4) return false;
-    const int stride = src.stride > 0 ? src.stride : W;
     const int bx = W / blockPx, by = H / blockPx;
     if (bx < 4 || by < 4) return false;
+
+    /*
+     * [먼저 뭉갠 뒤에 잰다]
+     * 노이즈만으로도 8x8 블록의 (최대-최소)가 4시그마쯤 나온다 — 시그마 3이면
+     * 12다. 저대비 코드의 변조가 13계조인 상황에서는 둘이 구분이 안 되고,
+     * 결국 크롭 전체가 "변동 있는 칸"이 돼서 상자를 못 좁힌다(실측: 임계
+     * 3/4/6/8 전부 실패). 3x3 평균을 한 번 먹이면 노이즈 시그마는 1/3로
+     * 줄고 6px 모듈은 거의 그대로 남아서 갈린다.
+     */
+    GrayImage sm;
+    boxBlur3x3(src, sm);
+    const uint8_t* base = sm.pixels.data();
+    const int stride = sm.width;
 
     // 1) 칸별 (최대 - 최소)
     std::vector<uint8_t> live(static_cast<size_t>(bx) * by, 0);
@@ -1016,7 +1028,7 @@ bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx, i
         for (int i = 0; i < bx; ++i) {
             int lo = 255, hi = 0;
             for (int y = j * blockPx; y < (j + 1) * blockPx; ++y) {
-                const uint8_t* __restrict row = src.pixels + static_cast<size_t>(y) * stride;
+                const uint8_t* __restrict row = base + static_cast<size_t>(y) * stride;
                 for (int x = i * blockPx; x < (i + 1) * blockPx; ++x) {
                     const int v = row[x];
                     if (v < lo) lo = v;
@@ -1069,9 +1081,11 @@ bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx, i
     out.width = tw;
     out.height = th;
     out.pixels.resize(static_cast<size_t>(tw) * th);
+    // 잘라내는 것은 **원본**이다 (뭉갠 판본은 경계 찾기에만 썼다).
+    const int srcStride = src.stride > 0 ? src.stride : W;
     for (int y = 0; y < th; ++y)
         std::memcpy(out.pixels.data() + static_cast<size_t>(y) * tw,
-                    src.pixels + static_cast<size_t>(y0 + y) * stride + x0, tw);
+                    src.pixels + static_cast<size_t>(y0 + y) * srcStride + x0, tw);
     if (offX) *offX = x0;
     if (offY) *offY = y0;
     return true;

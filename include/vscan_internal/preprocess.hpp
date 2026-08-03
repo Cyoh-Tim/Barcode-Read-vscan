@@ -379,7 +379,7 @@ bool tightenToContent(const GrayView& src, GrayImage& out, int marginPx = 24,
  * [[vscan-lite-lowcontrast-tighten]]
  */
 bool tightenToLocalVariation(const GrayView& src, GrayImage& out, int blockPx = 8,
-                             int minRange = 6, int marginPx = 8,
+                             int minRange = 8, int marginPx = 8,
                              int* offX = nullptr, int* offY = nullptr);
 
 /*

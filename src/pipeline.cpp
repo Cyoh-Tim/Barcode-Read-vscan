@@ -671,6 +671,57 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
     // 코드가 12개면 영역 구제가 need를 채울 방법이 원천적으로 없다.
     const int maxRegions = std::min(16, std::max(std::max(1, cfg_.regionRescueMaxRegions), need));
     auto regions = findCodeRegions(locateView, maxRegions, 32, 4, energyRatio);
+
+    /*
+     * [로케이터 두 번째 패스 — 저대비 코드는 상대 랭킹에 묻힌다]
+     *
+     * findCodeRegions()는 **프레임 최대 타일 에너지 대비** 20% 이상만 후보로
+     * 본다. 고대비 물체가 하나라도 있으면 저대비 코드는 그 상대 판정에 묻혀
+     * 후보에 아예 안 들어온다. 실측(DataMatrix module 6, 대비 0.05): 코드는
+     * (462,720)에 있는데 첫 패스가 낸 영역은 프레임 전체와 엉뚱한 우상단
+     * 256x256 둘뿐이다.
+     *
+     * 임계를 낮추는 것으로는 안 된다 — 0.06으로 내리면 배경까지 한 덩어리가
+     * 돼서 프레임 전체 상자 하나만 나온다. 문제는 임계가 아니라 **신호**다.
+     * 국소 평균을 빼고 4배로 세운 사본에서 찾으면 정확한 상자
+     * (384,640)-(640,896)가 나온다.
+     *
+     * **구제 단이 아니라 여기(후보 목록)에 넣는 것이 핵심이다.** 별도 단으로
+     * 두면 자기 보정 예산(§3.47)이 벽시계 기준이라 그 자리에 닿기도 전에
+     * 잘린다 — 실제로 그렇게 짰다가 프로파일에 아예 안 찍히는 것을 봤다.
+     * 여기에 넣으면 로케이트 비용(약 4ms + 블러)만 내고 기존 크롭 경로가
+     * 그대로 받는다. 사본은 **찾기 전용**이고 크롭은 원본에서 뜬다.
+     * [[vscan-lite-locate-second-pass]]
+     */
+    if (cfg_.enableFlattenedLocate && &locateView == &decodeView) {
+        GrayImage mu;
+        boxBlur(locateView, 16, mu);
+        GrayImage eq;
+        eq.width = locateView.width; eq.height = locateView.height;
+        eq.pixels.resize(static_cast<size_t>(eq.width) * eq.height);
+        for (int y = 0; y < eq.height; ++y) {
+            const uint8_t* src = locateView.pixels + static_cast<size_t>(y) * locateView.stride;
+            const uint8_t* m = mu.pixels.data() + static_cast<size_t>(y) * mu.width;
+            uint8_t* d = eq.pixels.data() + static_cast<size_t>(y) * eq.width;
+            for (int x = 0; x < eq.width; ++x) {
+                const int v = 128 + 4 * (static_cast<int>(src[x]) - static_cast<int>(m[x]));
+                d[x] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+            }
+        }
+        auto extra = findCodeRegions(GrayView(eq), maxRegions, 32, 4, energyRatio);
+        for (const auto& e : extra) {
+            const double ea = static_cast<double>(e.bbox.x1 - e.bbox.x0) * (e.bbox.y1 - e.bbox.y0);
+            if (ea > 0.60 * static_cast<double>(locateView.width) * locateView.height) continue;
+            bool dup = false;
+            for (const auto& r : regions) {
+                const int ox = std::min(r.bbox.x1, e.bbox.x1) - std::max(r.bbox.x0, e.bbox.x0);
+                const int oy = std::min(r.bbox.y1, e.bbox.y1) - std::max(r.bbox.y0, e.bbox.y0);
+                if (ox > 0 && oy > 0 &&
+                    static_cast<double>(ox) * oy > 0.5 * ea) { dup = true; break; }
+            }
+            if (!dup) regions.push_back(e);
+        }
+    }
     /*
      * [프레임을 통째로 덮는 영역은 크롭이 아니다]
      * 임계를 낮추면 배경까지 이어져서 프레임 전체 상자가 나온다. 그걸
@@ -975,7 +1026,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                 if (sHits.empty() && !budgetExceeded()) {
                     GrayImage tightC;
                     int tcx = 0, tcy = 0;
-                    if (tightenToLocalVariation(GrayView(crop), tightC, 8, 6, 8, &tcx, &tcy)) {
+                    if (tightenToLocalVariation(GrayView(crop), tightC, 8, 8, 8, &tcx, &tcy)) {
                         GrayImage tb;
                         if (stretchContrast(GrayView(tightC), tb)) {
                             GrayImage tsm;
