@@ -668,10 +668,16 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 그래서 회전을 더 시도하는 대신 "어디를 보라"를 알려준다.
     // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
     // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
-    if (cfg_.enableRegionRescue && !cfg_.fastNoRead) {
-        // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
-        // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
-        if (regionCropDone_ && regionRotDone_) { prof().dump("실패:region건너뜀"); return hits; }
+    // [주의] 예전에는 아래 "이미 다 했다" 분기가 **함수를 반환**했다.
+    // 그러면 이 블록 뒤에 있는 QR 파인더 구제와 1D 회전 구제가 통째로
+    // 건너뛰어진다 — 둘 다 opt-in 손잡이인데 **2단계 경로에서는 켜도
+    // 한 번도 안 돌았다**(실측: `enable_qr_finder_rescue`를 켜고 저조도
+    // 24장을 돌려도 `qrfinder` 단계 실행 0회, 시간·코드 완전 동일).
+    // 2단계가 컨베이어 권장 경로라, 그 옵션을 가장 필요로 하는 쪽에서
+    // 정확히 죽어 있었다. 영역 구제만 건너뛰고 나머지는 이어간다.
+    // [[vscan-lite-region-skip-early-return]]
+    if (cfg_.enableRegionRescue && !cfg_.fastNoRead &&
+        !(regionCropDone_ && regionRotDone_)) {
         const auto rgT0 = std::chrono::steady_clock::now();
         auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
