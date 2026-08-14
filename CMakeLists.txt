@@ -164,6 +164,12 @@ if(VSCAN_BUILD_EXAMPLE)
   add_executable(decode_workers examples/decode_workers.cpp)
   target_link_libraries(decode_workers PRIVATE vscan Threads::Threads)
 
+  # 노출/조명을 통제할 수 있는 컨베이어 배치의 권장 설정 예제.
+  # 카메라 연결 부분이 비어 있어 그대로는 아무 일도 안 한다 — 설정과
+  # 그 근거를 코드로 남기는 것이 목적이다(§3.62~§3.74).
+  add_executable(conveyor_capture_controlled examples/conveyor_capture_controlled.cpp)
+  target_link_libraries(conveyor_capture_controlled PRIVATE vscan)
+
   # ultravc CLI(vscantest 명령)가 fork+exec로 호출하는 스탠드얼론 디코더.
   # ultravc 실행파일 자체에 vscan-lite를 직접 링크하지 않는 이유는
   # tools/vscan_decode_file.cpp 상단 주석 참고 (Zxing/Zbar 버전 충돌 방지).
