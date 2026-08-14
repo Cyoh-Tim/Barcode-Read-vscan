@@ -1856,6 +1856,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
         const bool earlyRotate = need <= std::max(1, cfg_.regionRescueMaxRotations);
         regionCropDone_ = true;
         regionRotDone_ = earlyRotate;
+        Stage st("ts:region");
         auto roiHits = tryRegionRescue(view, need,
                                        earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
         if ((int)roiHits.size() >= need) { acc = std::move(roiHits); return true; }
@@ -1883,6 +1884,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
             const int cf = (cfg_.coarseFactor == 2) ? 2 : 3;
             downsampleBox(view, coarseBuf_, cf);
             Pipeline coarse(fastCfg);
+            Stage st("ts:coarse");
             auto ch = coarse.processViewCore(GrayView(coarseBuf_));
             if ((int)ch.size() >= need) {
                 // 축소본 좌표 -> 원본 좌표로 환산
@@ -1901,7 +1903,8 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     }
 
     Pipeline fast(fastCfg);
-    auto hits = fast.processViewCore(view);
+    std::vector<PipelineResult> hits;
+    { Stage st("ts:fast"); hits = fast.processViewCore(view); }
     if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
     if (lowContrastPartial_.size() > hits.size()) hits = lowContrastPartial_;
 
@@ -1943,13 +1946,22 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 놓치는 2종(반전 극성 코드, 부분 검출 케이스)은 아래 최종 폴백이
     // 마저 처리하므로 검출력 손실은 없다.
     // [[vscan-lite-harder-only-tier]]
+    // [호출자가 끈 것은 여기서도 꺼야 한다]
+    // 예전에는 tryHarder/tryInvert를 무조건 true로 덮어써서, 공개 API의
+    // VSCAN_FLAG_NO_TRY_HARDER / NO_INVERT가 **2단계 경로에서 조용히
+    // 무시됐다.** 헤더는 그 플래그가 동작한다고 문서화하고 있었으니
+    // 문서가 거짓말을 하고 있었던 셈이다. 이 단계들은 각각 "TryHarder를
+    // 쓰는 단계", "반전을 보는 단계"라 호출자가 그걸 껐으면 단계 자체를
+    // 건너뛰는 것이 맞다. [[vscan-lite-two-stage-flags]]
+    if (!cfg_.tryHarder) return hits;
     PipelineConfig harderCfg = cfg_;
     harderCfg.tileThreads = 1;
     harderCfg.tryHarder = true;
     harderCfg.tryRotate = false;
     harderCfg.tryInvert = false;
     Pipeline harder(harderCfg);
-    auto hardHits = harder.processViewCore(view);
+    std::vector<PipelineResult> hardHits;
+    { Stage st("ts:harder"); hardHits = harder.processViewCore(view); }
     if ((int)hardHits.size() >= need) return hardHits;
     if (hardHits.size() > hits.size()) hits = std::move(hardHits);
     if (budgetExceeded()) return hits;
@@ -1967,13 +1979,22 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 놓쳐본 적 없는 심하게 기울어진 1D 코드 같은 게 실전에 있을 수
     // 있다. 그런 안전망 역할로 최종 폴백에 TryRotate를 남겨둔다.
     // [[vscan-lite-harder-invert-tier]]
+    // 이 단계의 존재 이유가 "반전 극성 코드"다(바로 위 주석). 호출자가
+    // 반전을 안 본다고 했으면 이 단계는 통째로 값이 없다 — 실측상 판정
+    // 경로에서 가장 비싼 항목(7.5~9.8ms)이라 지연에도 그대로 걸린다.
+    if (!cfg_.tryInvert) {
+        if (cfg_.fastNoRead) { prof().dump(hits.empty() ? "2단계실패:빠른불판독" : "2단계부분"); return hits; }
+        auto fullNi = processView(view);
+        return fullNi.size() >= hits.size() ? fullNi : hits;
+    }
     PipelineConfig hiCfg = cfg_;
     hiCfg.tileThreads = 1;
     hiCfg.tryHarder = true;
     hiCfg.tryRotate = false;
     hiCfg.tryInvert = true;
     Pipeline hi(hiCfg);
-    auto hiHits = hi.processViewCore(view);
+    std::vector<PipelineResult> hiHits;
+    { Stage st("ts:invert"); hiHits = hi.processViewCore(view); }
     if ((int)hiHits.size() >= need) return hiHits;
     if (hiHits.size() > hits.size()) hits = std::move(hiHits);
     if (budgetExceeded()) return hits;
@@ -1991,7 +2012,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     //   혼합   257 -> 232코드,      판정 최대 121.6 -> 75.3ms
     // 저조도에서는 승격이 **한 코드도 못 벌면서** 7ms를 쓴다. 혼합에서
     // 잃는 25개는 이 손잡이의 전제대로 다음 촬영에서 회수한다.
-    if (cfg_.fastNoRead) return hits;
+    if (cfg_.fastNoRead) { prof().dump(hits.empty() ? "2단계실패:빠른불판독" : "2단계부분"); return hits; }
     auto full = processView(view);
     return full.size() >= hits.size() ? full : hits;
 }
