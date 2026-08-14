@@ -1959,18 +1959,24 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 문서가 거짓말을 하고 있었던 셈이다. 이 단계들은 각각 "TryHarder를
     // 쓰는 단계", "반전을 보는 단계"라 호출자가 그걸 껐으면 단계 자체를
     // 건너뛰는 것이 맞다. [[vscan-lite-two-stage-flags]]
-    if (!cfg_.tryHarder) return hits;
-    PipelineConfig harderCfg = cfg_;
-    harderCfg.tileThreads = 1;
-    harderCfg.tryHarder = true;
-    harderCfg.tryRotate = false;
-    harderCfg.tryInvert = false;
-    Pipeline harder(harderCfg);
-    std::vector<PipelineResult> hardHits;
-    { Stage st("ts:harder"); hardHits = harder.processViewCore(view); }
-    if ((int)hardHits.size() >= need) return hardHits;
-    if (hardHits.size() > hits.size()) hits = std::move(hardHits);
-    if (budgetExceeded()) return hits;
+    // **끄는 것은 단계뿐이고 `return`이 아니다.** 처음 고칠 때 여기서
+    // 바로 반환하게 했는데, 그러면 아래 최종 승격까지 같이 사라진다 —
+    // 승격이 부르는 processView()는 이 플래그를 정상적으로 존중하므로
+    // 없앨 이유가 없다. §3.69에서 배운 것과 정확히 같은 실수를 내가
+    // 바로 다음 커밋에서 되풀이할 뻔했다.
+    if (cfg_.tryHarder) {
+        PipelineConfig harderCfg = cfg_;
+        harderCfg.tileThreads = 1;
+        harderCfg.tryHarder = true;
+        harderCfg.tryRotate = false;
+        harderCfg.tryInvert = false;
+        Pipeline harder(harderCfg);
+        std::vector<PipelineResult> hardHits;
+        { Stage st("ts:harder"); hardHits = harder.processViewCore(view); }
+        if ((int)hardHits.size() >= need) return hardHits;
+        if (hardHits.size() > hits.size()) hits = std::move(hardHits);
+        if (budgetExceeded()) return hits;
+    }
 
     // [3단계] TryHarder + TryInvert (여전히 TryRotate는 끔).
     //
@@ -1988,22 +1994,21 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 이 단계의 존재 이유가 "반전 극성 코드"다(바로 위 주석). 호출자가
     // 반전을 안 본다고 했으면 이 단계는 통째로 값이 없다 — 실측상 판정
     // 경로에서 가장 비싼 항목(7.5~9.8ms)이라 지연에도 그대로 걸린다.
-    if (!cfg_.tryInvert) {
-        if (cfg_.fastNoRead) { prof().dump(hits.empty() ? "2단계실패:빠른불판독" : "2단계부분"); return hits; }
-        auto fullNi = processView(view);
-        return fullNi.size() >= hits.size() ? fullNi : hits;
+    // 이 단계는 tryHarder도 tryInvert도 강제로 켜므로 **둘 중 하나라도
+    // 호출자가 껐으면** 돌릴 수 없다. 여기서도 반환이 아니라 감싸기다.
+    if (cfg_.tryInvert && cfg_.tryHarder) {
+        PipelineConfig hiCfg = cfg_;
+        hiCfg.tileThreads = 1;
+        hiCfg.tryHarder = true;
+        hiCfg.tryRotate = false;
+        hiCfg.tryInvert = true;
+        Pipeline hi(hiCfg);
+        std::vector<PipelineResult> hiHits;
+        { Stage st("ts:invert"); hiHits = hi.processViewCore(view); }
+        if ((int)hiHits.size() >= need) return hiHits;
+        if (hiHits.size() > hits.size()) hits = std::move(hiHits);
+        if (budgetExceeded()) return hits;
     }
-    PipelineConfig hiCfg = cfg_;
-    hiCfg.tileThreads = 1;
-    hiCfg.tryHarder = true;
-    hiCfg.tryRotate = false;
-    hiCfg.tryInvert = true;
-    Pipeline hi(hiCfg);
-    std::vector<PipelineResult> hiHits;
-    { Stage st("ts:invert"); hiHits = hi.processViewCore(view); }
-    if ((int)hiHits.size() >= need) return hiHits;
-    if (hiHits.size() > hits.size()) hits = std::move(hiHits);
-    if (budgetExceeded()) return hits;
 
     // [최종 폴백] TryRotate까지 포함한 완전한 풀옵션. processView()가
     // 이제 내부적으로 1D 회전 구제(5단계, [[vscan-lite-1d-deskew-rescue]])
