@@ -1966,6 +1966,13 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 바로 다음 커밋에서 되풀이할 뻔했다.
     if (cfg_.tryHarder) {
         PipelineConfig harderCfg = cfg_;
+        // [단일 스레드가 맞다 — 2026-08-03 실측]
+        // 이 단들을 타일 병렬로 돌려봤다. **1.7~2배 느려진다**
+        // (저조도 판정 54.8 -> 95.2ms, 난수 200장 36.3 -> 72.0ms, 검출은
+        // 사실상 동일). 겹침 중복(2048x1536/4스레드면 1.9배)에 더해 실패
+        // 프레임마다 단계별로 스레드를 새로 만드는 값이 병렬 이득을
+        // 넘는다. 프레임 전체를 한 번 훑는 core와 달리 이 단들은 이미
+        // 실패가 유력한 자리라, 처리량이 아니라 **지연**이 중요하다.
         harderCfg.tileThreads = 1;
         harderCfg.tryHarder = true;
         harderCfg.tryRotate = false;
