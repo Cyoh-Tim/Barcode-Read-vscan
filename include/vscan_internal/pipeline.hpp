@@ -273,8 +273,13 @@ struct PipelineConfig {
     // GlobalHistogram은 작은 코드(90px 이하)/저대비 코드를 놓친다.
     // 속도가 정말 급하고 배치 환경의 코드가 충분히 크고 선명하다는 게
     // 확인됐을 때만 GlobalHistogram + downscale OFF로 좁힐 것.
-    ZXingDecoder::Binarizer locateBinarizer = ZXingDecoder::Binarizer::LocalAverage;
-    bool locateTryDownscale = true;
+    // [1단계 이진화 — 2026-08-03에 기본을 바꿨다]
+    // 노이즈가 심하면 LocalAverage가 불리하다: 화소를 이웃 평균과 비교하니
+    // 국소적인 노이즈가 임계를 계속 넘나든다. GlobalHistogram은 임계가
+    // 하나라 노이즈가 공간적으로 상쇄된다. 실측표는 vscan.h의 fast_locate
+    // 주석. 되돌리려면 accurate_locate. [[vscan-lite-locate-binarizer]]
+    ZXingDecoder::Binarizer locateBinarizer = ZXingDecoder::Binarizer::GlobalHistogram;
+    bool locateTryDownscale = false;
 
     // 빠른 경로(two_stage의 locate, tracked의 ROI 단계들)가 이 개수 미만을
     // 찾으면 다음 단계로 승격한다. 기본 1 = "하나도 못 찾으면 폴백"(기존 동작).

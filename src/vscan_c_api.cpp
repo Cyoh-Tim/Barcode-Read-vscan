@@ -135,10 +135,12 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->worker_mode) {
             pcfg.tileThreads = 1;   // 내부 스레드 생성 완전 차단
         }
-        if (cfg->fast_locate) {
-            pcfg.locateBinarizer = vscan::ZXingDecoder::Binarizer::GlobalHistogram;
-            pcfg.locateTryDownscale = false;
-        } // 0 = 전체(기본)
+        // fast_locate는 이제 기본과 같다(ABI 호환용 no-op). 되돌리려면
+        // accurate_locate. 근거는 vscan.h의 fast_locate 주석 실측표.
+        if (cfg->accurate_locate) {
+            pcfg.locateBinarizer = vscan::ZXingDecoder::Binarizer::LocalAverage;
+            pcfg.locateTryDownscale = true;
+        }
         pcfg.tryRotate = (cfg->decode_flags & VSCAN_FLAG_NO_ROTATE) == 0;
         pcfg.tryInvert = (cfg->decode_flags & VSCAN_FLAG_NO_INVERT) == 0;
         pcfg.tryHarder = (cfg->decode_flags & VSCAN_FLAG_NO_TRY_HARDER) == 0;
