@@ -1983,6 +1983,15 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 까지 자체적으로 시도하므로 여기서 따로 또 부를 필요는 없다 —
     // 그래서 이 최종 호출 하나가 사실상 4~5단계를 전부 커버한다.
     // [[vscan-lite-two-stage-fallback]]
+    // [빠른 불판독은 최종 승격도 안 한다]
+    // 이 자리는 "1단계도 크롭도 다 실패했다"는 뜻이라, 남은 것은 프레임
+    // 전체를 풀옵션으로 한 번 더 훑는 최후 수단이다. 재촬영이 가능하면
+    // 그 값을 치를 이유가 없다. 실측(reps 3, QR 마스크 + fastNoRead):
+    //   저조도  30 -> 30코드(동일), 판정 최대 27.3 -> 19.4ms
+    //   혼합   257 -> 232코드,      판정 최대 121.6 -> 75.3ms
+    // 저조도에서는 승격이 **한 코드도 못 벌면서** 7ms를 쓴다. 혼합에서
+    // 잃는 25개는 이 손잡이의 전제대로 다음 촬영에서 회수한다.
+    if (cfg_.fastNoRead) return hits;
     auto full = processView(view);
     return full.size() >= hits.size() ? full : hits;
 }
