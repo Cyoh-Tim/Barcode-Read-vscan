@@ -173,6 +173,10 @@ void cfgFastNoReadFull(vscan_config_t& c) { cfgFastNoRead(c); }
 // [옛 1단계 이진화] 2026-08-03에 기본이 바뀌었다(§3.65). 우리 코퍼스에
 // 없는 축이 현장에 있으면 이쪽이 나을 수 있으니 대조군으로 같이 돌린다.
 void cfgAccurateLocate(vscan_config_t& c) { cfgQrOnly(c); c.accurate_locate = 1; }
+// [타일 겹침] 그대로 중복 작업이다. 코드 세로 크기를 아는 배치면 줄일 값이
+// 있는데, 줄이면 타일 경계에 걸린 코드를 잃는다 — 그 균형점은 현장 코드
+// 크기가 정하므로 여기서 직접 재게 한다. 근거는 vscan.h의 tile_overlap_px.
+void cfgOverlap240(vscan_config_t& c) { c.tile_overlap_px = 240; }
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -206,6 +210,9 @@ const Variant kVariants[] = {
     {"옛 이진화(대조군)", "accurate_locate=1. 1단계 이진화를 예전 LocalAverage로."
   " 기본보다 코드가 많이 나오면 이 현장은 우리 코퍼스에 없는 축이라는 뜻이다",
   true, cfgAccurateLocate},
+    {"타일겹침 240", "tile_overlap_px=240(기본 500). 겹침은 그대로 중복 작업이다."
+  " **코드 수가 같으면** 그만큼이 낭비였다는 뜻이고, 줄면 경계에 걸린 코드를"
+  " 잃은 것이다 — 현장 코드의 세로 크기가 이 균형을 정한다", false, cfgOverlap240},
 };
 constexpr int kNumVariants = static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
 
