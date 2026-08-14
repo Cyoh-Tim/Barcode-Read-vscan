@@ -162,6 +162,9 @@ void cfgDeadline300(vscan_config_t& c) { c.max_frame_ms = 300; }
 // 잘라서 버는 게 아니라 **안 할 일을 안 하게** 해서 번다. 근거는 §3.62.
 void cfgQrOnly(vscan_config_t& c) { c.symbology_mask = VSCAN_FMT_QR | VSCAN_FMT_MICRO_QR; }
 void cfgQrOnlyDl(vscan_config_t& c) { cfgQrOnly(c); c.max_frame_ms = 100; }
+// [빠른 불판독] 재촬영이 되는 배치용. 이미지 수술 단계를 끊고 빨리 "못 읽겠다"고
+// 답한다. 여기서 봐야 할 것은 코드 수가 아니라 **불판독 판정 시간**이다.
+void cfgFastNoRead(vscan_config_t& c) { cfgQrOnly(c); c.fast_no_read = 1; }
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -183,6 +186,11 @@ const Variant kVariants[] = {
     {"QR/MicroQR만", "symbology_mask로 심볼로지를 좁힌다. 코드 수가 기본과 같은데"
   " 시간만 줄면 그만큼이 순수 낭비였다는 뜻이다", true, cfgQrOnly},
     {"QR/MicroQR만 + 마감100", "위 둘을 같이. 지연을 가장 세게 묶는 조합", true, cfgQrOnlyDl},
+    // 카메라/조명을 통제할 수 있는 배치에서만 뜻이 있다. 한 장을 오래
+    // 쥐어짜는 대신 빨리 포기하고 다시 찍는 전략이라, 잃은 검출은 다음
+    // 프레임에서 회수한다는 전제가 깔린다.
+    {"빠른 불판독", "fast_no_read=1. 이미지 수술 단계(큰코드폴백/평탄화/영역구제)를 끊는다."
+  " **재촬영이 가능한 배치 전용** — 안 되면 그냥 검출을 잃는 것이다", true, cfgFastNoRead},
 };
 constexpr int kNumVariants = static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
 

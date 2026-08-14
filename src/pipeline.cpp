@@ -515,7 +515,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // reps 3, maxFrameMs=100): 최대 147.5 -> 140.4ms, 평균 37.9 -> 38.2로
     // 측정 노이즈 수준이다. 넘침을 줄이려면 단계를 건너뛰는 게 아니라
     // **일 자체를 줄여야 한다**(§3.62).
-    if (!cfg_.disableTileFallback) {
+    if (!cfg_.disableTileFallback && !cfg_.fastNoRead) {
         Stage st("tilefb");
         auto big = dedup(decodeTile(view, 0));
         if (!big.empty()) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
@@ -559,7 +559,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
      * 그대로 이어서 돈다 — 잘못 짚었을 때의 손해 상한이 "원래 순서와 같은
      * 총합"이다.
      */
-    if (cfg_.enableRegionRescue && !regionCropDone_ &&
+    if (cfg_.enableRegionRescue && !cfg_.fastNoRead && !regionCropDone_ &&
         estimateLocalRange(view) < cfg_.lowContrastRange) {
         const auto rgT0 = std::chrono::steady_clock::now();
         auto early = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
@@ -627,7 +627,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 배경이 이미 평평하면 flattenIllumination()이 false를 돌려주므로
     // (뭉갠 판본의 상하위 2% 차이가 40 미만) 그림자 없는 프레임에서는
     // 뭉개기 한 번 값만 든다. [[vscan-lite-flatten-illumination]]
-    {
+    if (!cfg_.fastNoRead) {
         GrayImage flat;
         bool flatOk;
         { Stage st("ff:filter"); flatOk = flattenIllumination(view, 32, flat); }
@@ -663,7 +663,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 그래서 회전을 더 시도하는 대신 "어디를 보라"를 알려준다.
     // 1D 회전 구제보다 먼저 두는 이유: 회전/리샘플링이 없어 더 싸고,
     // 1D/2D를 가리지 않아 적용 범위가 넓다. [[vscan-lite-region-rescue]]
-    if (cfg_.enableRegionRescue) {
+    if (cfg_.enableRegionRescue && !cfg_.fastNoRead) {
         // 2단계 경로의 이른 자리에서 자르기+회전을 이미 다 했으면 여기선
         // 할 일이 없다. 자르기만 했다면 회전만 이어서 한다.
         if (regionCropDone_ && regionRotDone_) { prof().dump("실패:region건너뜀"); return hits; }
@@ -1836,11 +1836,11 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 213~255다. 0.40은 풀프레임 패스로 읽히므로 정상 쪽에 두는 게 맞다.
     // [[vscan-lite-lowcontrast-region-first]]
     bool regionFirstDone = false;
-    const bool lowContrast = cfg_.enableRegionRescue &&
+    const bool lowContrast = cfg_.enableRegionRescue && !cfg_.fastNoRead &&
                              estimateLocalRange(view) < cfg_.lowContrastRange;
 
     auto regionFirstPass = [&](std::vector<PipelineResult>& acc) -> bool {
-        if (!cfg_.enableRegionRescue || budgetExceeded() || regionFirstDone) return false;
+        if (!cfg_.enableRegionRescue || cfg_.fastNoRead || budgetExceeded() || regionFirstDone) return false;
         regionFirstDone = true;
         // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
         // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
