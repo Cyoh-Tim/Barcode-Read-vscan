@@ -167,10 +167,26 @@ Res run(void (*apply)(vscan_config_t&), const std::vector<Frame>& frames, int re
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "사용: %s <프레임_디렉터리> [--reps N]\n", argv[0]); return 2; }
+    if (argc < 2) {
+        std::fprintf(stderr,
+            "사용: %s <프레임_디렉터리> [--reps N] [--path full|2stage] [--require a,b,c]\n"
+            "  --require  적은 옵션이 이 프레임에서 **변화를 만들지 못하면 실패**한다.\n"
+            "             배선이 끊기는 회귀를 잡는 용도(§3.68/§3.69가 그 사고였다).\n", argv[0]);
+        return 2;
+    }
     int reps = 2;
-    for (int i = 2; i < argc; ++i)
+    std::string onlyPath, require;
+    for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--reps") == 0 && i + 1 < argc) reps = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--path") == 0 && i + 1 < argc) onlyPath = argv[++i];
+        else if (std::strcmp(argv[i], "--require") == 0 && i + 1 < argc) require = argv[++i];
+    }
+    auto required = [&](const char* nm) {
+        if (require.empty()) return false;
+        std::string hay = "," + require + ",";
+        return hay.find("," + std::string(nm) + ",") != std::string::npos;
+    };
+    int missing = 0;
 
     std::vector<Frame> frames;
     DIR* d = opendir(argv[1]);
@@ -188,6 +204,7 @@ int main(int argc, char** argv) {
 
     for (int ts = 0; ts < 2; ++ts) {
         const char* pathName = ts ? "2stage" : "full";
+        if (!onlyPath.empty() && onlyPath != pathName) continue;
         const Res base = run(nullptr, frames, reps, ts != 0);
         std::printf("== 경로 %s (기준 %.1fms) ==\n", pathName, base.ms);
         int silent = 0;
@@ -199,8 +216,12 @@ int main(int argc, char** argv) {
             const bool sameTime = rel > -0.08 && rel < 0.08;
             if (sameResult && sameTime) {
                 ++silent;
-                std::printf("  [변화없음] %-26s %+5.0f%%   %s\n", kOpts[i].name, rel * 100,
-                            kOpts[i].note ? kOpts[i].note : "<- 볼 것");
+                const bool req = required(kOpts[i].name);
+                if (req) ++missing;
+                std::printf("  [변화없음%s] %-26s %+5.0f%%   %s\n", req ? "!!" : "  ",
+                            kOpts[i].name, rel * 100,
+                            req ? "<- **필수인데 동작하지 않는다**"
+                                : (kOpts[i].note ? kOpts[i].note : "<- 볼 것"));
             } else {
                 std::printf("  [동작함  ] %-26s %+5.0f%%   %s\n", kOpts[i].name, rel * 100,
                             sameResult ? "시간만 바뀜" : "결과가 바뀜");
@@ -209,6 +230,15 @@ int main(int argc, char** argv) {
         std::printf("  -> %s 경로에서 변화 없는 옵션 %d개\n\n", pathName, silent);
     }
 
+    if (!require.empty()) {
+        if (missing > 0) {
+            std::printf("\n!! 필수 옵션 %d개가 이 프레임에서 아무 변화도 만들지 못했다.\n"
+                        "   배선이 끊겼거나(§3.68/§3.69 같은 사고) 이 코퍼스가 바뀐 것이다.\n", missing);
+            return 1;
+        }
+        std::printf("\n필수 옵션 전부 정상 동작\n");
+        return 0;
+    }
     std::printf("주의: \"변화없음\"은 배선이 끊겼다는 **증거가 아니다.**\n"
                 "이 프레임들이 그 옵션과 무관해서일 수도 있다. 이 도구는\n"
                 "어디를 볼지 좁혀줄 뿐이고, 구별은 프레임을 바꿔가며 해야 한다.\n");

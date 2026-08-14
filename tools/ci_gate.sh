@@ -180,6 +180,13 @@ fi
 # 물리가 다르다. 카메라는 어두우면 게인을 올려 밝기를 되돌리므로 실기
 # 프레임은 **어둡지 않고 거칠다** — 노이즈만 커진다(§3.61).
 #
+# [기준을 올렸다 — 2026-08-03]
+# 하한 23 / 상한 170은 이 축을 처음 넣을 때(§3.61) 값이다. 그 뒤
+# §3.65(1단계 이진화 기본 변경)로 코드가 25 -> 30, 평균이 137 -> 94ms가
+# 됐다. 기준을 그대로 두면 **그 이득이 통째로 사라져도 게이트가 통과한다**
+# — 이 파일이 40종 기준을 38 -> 40으로 올릴 때 이미 적어둔 논리다.
+# 하한 28 / 상한 130으로 올린다(실행 간 흔들림 여유를 둔 값).
+#
 # 여기서 지키는 것은 코드 수와 **평균 시간** 둘 다다. 이 축의 실패
 # 프레임은 폴백 체인을 끝까지 갈아먹어서, 시간이 나빠지는 것 자체가
 # 회귀다(사용자 요구가 실패 프레임 지연 상한이다).
@@ -190,14 +197,42 @@ LL_OUT=$("$VERIFY" "$LL_DIR" --paths 2stage --reps 1 --quiet 2>/dev/null | grep 
 LL_CODES=$(echo "$LL_OUT" | cut -d' ' -f3 | cut -d/ -f1)
 LL_MISDEC=$(echo "$LL_OUT" | cut -d' ' -f5)
 LL_MEAN=$(echo "$LL_OUT" | cut -d' ' -f7)
-echo "   코드 ${LL_CODES:-?}/48 (하한 ${LL_MIN_CODES:-23}) / 평균 ${LL_MEAN:-?}ms (상한 ${LL_MAX_MEAN:-170}) / 오디코딩 ${LL_MISDEC:-?}"
-if [ "${LL_CODES:-0}" -lt "${LL_MIN_CODES:-23}" ] || [ "${LL_MISDEC:-999}" -gt 0 ]; then
+echo "   코드 ${LL_CODES:-?}/48 (하한 ${LL_MIN_CODES:-28}) / 평균 ${LL_MEAN:-?}ms (상한 ${LL_MAX_MEAN:-130}) / 오디코딩 ${LL_MISDEC:-?}"
+if [ "${LL_CODES:-0}" -lt "${LL_MIN_CODES:-28}" ] || [ "${LL_MISDEC:-999}" -gt 0 ]; then
   echo "!! 저조도 축에서 검출이 하한 미만이거나 오디코딩이 생겼다"
   exit 1
 fi
-if awk -v a="${LL_MEAN:-999}" -v m="${LL_MAX_MEAN:-170}" 'BEGIN{exit !(a>m)}'; then
+if awk -v a="${LL_MEAN:-999}" -v m="${LL_MAX_MEAN:-130}" 'BEGIN{exit !(a>m)}'; then
   echo "!! 저조도 실패 프레임의 시간이 상한을 넘었다 — 선 디노이즈가 죽었는지 볼 것"
   exit 1
+fi
+
+# [3.8] 공개 손잡이가 살아 있나
+#
+# 두 번 당했다. VSCAN_FLAG_NO_INVERT / NO_TRY_HARDER가 2단계 경로에서
+# 조용히 무시됐고(§3.68), enable_qr_finder_rescue / enable_1d_deskew_rescue가
+# 조기 반환에 가려 아예 안 돌았다(§3.69). 둘 다 **헤더는 동작한다고
+# 문서화하고 있었다** — 배치가 그 값을 믿고 튜닝한다.
+#
+# 이 단계는 "옵션을 켰는데 결과도 시간도 안 바뀌면 실패"를 건다. 저조도
+# 코퍼스를 쓰는 이유는 실패 프레임이 많아 **깊은 단계까지 도달**하기
+# 때문이다(40종은 대부분 얕은 단계에서 성공해서 이 검사가 무의미하다).
+echo ">> [3.8/5] 공개 손잡이 생존 확인"
+AUDIT="$WORK/audit_config"
+g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/audit_config.cpp" \
+    -L"$BUILD_DIR" -lvscan -o "$AUDIT" 2>/dev/null
+if [ -x "$AUDIT" ]; then
+  if "$AUDIT" "$LL_DIR" --reps 1 --path 2stage \
+       --require NO_INVERT,NO_TRY_HARDER,fast_no_read=1,symbology_mask=QR,disable_auto_denoise,max_frame_ms=20 \
+       > "$WORK/audit.txt" 2>&1; then
+    echo "   필수 손잡이 6종 전부 동작"
+  else
+    echo "!! 공개 손잡이가 죽었다 — 아래 참고"
+    grep -E '변화없음!!|필수 옵션' "$WORK/audit.txt" | head -8
+    exit 1
+  fi
+else
+  echo "   (audit_config 빌드 실패 — 건너뛴다)"
 fi
 
 echo ">> [4/5] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
