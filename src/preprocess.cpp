@@ -570,6 +570,33 @@ bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int mi
         mx1[static_cast<size_t>(x)] = std::max(0, std::min(sw - 1, i0 + 1));
         mtx[static_cast<size_t>(x)] = (num < 0) ? 0 : t;
     }
+    // [화소당 나눗셈을 표 조회로]
+    // 되살리는 루프의 `128 * in[x] / d`가 이 함수의 6.5ms를 쓰고 있었다
+    // (1280x960이면 나눗셈 123만 번, 게다가 벡터화가 통째로 막힌다).
+    //
+    // 그런데 `d`는 uint8 배경들의 혼합이라 1~255이고 `in[x]`도 0~255다.
+    // 즉 결과는 **입력 두 바이트만의 순수 함수**이므로 64KB 표 하나로
+    // 정확히 대체된다. 근사가 아니라 **정의상 같은 값**이다 — 이 배경
+    // 나눗셈은 값이 1만 흔들려도 막대 구조가 부서지는 자리라(위 쌍선형
+    // 주석의 사고 참고) 근사로 갈 수 없었다.
+    //
+    // 표는 상수라 프로세스당 한 번만 만든다.
+    //
+    // [1KB 역수표로 바꿔봤고 더 느렸다 — 기각]
+    // 64KB가 L1에 안 들어가니 `ceil(2^32/d)` 256칸(2KB)으로 줄이고
+    // 64비트 곱+시프트로 바꾸면 나을 줄 알았다. 실측 4.87 -> **5.72ms**.
+    // 64비트 곱이 표 조회보다 비쌌다. d가 흐린 배경이라 이웃 화소끼리
+    // 비슷해서 64KB 표도 실제로는 국소적으로만 접근된다.
+    static const std::vector<uint8_t> kDivLut = [] {
+        std::vector<uint8_t> v(256 * 256);
+        for (int d = 1; d < 256; ++d)
+            for (int i = 0; i < 256; ++i)
+                v[static_cast<size_t>(d) * 256 + i] =
+                    static_cast<uint8_t>(std::min(255, 128 * i / d));
+        return v;
+    }();
+    const uint8_t* __restrict lut = kDivLut.data();
+
     for (int y = 0; y < H; ++y) {
         const int numY = (2 * y + 1) * 256 / (2 * kDown) - 128;
         int j0 = numY >> 8;
@@ -586,7 +613,7 @@ bool flattenIllumination(const GrayView& src, int radius, GrayImage& out, int mi
             const int a = r0[i0] + (((r0[i1] - r0[i0]) * tx) >> 8);
             const int b2 = r1[i0] + (((r1[i1] - r1[i0]) * tx) >> 8);
             const int d = std::max(1, a + (((b2 - a) * ty) >> 8));
-            o[x] = static_cast<uint8_t>(std::min(255, 128 * static_cast<int>(in[x]) / d));
+            o[x] = lut[static_cast<size_t>(d) * 256 + in[x]];
         }
     }
     return true;
