@@ -165,6 +165,14 @@ void cfgQrOnlyDl(vscan_config_t& c) { cfgQrOnly(c); c.max_frame_ms = 100; }
 // [빠른 불판독] 재촬영이 되는 배치용. 이미지 수술 단계를 끊고 빨리 "못 읽겠다"고
 // 답한다. 여기서 봐야 할 것은 코드 수가 아니라 **불판독 판정 시간**이다.
 void cfgFastNoRead(vscan_config_t& c) { cfgQrOnly(c); c.fast_no_read = 1; }
+// [경로 선택이 판정 시간을 크게 가른다 — §3.66]
+// fast_no_read를 켜면 2단계의 전제(성공을 싸게)가 깨지고, 대신 full이
+// 판정에서 훨씬 싸진다. 대신 2단계는 크롭 디코드라 저SNR에서 더 찾는다.
+// 어느 쪽인지는 현장 프레임이 정한다 — 그래서 둘 다 돌려서 보여준다.
+void cfgFastNoReadFull(vscan_config_t& c) { cfgFastNoRead(c); }
+// [옛 1단계 이진화] 2026-08-03에 기본이 바뀌었다(§3.65). 우리 코퍼스에
+// 없는 축이 현장에 있으면 이쪽이 나을 수 있으니 대조군으로 같이 돌린다.
+void cfgAccurateLocate(vscan_config_t& c) { cfgQrOnly(c); c.accurate_locate = 1; }
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -189,8 +197,15 @@ const Variant kVariants[] = {
     // 카메라/조명을 통제할 수 있는 배치에서만 뜻이 있다. 한 장을 오래
     // 쥐어짜는 대신 빨리 포기하고 다시 찍는 전략이라, 잃은 검출은 다음
     // 프레임에서 회수한다는 전제가 깔린다.
-    {"빠른 불판독", "fast_no_read=1. 이미지 수술 단계(큰코드폴백/평탄화/영역구제)를 끊는다."
-  " **재촬영이 가능한 배치 전용** — 안 되면 그냥 검출을 잃는 것이다", true, cfgFastNoRead},
+    {"빠른 불판독(2단계)", "fast_no_read=1. 이미지 수술 단계(큰코드폴백/평탄화/"
+  "영역구제/노이즈구제/최종승격)를 전부 끊는다. **재촬영이 가능한 배치 전용** —"
+  " 안 되면 그냥 검출을 잃는 것이다", true, cfgFastNoRead},
+    {"빠른 불판독(full)", "같은 설정을 vscan_process_gray()로. 판정이 2단계보다"
+  " 훨씬 싼 대신 저SNR 프레임에서 덜 찾을 수 있다 — 두 줄의 코드 수를 비교할 것",
+  false, cfgFastNoReadFull},
+    {"옛 이진화(대조군)", "accurate_locate=1. 1단계 이진화를 예전 LocalAverage로."
+  " 기본보다 코드가 많이 나오면 이 현장은 우리 코퍼스에 없는 축이라는 뜻이다",
+  true, cfgAccurateLocate},
 };
 constexpr int kNumVariants = static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
 
@@ -269,14 +284,18 @@ const char* symName(int s) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "사용: %s <프레임_디렉터리> [--reps N]\n"
+                     "사용: %s <프레임_디렉터리> [--reps N] [--target-ms N]\n"
                      "  디렉터리 안의 .pgm(P5)을 전부 읽는다. 정답 파일은 필요 없다.\n",
                      argv[0]);
         return 2;
     }
     int reps = 3;
+    // 목표 지연(ms). 주면 설정마다 통과/초과를 찍는다. 이 도구는 **보드
+    // 위에서** 도는 것을 전제하므로 여기 찍히는 ms가 곧 현장 ms다.
+    int targetMs = 0;
     for (int i = 2; i < argc; ++i)
         if (std::strcmp(argv[i], "--reps") == 0 && i + 1 < argc) reps = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--target-ms") == 0 && i + 1 < argc) targetMs = std::atoi(argv[++i]);
 
     std::vector<Frame> frames;
     {
@@ -333,9 +352,15 @@ int main(int argc, char** argv) {
     for (int v = 0; v < kNumVariants; ++v) {
         runs.push_back(runVariant(kVariants[v], frames, reps));
         const Run& r = runs.back();
-        std::printf("  %s\n      %d/%zu 프레임, 코드 %d개, 평균 %.1fms, **최대 %.1fms**\n      %s\n",
+        // [목표 대비 판정] 큐가 쌓이는지는 평균이 아니라 **최대**가 정한다.
+        // 그래서 목표와 대는 것도 최대다.
+        char mark[64] = "";
+        if (targetMs > 0)
+            std::snprintf(mark, sizeof(mark), r.worstMs <= targetMs ? "  [목표 %dms 충족]"
+                                                                    : "  [목표 %dms 초과]", targetMs);
+        std::printf("  %s\n      %d/%zu 프레임, 코드 %d개, 평균 %.1fms, **최대 %.1fms**%s\n      %s\n",
                     kVariants[v].name, r.framesWithCode, frames.size(), r.codes,
-                    r.totalMs / frames.size(), r.worstMs, kVariants[v].why);
+                    r.totalMs / frames.size(), r.worstMs, mark, kVariants[v].why);
     }
 
     // ---- 3) 설정 간 합의 ---------------------------------------------------
@@ -372,6 +397,17 @@ int main(int argc, char** argv) {
     std::printf("  한 설정에서만 나온 코드           %d개%s\n", single,
                 single ? "   <- 눈으로 확인할 것" : "");
     for (const auto& s : singles) std::printf("     %s\n", s.c_str());
+
+    // [인덱스가 아니라 이름으로 찾는다]
+    // 예전에는 runs[6]/runs[7]처럼 인덱스로 집었는데, 변형을 하나 끼워
+    // 넣으면 권고가 **엉뚱한 설정의 수치를 인용하면서도 조용히 돈다.**
+    // 도구가 사실과 다른 말을 하는 것이 이 도구의 최악이라(§3.59) 이름으로
+    // 찾고, 못 찾으면 그 권고를 아예 띄우지 않는다.
+    auto runByName = [&](const char* nm) -> const Run* {
+        for (int i = 0; i < kNumVariants; ++i)
+            if (std::strcmp(kVariants[i].name, nm) == 0) return &runs[i];
+        return nullptr;
+    };
 
     // ---- 4) 권고 -----------------------------------------------------------
     std::printf("\n[4] 권고\n");
@@ -440,7 +476,8 @@ int main(int argc, char** argv) {
     // 것이라 대가가 거의 없다. 다만 그 판단은 우리가 못 한다 — 이 프레임에
     // QR만 있는지는 배치가 안다. 그래서 "코드 수가 같은가"를 조건으로 건다.
     {
-        const Run& qr = runs[8];
+        const Run* pqr = runByName("QR/MicroQR만");
+        const Run& qr = pqr ? *pqr : base;
         const double baseMean = base.totalMs / frames.size();
         const double qrMean = qr.totalMs / frames.size();
         if (qr.codes >= base.codes && qrMean < baseMean * 0.8) {
@@ -457,8 +494,11 @@ int main(int argc, char** argv) {
 
     // [지연] 큐에 쌓이는지는 평균이 아니라 최대가 정한다.
     if (base.worstMs > 300) {
-        const Run& d300 = runs[6];
-        const Run& d100 = runs[7];
+        const Run* p300 = runByName("마감 300ms");
+        const Run* p100 = runByName("마감 100ms");
+        if (!p300 || !p100) { /* 변형 이름이 바뀌었으면 인용하지 않는다 */ }
+        const Run& d300 = p300 ? *p300 : base;
+        const Run& d100 = p100 ? *p100 : base;
         std::printf("  %d) **가장 느린 프레임이 %.0fms다.** 컨베이어처럼 프레임이 계속\n"
                     "     들어오는 배치면 이게 큐에 쌓인다. max_frame_ms로 자를 수 있다:\n"
                     "       max_frame_ms=300 -> 코드 %d개, 최대 %.0fms\n"
@@ -467,6 +507,41 @@ int main(int argc, char** argv) {
                     "     보므로 시작된 단계는 끝까지 간다). 진짜 상한이 필요하면\n"
                     "     **오래된 프레임을 버리는 큐 정책**이 호출 쪽에 같이 있어야 한다.\n",
                     ++n, base.worstMs, d300.codes, d300.worstMs, d100.codes, d100.worstMs);
+    }
+
+    // [빠른 불판독] 목표를 준 경우에만 뜻이 있다 — 이건 "재촬영이 가능한가"라는
+    // 배치 조건이 걸린 손잡이라 우리가 임의로 권할 수 없다.
+    {
+        const Run* fnr2 = runByName("빠른 불판독(2단계)");
+        const Run* fnrF = runByName("빠른 불판독(full)");
+        if (fnr2 && fnrF && targetMs > 0 && base.worstMs > targetMs) {
+            const Run* best = (fnr2->worstMs <= targetMs && fnr2->codes >= fnrF->codes) ? fnr2
+                            : (fnrF->worstMs <= targetMs ? fnrF : nullptr);
+            if (best)
+                std::printf("  %d) **목표 %dms를 넘기는데 `fast_no_read=1`이면 들어온다.**\n"
+                            "       기본        코드 %d, 최대 %.0fms\n"
+                            "       빠른(2단계) 코드 %d, 최대 %.0fms\n"
+                            "       빠른(full)  코드 %d, 최대 %.0fms\n"
+                            "     이건 **노출/조명을 통제해 재촬영할 수 있을 때만** 켜는 것이다.\n"
+                            "     한 장을 오래 쥐어짜는 대신 빨리 포기하고 다시 찍는 전략이라,\n"
+                            "     재촬영이 안 되는 배치에서 켜면 그냥 검출을 잃는다.\n"
+                            "     두 줄의 코드 수를 비교해서 경로를 고를 것.\n",
+                            ++n, targetMs, base.codes, base.worstMs,
+                            fnr2->codes, fnr2->worstMs, fnrF->codes, fnrF->worstMs);
+        }
+    }
+
+    // [옛 이진화가 더 낫다면] 그건 이 현장이 우리 코퍼스에 없는 축이라는 뜻이다.
+    // 기본을 바꾼 근거(§3.65)가 이 현장에는 안 맞는 경우라 반드시 알려야 한다.
+    {
+        const Run* acc = runByName("옛 이진화(대조군)");
+        const Run* qr2 = runByName("QR/MicroQR만");
+        if (acc && qr2 && acc->codes > qr2->codes)
+            std::printf("  %d) **옛 이진화(`accurate_locate=1`)가 코드 %d개로 기본 %d개보다 많다.**\n"
+                        "     이 현장은 우리 코퍼스에 없는 축을 갖고 있다는 뜻이다(기본을\n"
+                        "     GlobalHistogram으로 바꾼 근거가 여기선 안 맞는다).\n"
+                        "     `accurate_locate=1`을 켜고, 가능하면 이 프레임을 공유해 줄 것.\n",
+                        ++n, acc->codes, qr2->codes);
     }
 
     if (base.framesWithCode < static_cast<int>(frames.size()))

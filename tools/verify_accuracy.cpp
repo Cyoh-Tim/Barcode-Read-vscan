@@ -363,6 +363,7 @@ int main(int argc, char** argv) {
             // 이게 실제로 일하고 있는지는 껐을 때의 차이로만 알 수 있다.
             c.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             c.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
+            c.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             // 배치가 심볼로지를 아는 경우의 값을 재기 위한 손잡이.
             // 예: VSCAN_FMTMASK=1 이면 QR만.
             if (const char* fm = getenv("VSCAN_FMTMASK")) c.symbology_mask = strtoul(fm, nullptr, 0);
@@ -407,6 +408,7 @@ int main(int argc, char** argv) {
             cfg.validate_itf_checksum = getenv("VSCAN_ITFSUM") != nullptr;
             cfg.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             cfg.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
+            cfg.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             if (const char* fm = getenv("VSCAN_FMTMASK")) cfg.symbology_mask = strtoul(fm, nullptr, 0);
             cfg.auto_denoise_strong_noise = getenv("VSCAN_STRONGDN") ? atof(getenv("VSCAN_STRONGDN")) : -1;
             cfg.frame_budget_max_ms = getenv("VSCAN_BUDGETMAX") ? atoi(getenv("VSCAN_BUDGETMAX")) : 0;
