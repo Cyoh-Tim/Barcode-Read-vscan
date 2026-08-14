@@ -235,15 +235,25 @@ fi
 #
 # 그래서 **권장 조합의 전제(QR은 회전에 안 잃는다)** 를 게이트로 건다.
 # 이게 깨지면 examples/conveyor_capture_controlled.cpp의 권고가 거짓이 된다.
-echo ">> [3.73/5] 권장 조합(fast_no_read) QR 회전 확인"
-FNR_OUT=$(python3 "$ROOT/tools/generate_corpus.py" --sweep angle:0:90:5 \
-            --base sym=QR,module=8,count=1 --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
-          | VSCAN_FASTNR=1 VSCAN_FLAGS=2 "$VERIFY" --stdin --paths full,2stage --reps 1 --quiet 2>/dev/null \
-          | grep -E "^(full|2stage) " | tr -s ' ')
-FNR_BAD=$(echo "$FNR_OUT" | awk '{if ($4 != "100.0%" || $5 != "0") b++} END{print b+0}')
-echo "   QR 19각도 x 2경로: $(echo "$FNR_OUT" | awk '{printf "%s %s(오디%s) ", $1, $4, $5}')"
+echo ">> [3.73/5] 권장 조합(fast_no_read) 회전 확인 (QR/CODE128/PDF417)"
+# QR만이 아니라 **회전에 취약한 심볼로지까지** 건다. 처음에는 QR만 걸었는데,
+# 그건 fast_no_read가 영역 구제를 통째로 끄던 시절(회전된 1D를 통째로 잃던
+# 시절)의 기준이었다. §3.78에서 crop만 남기도록 고친 뒤로는 전부 100%다.
+FNR_BAD=0
+FNR_LINE=""
+for FS in QR CODE128 PDF417; do
+  FO=$(python3 "$ROOT/tools/generate_corpus.py" --sweep angle:0:90:5 \
+         --base sym=$FS,module=8,count=1 --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+       | VSCAN_FASTNR=1 VSCAN_FLAGS=2 "$VERIFY" --stdin --paths full,2stage --reps 1 --quiet 2>/dev/null \
+       | grep -E "^(full|2stage) " | tr -s ' ')
+  FB=$(echo "$FO" | awk '{if ($4 != "100.0%" || $5 != "0") b++} END{print b+0}')
+  FNR_BAD=$((FNR_BAD + FB))
+  FNR_LINE="$FNR_LINE $FS=$(echo "$FO" | awk '{printf "%s ", $4}')"
+done
+FNR_OUT="$FNR_LINE"
+echo "   19각도 x 2경로:$FNR_LINE"
 if [ "${FNR_BAD:-9}" != "0" ]; then
-  echo "!! fast_no_read + NO_INVERT에서 QR 회전이 깨졌다 — 권장 조합의 전제가 무너진다"
+  echo "!! fast_no_read + NO_INVERT에서 회전이 깨졌다 — 권장 조합의 전제가 무너진다(§3.78)"
   exit 1
 fi
 

@@ -559,7 +559,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
      * 그대로 이어서 돈다 — 잘못 짚었을 때의 손해 상한이 "원래 순서와 같은
      * 총합"이다.
      */
-    if (cfg_.enableRegionRescue && !cfg_.fastNoRead && !regionCropDone_ &&
+    if (cfg_.enableRegionRescue && !regionCropDone_ &&
         estimateLocalRange(view) < cfg_.lowContrastRange) {
         const auto rgT0 = std::chrono::steady_clock::now();
         auto early = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
@@ -676,7 +676,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 2단계가 컨베이어 권장 경로라, 그 옵션을 가장 필요로 하는 쪽에서
     // 정확히 죽어 있었다. 영역 구제만 건너뛰고 나머지는 이어간다.
     // [[vscan-lite-region-skip-early-return]]
-    if (cfg_.enableRegionRescue && !cfg_.fastNoRead &&
+    if (cfg_.enableRegionRescue &&
         !(regionCropDone_ && regionRotDone_)) {
         const auto rgT0 = std::chrono::steady_clock::now();
         auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
@@ -1025,8 +1025,17 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                 Pipeline roiPipe(roiCfg);
                 std::vector<PipelineResult> sHits;
                 GrayImage boosted;
+                // [빠른 불판독은 영역 구제를 통째로 끄지 않는다 — 2026-08-03 정정]
+                // 처음에는 영역 구제 전체를 껐는데, 그러면 **회전된 코드를
+                // 통째로 잃는다**(0~90도 스윕: CODE128 100 -> 21%, PDF417
+                // 100 -> 10%, 40종 40/40 -> 35/40). 회전을 살리는 것은
+                // 영역 구제의 첫 단인 `rg:crop`이다 — §3.17대로 코드 주변만
+                // 잘라내면 각도와 무관하게 읽힌다.
+                // 비싼 것은 그 뒤의 **이미지 수술**들이다(rg:contrast 75~152ms,
+                // persp/pitch/invert). 재촬영이 가능하면 그쪽만 끄는 것이
+                // 이 손잡이의 계약에 맞다. [[vscan-lite-fastnr-keeps-crop]]
                 Stage stC("rg:contrast");
-                if (stretchContrast(GrayView(crop), boosted)) {
+                if (!cfg_.fastNoRead && stretchContrast(GrayView(crop), boosted)) {
                     // [펴고 나서 뭉갠 판본을 **먼저** 본다]
                     // 스트레칭은 신호와 노이즈를 같이 증폭한다. 대비가
                     // 낮을수록 이득이 커지므로 양자화/센서 노이즈도 그만큼
@@ -1309,7 +1318,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                         }
                     }
                 }
-                if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                if (sHits.empty() && !cfg_.fastNoRead && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
                     Stage stP("rg:persp");
                     // [원근 보정] 회전은 축 하나면 되지만(§3.24) 원근은
                     // 코드 **안에서** 배율이 달라져서 한 스캔 행 안의 모듈
@@ -1334,7 +1343,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                             }
                     }
                 }
-                if (sHits.empty() && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
+                if (sHits.empty() && !cfg_.fastNoRead && rectIdx < cfg_.perspRescueMaxRegions && !budgetExceeded()) {
                     Stage stPi("rg:pitch");
                     // [곡면(원통) 보정] 원통 라벨은 상자가 직사각형 그대로라
                     // 호모그래피로는 못 편다 — 가로 좌표만 비선형으로 밀린다.
@@ -1430,7 +1439,7 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                         break;
                     }
                 }
-                if (sHits.empty() && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
+                if (sHits.empty() && !cfg_.fastNoRead && rectIdx < cfg_.invertRescueMaxRegions && !budgetExceeded()) {
                     Stage stI("rg:invert");
                     // [흑백 반전 판본] zxing의 TryInvert는 **1D와 PDF417에
                     // 대해서는 아무 일도 하지 않는다.** 소스를 보면
@@ -1847,11 +1856,11 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 213~255다. 0.40은 풀프레임 패스로 읽히므로 정상 쪽에 두는 게 맞다.
     // [[vscan-lite-lowcontrast-region-first]]
     bool regionFirstDone = false;
-    const bool lowContrast = cfg_.enableRegionRescue && !cfg_.fastNoRead &&
+    const bool lowContrast = cfg_.enableRegionRescue &&
                              estimateLocalRange(view) < cfg_.lowContrastRange;
 
     auto regionFirstPass = [&](std::vector<PipelineResult>& acc) -> bool {
-        if (!cfg_.enableRegionRescue || cfg_.fastNoRead || budgetExceeded() || regionFirstDone) return false;
+        if (!cfg_.enableRegionRescue || budgetExceeded() || regionFirstDone) return false;
         regionFirstDone = true;
         // [회전까지 이 자리에서] 회전 구제를 체인 끝에 두면, 20~70도
         // 코드는 풀프레임 TryHarder / +Invert / 풀옵션을 전부 지나고
