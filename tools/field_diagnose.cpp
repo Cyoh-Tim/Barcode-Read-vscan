@@ -162,7 +162,9 @@ void cfgDeadline300(vscan_config_t& c) { c.max_frame_ms = 300; }
 // 잘라서 버는 게 아니라 **안 할 일을 안 하게** 해서 번다. 근거는 §3.62.
 void cfgQrOnly(vscan_config_t& c) { c.symbology_mask = VSCAN_FMT_QR | VSCAN_FMT_MICRO_QR; }
 void cfgQrOnlyDl(vscan_config_t& c) { cfgQrOnly(c); c.max_frame_ms = 100; }
-// [빠른 불판독] 재촬영이 되는 배치용. 이미지 수술 단계를 끊고 빨리 "못 읽겠다"고
+// [빠른 불판독] 재촬영이 되는 배치용. **사실상 QR 전용이다** — 영역 구제를
+// 끄는데 그게 회전된 코드를 담당해서, 0~90도 스윕에서 CODE128 100->21%,
+// PDF417 100->10%다(QR만 100% 유지). 근거는 vscan.h의 fast_no_read 주석. 이미지 수술 단계를 끊고 빨리 "못 읽겠다"고
 // 답한다. 여기서 봐야 할 것은 코드 수가 아니라 **불판독 판정 시간**이다.
 void cfgFastNoRead(vscan_config_t& c) { cfgQrOnly(c); c.fast_no_read = 1; }
 // [경로 선택이 판정 시간을 크게 가른다 — §3.66]

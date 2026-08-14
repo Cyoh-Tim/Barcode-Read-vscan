@@ -226,6 +226,27 @@ fi
 #
 # 시간도 같이 본다 — 깨끗한 빈 프레임은 빈 프레임 건너뛰기가 0ms로
 # 만들어야 한다(§3.72).
+# [3.73] 권장 조합(fast_no_read)이 QR 회전에서 안 깨지나
+#
+# 게이트의 각도 스윕은 **기본 설정**으로만 돈다. 그런데 우리가 컨베이어에
+# 권하는 것은 fast_no_read다. 그 설정이 회전 축에서 깨져도 지금까지는
+# 아무도 몰랐다 — 실제로 재보니 회전된 1D는 크게 잃는다(CODE128 100->21%,
+# PDF417 100->10%). QR만 100%를 지킨다.
+#
+# 그래서 **권장 조합의 전제(QR은 회전에 안 잃는다)** 를 게이트로 건다.
+# 이게 깨지면 examples/conveyor_capture_controlled.cpp의 권고가 거짓이 된다.
+echo ">> [3.73/5] 권장 조합(fast_no_read) QR 회전 확인"
+FNR_OUT=$(python3 "$ROOT/tools/generate_corpus.py" --sweep angle:0:90:5 \
+            --base sym=QR,module=8,count=1 --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+          | VSCAN_FASTNR=1 VSCAN_FLAGS=2 "$VERIFY" --stdin --paths full,2stage --reps 1 --quiet 2>/dev/null \
+          | grep -E "^(full|2stage) " | tr -s ' ')
+FNR_BAD=$(echo "$FNR_OUT" | awk '{if ($4 != "100.0%" || $5 != "0") b++} END{print b+0}')
+echo "   QR 19각도 x 2경로: $(echo "$FNR_OUT" | awk '{printf "%s %s(오디%s) ", $1, $4, $5}')"
+if [ "${FNR_BAD:-9}" != "0" ]; then
+  echo "!! fast_no_read + NO_INVERT에서 QR 회전이 깨졌다 — 권장 조합의 전제가 무너진다"
+  exit 1
+fi
+
 echo ">> [3.75/5] 빈 프레임 유령 확인"
 EMPTY_DIR="$WORK/empty"
 python3 "$ROOT/tools/generate_empty.py" "$EMPTY_DIR" >/dev/null 2>&1
