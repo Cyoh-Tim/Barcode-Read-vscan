@@ -217,6 +217,34 @@ fi
 # 이 단계는 "옵션을 켰는데 결과도 시간도 안 바뀌면 실패"를 건다. 저조도
 # 코퍼스를 쓰는 이유는 실패 프레임이 많아 **깊은 단계까지 도달**하기
 # 때문이다(40종은 대부분 얕은 단계에서 성공해서 이 검사가 무의미하다).
+# [3.75] 빈 프레임 — 유령이 나오면 안 된다
+#
+# 이 게이트의 다른 코퍼스는 **전부 코드가 있는 프레임**이다. 그래서
+# "코드가 없는데 뭔가를 만들어내는" 회귀를 원리적으로 못 잡는다.
+# 컨베이어에서는 물건 사이 간격 프레임이 계속 들어오므로, 거기서 나오는
+# 유령은 그대로 오디코딩이다(§3.18: 미검출 < 오디코딩).
+#
+# 시간도 같이 본다 — 깨끗한 빈 프레임은 빈 프레임 건너뛰기가 0ms로
+# 만들어야 한다(§3.72).
+echo ">> [3.75/5] 빈 프레임 유령 확인"
+EMPTY_DIR="$WORK/empty"
+python3 "$ROOT/tools/generate_empty.py" "$EMPTY_DIR" >/dev/null 2>&1
+# 1D 바코드처럼 보이는 무늬(벨트 리브 / 슬랫 / 나무결 / 그물)도 같이 넣는다.
+# 컨베이어에서 유령이 실제로 태어나는 자리다.
+python3 "$ROOT/tools/generate_texture.py" "$EMPTY_DIR" >/dev/null 2>&1 || true
+EMPTY_OUT=$("$VERIFY" "$EMPTY_DIR" --paths full,2stage --reps 1 --quiet 2>/dev/null \
+            | grep -E "^(full|2stage) " | tr -s ' ')
+# 3번째 칸은 "찾은수/기대수" 꼴이라 앞 숫자만 뗀다. awk가 "0/0"을 0으로
+# 읽어주긴 하지만, 형식이 바뀌면 조용히 틀리므로 명시적으로 자른다.
+EMPTY_GHOST=$(echo "$EMPTY_OUT" | awk '{split($3,a,"/"); s+=a[1]} END{print s+0}')
+EMPTY_N=$(find "$EMPTY_DIR" -name '*.pgm' | wc -l)
+echo "   빈/무늬 프레임 ${EMPTY_N}장에서 나온 코드: ${EMPTY_GHOST}개 (0이어야 한다)"
+if [ "${EMPTY_GHOST:-99}" != "0" ]; then
+  echo "!! 빈 프레임에서 코드가 나왔다 — 전부 유령이다"
+  echo "$EMPTY_OUT"
+  exit 1
+fi
+
 echo ">> [3.8/5] 공개 손잡이 생존 확인"
 AUDIT="$WORK/audit_config"
 g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/audit_config.cpp" \
