@@ -443,11 +443,22 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
     const int W = src.width, H = src.height;
     out.width = W;
     out.height = H;
-    out.pixels.assign(static_cast<size_t>(W) * H, 0);
-    if (W <= 0 || H <= 0) return;
+    if (W <= 0 || H <= 0) { out.pixels.assign(static_cast<size_t>(W) * H, 0); return; }
+    out.pixels.resize(static_cast<size_t>(W) * H);   // 어차피 전부 덮어쓴다 — 0으로 밀지 않는다
     const int stride = src.stride > 0 ? src.stride : W;
     const int r = std::max(1, std::min(radius, std::min(W, H) / 2));
     const int n = 2 * r + 1;
+
+    // [나눗셈 대체는 두 패스가 같이 쓴다]
+    // 아래 세로 패스 주석의 정확 조건 그대로다. 예전에는 세로 패스만
+    // 이 최적화를 받았는데, 가로 패스도 값 범위(acc <= 255*n)가 같아서
+    // 같은 조건으로 안전하다. 조건이 안 맞으면 둘 다 나눗셈으로 되돌린다.
+    constexpr int kShift = 21;
+    const int64_t N = 255LL * n;
+    const int M = static_cast<int>((1 << kShift) / n + (((1 << kShift) % n) ? 1 : 0));
+    const bool fastDiv = (static_cast<int64_t>(M) * n - (1 << kShift)) * N <= (1 << kShift) &&
+                         N * M < (1LL << 31);
+    auto divn = [&](int acc) { return fastDiv ? ((acc * M) >> kShift) : (acc / n); };
 
     std::vector<int> tmp(static_cast<size_t>(W) * H);
     for (int y = 0; y < H; ++y) {
@@ -456,11 +467,16 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
         int acc = 0;
         for (int x = -r; x <= r; ++x) acc += px(x);
         int* __restrict o = tmp.data() + static_cast<size_t>(y) * W;
-        for (int x = 0; x < W; ++x) {
-            o[x] = acc / n;
-            acc -= px(x - r);
-            acc += px(x + r + 1);
+        // [경계를 루프 밖으로] 예전에는 안쪽 루프가 화소마다 clamp를 두 번
+        // 했다(min+max x2). 가장자리 r칸만 clamp가 필요하므로 구간을 셋으로
+        // 쪼개면 가운데 구간에서 분기가 통째로 사라진다.
+        const int lo = std::min(r, W), hi = std::max(lo, W - r - 1);
+        for (int x = 0; x < lo; ++x) { o[x] = divn(acc); acc += px(x + r + 1) - px(x - r); }
+        for (int x = lo; x < hi; ++x) {   // clamp 불필요 구간
+            o[x] = divn(acc);
+            acc += static_cast<int>(row[x + r + 1]) - static_cast<int>(row[x - r]);
         }
+        for (int x = hi; x < W; ++x) { o[x] = divn(acc); acc += px(x + r + 1) - px(x - r); }
         // (가로 패스는 누적합이 순차 의존이라 원리적으로 벡터화가 안 된다)
     }
     // [세로 패스는 행 단위로] 열을 하나씩 세로로 훑으면 매 접근이 다른
@@ -491,12 +507,6 @@ void boxBlur(const GrayView& src, int radius, GrayImage& out) {
      * 안 맞으면 나눗셈으로 되돌린다.** K=21에서 n<=387이면 대체로 통과한다
      * (파이썬으로 n=3..401 전수 x 전 범위 검증: 불일치 0).
      */
-    constexpr int kShift = 21;
-    const int64_t N = 255LL * n;
-    const int M = static_cast<int>((1 << kShift) / n + (((1 << kShift) % n) ? 1 : 0));
-    const bool fastDiv = (static_cast<int64_t>(M) * n - (1 << kShift)) * N <= (1 << kShift) &&
-                         N * M < (1LL << 31);
-
     for (int y = 0; y < H; ++y) {
         uint8_t* __restrict o = out.pixels.data() + static_cast<size_t>(y) * W;
         const int* __restrict cs = colSum.data();

@@ -602,7 +602,12 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 프레임 단위 구제(뭉개기/평탄화)는 예산으로 자르지 않는다. 각각
     // 필터 한 번 + 찾기 한 번이라 비용이 정해져 있고, 자르면 노이즈/그림자
     // 축이 바로 깎인다. 예산은 **영역을 여러 개 도는 값**을 자르는 데 쓴다.
-    if (!cfg_.disableDenoiseRescue && (!preDenoised_ || dnAgain)) {
+    // fastNoRead에서는 노이즈 **구제**도 뺀다. 실측(2단계, reps 3):
+    //   저조도  23 -> 23코드, 판정 42.2 -> 32.4ms
+    //   혼합   257 -> 256코드, 판정 107.4 -> 76.8ms (-29%)
+    // 뭉개서 다시 보는 값이 재촬영보다 비싸다. 단 **선 디노이즈는 남긴다** —
+    // 그것까지 빼면 저조도가 23 -> 16코드로 무너진다(§3.61).
+    if (!cfg_.disableDenoiseRescue && !cfg_.fastNoRead && (!preDenoised_ || dnAgain)) {
         GrayImage smoothed;
         { Stage st("dn:filter");
           if (dnAgain) boxBlur(view, 2, smoothed);
