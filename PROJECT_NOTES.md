@@ -6819,6 +6819,28 @@ file build-a64/libvscan.so     # -> ELF 64-bit LSB shared object, ARM aarch64
 
 118개 타깃(zxing / zbar / libvscan / 예제·도구 전부)이 오류 없이 빌드된다.
 
+#### 결과가 같은지까지 확인하기 — `tools/verify_aarch64.sh`
+
+빌드가 되는 것과 **결과가 같은 것**은 다르다. 이 저장소의 측정은 전부
+x86에서 하고 보드는 x8로 환산하는데(§3.60), 그 환산은 **시간**에 대한
+것이지 검출이 같다는 보증이 아니다.
+
+`qemu-user-static`을 같이 깔면 크로스 빌드한 산출물을 그대로 돌려서
+프레임 단위로 대조할 수 있다:
+
+```bash
+sudo apt install g++-aarch64-linux-gnu qemu-user-static
+tools/verify_aarch64.sh
+```
+
+실측(2026-08-04): 고정 40종 x 두 경로에서 **x86 120코드/오디코딩 0,
+aarch64 120코드/오디코딩 0으로 프레임 단위까지 같다.**
+
+**시간은 안 본다.** qemu 사용자 모드는 명령 단위 에뮬레이션이라 실기
+속도와 무관하다(x86 네이티브의 5~15배 느리다). 그래서 기본 게이트에는
+안 넣었다 — 40종 한 바퀴에 몇 분이 든다. SIMD/빌드/서드파티를 건드렸을
+때 돌리면 된다.
+
 **중요**: Yocto SDK의 `CC`/`CXX`는 "컴파일러 경로 + `--sysroot`/`-march` 등
 플래그"가 **한 문자열로 합쳐져 있다.** 이걸 `-DCMAKE_C_COMPILER="$CC"`로
 넘기면 CMake가 전체 문자열을 실행파일 경로로 취급해서 실패한다.
