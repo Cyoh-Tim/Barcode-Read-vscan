@@ -91,10 +91,14 @@ Pipeline::BudgetGuard::BudgetGuard(Pipeline* pp) : p(pp), owner(false) {
     p->deadlineOwned_ = true;
     owner = true;
     p->deadlineActive_ = false;
+    p->hardDeadlineActive_ = false;
     if (p->cfg_.maxFrameMs > 0) {
         p->deadline_ = std::chrono::steady_clock::now() +
                        std::chrono::milliseconds(p->cfg_.maxFrameMs);
         p->deadlineActive_ = true;
+        // 첫 영역용 마감도 여기를 못 넘는다([[vscan-lite-hard-deadline]]).
+        p->hardDeadline_ = p->deadline_;
+        p->hardDeadlineActive_ = true;
     }
     overArm(p->deadline_, p->deadlineActive_);
 }
@@ -102,6 +106,7 @@ Pipeline::BudgetGuard::~BudgetGuard() {
     if (owner) {
         overDump();
         p->deadlineActive_ = false; p->deadlineOwned_ = false; p->firstRectActive_ = false;
+        p->hardDeadlineActive_ = false;
     }
 }
 
@@ -132,6 +137,8 @@ void Pipeline::armSelfBudget(double firstPassMs) {
     deadlineFirst_ = std::chrono::steady_clock::now() +
                      std::chrono::microseconds(static_cast<long long>(
                          std::max(0.0, totalFirst - firstPassMs) * 1000.0));
+    // [[vscan-lite-hard-deadline]] — maxFrameMs는 첫 영역에도 상한이다.
+    if (hardDeadlineActive_ && deadlineFirst_ > hardDeadline_) deadlineFirst_ = hardDeadline_;
 }
 
 namespace {
@@ -2092,6 +2099,7 @@ std::vector<PipelineResult> Pipeline::tryDeskewRescue1D(const GrayView& image, i
 std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image, int cropPadPx) {
     if (image.empty()) return {};
     BudgetGuard budget(this);
+    const auto twoStageT0 = std::chrono::steady_clock::now();
     if (!frameHasStructure(image)) return {};   // [[vscan-lite-blank-frame-skip]]
     FrameGuard frameGuard(this);
     regionCropDone_ = false;   // 프레임마다 초기화 (조기/늦은 슬롯 중복 방지)
@@ -2228,7 +2236,14 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
 
     Pipeline fast(fastCfg);
     std::vector<PipelineResult> hits;
+    const auto fastT0 = std::chrono::steady_clock::now();
     { Stage st("ts:fast"); hits = fast.processViewCore(view); }
+    if (cfg_.twoStageSelfBudget) {
+        // 이 프레임을 한 번 정직하게 훑는 값 = coarse + fast. 그 배수로
+        // 마감을 잡는다([[vscan-lite-two-stage-self-budget]]).
+        armSelfBudget(std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - twoStageT0).count());
+    }
     if (enough(hits)) { adaptiveObserve(hits); return hits; }
     if (lowContrastPartial_.size() > hits.size()) hits = lowContrastPartial_;
 

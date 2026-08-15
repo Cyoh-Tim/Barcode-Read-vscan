@@ -96,6 +96,7 @@ void oMicroPdf(vscan_config_t& c)      { c.enable_micro_pdf417 = 1; }
 void oDotCode(vscan_config_t& c)       { c.enable_dotcode = 1; }
 void oAdaptive(vscan_config_t& c)      { c.enable_adaptive_profile = 1; }
 void oAutoExp(vscan_config_t& c)       { c.auto_expected_codes = 1; }
+void oTsBudget(vscan_config_t& c)      { c.two_stage_self_budget = 1; }
 
 const Opt kOpts[] = {
     {"tile_overlap_px=80",        nullptr, oTileOverlap},
@@ -128,6 +129,7 @@ const Opt kOpts[] = {
     {"enable_dotcode",            "해당 심볼로지가 없으면 변화 없음이 정상", oDotCode},
     {"enable_adaptive_profile",   "프레임 간 학습이라 1장 반복으로는 안 보일 수 있다", oAdaptive},
     {"auto_expected_codes=1",     "코드가 하나뿐인 프레임에서는 변화 없음이 정상", oAutoExp},
+    {"two_stage_self_budget=1",   "쉬운 프레임은 마감에 안 닿으므로 변화 없음이 정상", oTsBudget},
 };
 constexpr int kNumOpts = static_cast<int>(sizeof(kOpts) / sizeof(kOpts[0]));
 

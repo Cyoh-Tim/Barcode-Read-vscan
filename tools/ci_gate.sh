@@ -337,7 +337,7 @@ echo ">> [3.795/5] 권장 조합(auto_expected + 마감) — 검출과 지연을
 # 여기서 지킨다 — 하나만 재면 나머지가 조용히 무너질 수 있다.
 AER_OUT=$(python3 "$ROOT/tools/generate_corpus.py" -n 120 --difficulty mixed \
             --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
-          | VSCAN_AUTOEXP=1 VSCAN_MAXFRAME=60 "$VERIFY" --stdin --paths 2stage \
+          | VSCAN_AUTOEXP=1 VSCAN_TSBUDGET=1 VSCAN_MAXFRAME=60 "$VERIFY" --stdin --paths 2stage \
               --reps 1 --quiet --no-min-expected 2>/dev/null \
           | grep -E "^2stage " | tr -s ' ')
 AER_RATE=$(echo "$AER_OUT" | cut -d' ' -f4 | tr -d '%')

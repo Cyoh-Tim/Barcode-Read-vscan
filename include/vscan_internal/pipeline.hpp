@@ -639,6 +639,21 @@ struct PipelineConfig {
     bool autoExpectedCodes = false;
 
     /*
+     * [2단계 경로에서도 자기 보정 예산을 무장한다] 기본 끔.
+     *
+     * 자기 보정 예산은 `processView()` 안에서만 무장돼서, 2단계 경로가 그
+     * 전에 도는 계단들은 통째로 예산 밖이다(frameBudgetMaxMs 주석 참고 —
+     * 그래서 그 절대 상한이 "거의 안 듣는다"고 적혀 있다). 지연을 묶으려면
+     * maxFrameMs라는 **절대 벽시계**를 줘야 하는데, 그 값은 하드웨어마다
+     * 다르다(이 저장소 기준 보드가 x86의 약 8배).
+     *
+     * 이 손잡이는 2단계 진입 직후의 빠른 패스를 기준으로 같은 예산을
+     * 무장한다. 순수 상대값이라 **하드웨어가 바뀌어도 같은 뜻**이다.
+     * [[vscan-lite-two-stage-self-budget]]
+     */
+    bool twoStageSelfBudget = false;
+
+    /*
      * [S4 — 저대비 프레임은 영역 경로를 먼저]
      *
      * 풀프레임 패스(coarse + fast, 12ms)는 대비가 무너진 프레임에서
@@ -818,6 +833,22 @@ private:
     // 첫 영역 전용(더 넉넉한) 마감과 그 구간 표시. 아래 armSelfBudget 주석 참고.
     std::chrono::steady_clock::time_point deadlineFirst_{};
     bool firstRectActive_ = false;
+    /*
+     * [maxFrameMs가 만든 **딱딱한** 마감]
+     *
+     * armSelfBudget()은 첫 영역에 더 넉넉한 마감(deadlineFirst_)을 주는데,
+     * 그 계산이 frameBudgetMaxMs만 보고 **maxFrameMs는 안 봤다.** 그래서
+     * 자기 보정 예산이 무장되는 순간 `max_frame_ms`가 상한이 아니게 된다 —
+     * 실측(자동 기대 개수 + max_frame_ms=60): p95가 109ms였다. 헤더는 이
+     * 옵션을 "지연을 실제로 묶는 것"이라고 문서화하고 있으니 문서가
+     * 거짓말을 하고 있었던 셈이다.
+     *
+     * maxFrameMs로 잡힌 시각을 따로 들고 있다가 deadlineFirst_를 거기까지만
+     * 늦춘다. maxFrameMs가 0이면 이 값은 안 쓴다.
+     * [[vscan-lite-hard-deadline]]
+     */
+    std::chrono::steady_clock::time_point hardDeadline_{};
+    bool hardDeadlineActive_ = false;
     // 예산을 시작하고 스코프를 벗어날 때 해제하는 가드. 이미 활성이면(=중첩
     // 호출이면) 아무것도 하지 않는다.
     struct BudgetGuard {

@@ -114,6 +114,7 @@ vscan_pipeline_t* vscan_create(const vscan_config_t* cfg) {
         if (cfg->disable_auto_denoise) pcfg.autoDenoise = 0;
         if (cfg->fast_no_read) pcfg.fastNoRead = true;
         if (cfg->auto_expected_codes) pcfg.autoExpectedCodes = true;
+        if (cfg->two_stage_self_budget) pcfg.twoStageSelfBudget = true;
         // 0/음수는 "기본값 유지"다. 0을 "끔"으로 읽으면 구조체를 0으로
         // 초기화한 기존 호출자가 조용히 기능을 잃는다.
         if (cfg->auto_denoise_strong_noise > 0)

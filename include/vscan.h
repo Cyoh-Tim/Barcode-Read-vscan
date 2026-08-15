@@ -666,6 +666,7 @@ typedef struct {
      * 무장돼서 2단계 경로의 앞 계단들은 예산 밖이다 — 실측상 상한을
      * 600~100 어느 값으로 줘도 검출/지연이 사실상 그대로였다.
      * **지연을 실제로 묶으려면 `max_frame_ms`를 쓸 것.** 기본 0(끔).
+     * 2단계 경로에서도 상대 마감을 원하면 `two_stage_self_budget`(§3.95).
      */
     int frame_budget_max_ms;
 
@@ -705,6 +706,20 @@ typedef struct {
      * 자세한 것은 examples/inbound_readall_bounded.cpp 참고.
      */
     int auto_expected_codes;
+
+    /*
+     * [2단계 경로에도 상대 마감을 건다] 0 = 기본(끔), 1 = 켬.
+     *
+     * `max_frame_ms`는 **절대 벽시계**라 하드웨어가 바뀌면 뜻이 바뀐다
+     * (이 저장소 기준 보드가 x86의 약 8배 느리다). 이 손잡이는 대신
+     * "이 프레임을 한 번 훑는 값의 몇 배"라는 **상대 마감**을 2단계 경로
+     * 진입에서 무장한다 — 느린 하드웨어에서는 마감도 같이 늘어나므로
+     * 값을 다시 재서 넣을 필요가 없다.
+     *
+     * 절대 지연 상한이 필요하면 여전히 `max_frame_ms`가 맞다. 둘을 같이
+     * 주면 **이른 쪽**이 마감이다.
+     */
+    int two_stage_self_budget;
 } vscan_config_t;
 
 /* cfg가 NULL이면 기본값(threads=auto, overlap=500, zbar=off,

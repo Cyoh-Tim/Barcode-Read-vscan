@@ -364,6 +364,7 @@ int main(int argc, char** argv) {
             c.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             c.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
             c.auto_expected_codes = getenv("VSCAN_AUTOEXP") != nullptr;
+            c.two_stage_self_budget = getenv("VSCAN_TSBUDGET") != nullptr;
             c.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             if (const char* me = getenv("VSCAN_MINEXP")) c.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) c.decode_flags = strtoul(df, nullptr, 0);
@@ -413,6 +414,7 @@ int main(int argc, char** argv) {
             cfg.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             cfg.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
             cfg.auto_expected_codes = getenv("VSCAN_AUTOEXP") != nullptr;
+            cfg.two_stage_self_budget = getenv("VSCAN_TSBUDGET") != nullptr;
             cfg.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             if (const char* me = getenv("VSCAN_MINEXP")) cfg.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) cfg.decode_flags = strtoul(df, nullptr, 0);
