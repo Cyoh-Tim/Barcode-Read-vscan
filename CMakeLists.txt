@@ -170,6 +170,13 @@ if(VSCAN_BUILD_EXAMPLE)
   add_executable(conveyor_capture_controlled examples/conveyor_capture_controlled.cpp)
   target_link_libraries(conveyor_capture_controlled PRIVATE vscan)
 
+  # 반대쪽 배치: "이 프레임의 코드를 다 읽어야 한다"(입고 검수/팔레트 스캔).
+  # 개수를 모를 때 자동 추정 + 마감을 같이 거는 조합이고, 근거는 §3.92~§3.96.
+  # 여기 등록해 두는 이유는 **컴파일이 계속 되게** 하려는 것이다 — 예제가
+  # 빌드에서 빠지면 헤더가 바뀌어도 아무도 모른다.
+  add_executable(inbound_readall_bounded examples/inbound_readall_bounded.cpp)
+  target_link_libraries(inbound_readall_bounded PRIVATE vscan)
+
   # ultravc CLI(vscantest 명령)가 fork+exec로 호출하는 스탠드얼론 디코더.
   # ultravc 실행파일 자체에 vscan-lite를 직접 링크하지 않는 이유는
   # tools/vscan_decode_file.cpp 상단 주석 참고 (Zxing/Zbar 버전 충돌 방지).

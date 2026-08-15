@@ -6805,6 +6805,20 @@ source /path/to/environment-setup-aarch64-poky-linux   # Yocto SDK
 ./build-aarch64.sh
 ```
 
+**Yocto SDK 없이도 확인은 된다** (2026-08-04 실측). 배포용은 아니고
+"크로스 빌드가 깨졌는지"를 보는 용도다 — §3.52에서 실제로 깨져 있던 적이
+있어서 정기적으로 확인할 값이 있다:
+
+```bash
+sudo apt install g++-aarch64-linux-gnu
+CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+  VSCAN_HOST_TRIPLE=aarch64-linux-gnu VSCAN_BUILD_DIR=build-a64 \
+  bash ./build-aarch64.sh
+file build-a64/libvscan.so     # -> ELF 64-bit LSB shared object, ARM aarch64
+```
+
+118개 타깃(zxing / zbar / libvscan / 예제·도구 전부)이 오류 없이 빌드된다.
+
 **중요**: Yocto SDK의 `CC`/`CXX`는 "컴파일러 경로 + `--sysroot`/`-march` 등
 플래그"가 **한 문자열로 합쳐져 있다.** 이걸 `-DCMAKE_C_COMPILER="$CC"`로
 넘기면 CMake가 전체 문자열을 실행파일 경로로 취급해서 실패한다.
