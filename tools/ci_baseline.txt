@@ -1,5 +1,5 @@
-rate=75.3
-frate=40.0
+rate=76.2
+frate=40.4
 mean=46.37
 p95=235.59
 misdec=0

@@ -475,7 +475,7 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
 
 
 # ============================================================ 코드 단위 열화
-def _to_dpm(arr, step=5):
+def _to_dpm(arr, step=5.0):
     """도트 각인(DPM) 흉내 — 모듈을 점으로만 찍는다.
 
     [step은 모듈 폭이어야 한다 — 2026-08-03 수정]
@@ -483,28 +483,58 @@ def _to_dpm(arr, step=5):
     5로 고정돼 있어서, 모듈이 5px보다 작으면 한 모듈에 점이 하나도 안
     들어가고 코드가 **생성 단계에서 파괴됐다.**
 
-    실측으로 드러난 경위: 난수 코퍼스에서 DPM 축의 놓침률이 46%(리프트
-    1.61)로 최악이었는데, `enable_dpm_rescue`를 켜도 160ms만 쓰고 한 개도
-    더 못 찾았다. 그런데 40종의 21_dpm_dotpeen은 구제 없이도 읽힌다.
-    차이는 모듈 폭이었다 — 40종은 QR을 400px로 그려 모듈 16px(모듈당 점
-    3개)이고, 코퍼스는 모듈 중앙값 6.5px(1.3개), 18개 중 5개는 5px 미만
-    이었다.
+    [격자를 코드에 맞춘다 — 2026-08-04 수정]
+    step을 모듈 폭으로 고친 뒤에도 DPM 축은 안 열렸다(구제를 켜도
+    45/82 그대로). 남아 있던 결함이 둘 더 있었다.
 
-    §3.29(원근)·§3.41(반전)에 이어 **세 번째로 "축이 생성기 결함이었다"**
-    가 나온 자리다. 그래서 호출부에서 모듈 폭을 넘겨받는다.
+      (1) **위상.** 격자를 픽셀 (0,0)에서 시작했다. 그런데 이 배열에는
+          정지대와(반전 케이스라면) 덧댄 여백이 앞에 붙어 있어서, 격자가
+          모듈 격자와 어긋난다. 그러면 표본 블록이 두 모듈에 걸쳐 평균이
+          나오고, 점이 엉뚱한 자리에 찍힌다.
+      (2) **누적 드리프트.** step을 `int(round(mod_px))`로 정수화했다.
+          모듈이 3.62px인데 4로 반올림하면 20모듈 코드에서 7.6px, 즉
+          **모듈 두 개**가 밀린다. 코드 끝은 통째로 어긋난다.
+
+    둘 다 "실제 각인기가 하지 않는 일"이다. 각인기는 코드의 모듈 격자를
+    알고 그 위에 찍는다. 그래서 여기서도 **코드 상자를 먼저 찾아** 격자를
+    거기에 맞추고, 피치를 실수로 유지한다(정수화하지 않는다).
+
+    §3.29(원근)·§3.41(반전)·§3.83(step)에 이어 **네 번째로 "축이 생성기
+    결함이었다"** 가 나온 자리다.
     """
+    dark = arr < 128
+    if not dark.any():
+        return arr.copy()
+    ys, xs = np.where(dark)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    step = max(2.0, float(step))
+    # 코드 상자를 모듈 수로 나눠 **실제 피치**를 얻는다. 반올림은 여기
+    # 한 번뿐이라 누적 드리프트가 없다.
+    nx = max(1, int(round((x1 - x0) / step)))
+    ny = max(1, int(round((y1 - y0) / step)))
+    sx = (x1 - x0) / nx
+    sy = (y1 - y0) / ny
+
     dot = np.full_like(arr, 255)
+    # 점 지름은 피치의 약 70%. 고정 3x3이면 모듈이 커질수록 성글어져서
+    # 실제 각인과 달라진다.
+    rx = max(1, int(round(sx * 0.35)))
+    ry = max(1, int(round(sy * 0.35)))
     h, w = arr.shape
-    # [점 크기도 같이 커져야 한다]
-    # 점을 3x3으로 고정하면 모듈이 커질수록 채움률이 떨어져서(모듈 7px에
-    # 3x3이면 18%) 실제 각인보다 훨씬 성글어진다. 실제 도트 각인은 점이
-    # 모듈 피치의 상당 부분을 채우고 이웃과 거의 닿는다.
-    r = max(1, int(round(step * 0.35)))          # 지름이 피치의 약 70%
-    for y0 in range(0, h, step):
-        for x0 in range(0, w, step):
-            if arr[y0:y0 + step, x0:x0 + step].mean() < 128:
-                cy, cx = y0 + step // 2, x0 + step // 2
-                dot[max(0, cy - r):cy + r + 1, max(0, cx - r):cx + r + 1] = 70
+    for j in range(ny):
+        ty0 = y0 + sy * j
+        for i in range(nx):
+            tx0 = x0 + sx * i
+            a0, a1 = int(round(ty0)), int(round(ty0 + sy))
+            b0, b1 = int(round(tx0)), int(round(tx0 + sx))
+            if a1 <= a0 or b1 <= b0:
+                continue
+            if arr[a0:a1, b0:b1].mean() < 128:
+                cy = int(round(ty0 + sy / 2.0))
+                cx = int(round(tx0 + sx / 2.0))
+                dot[max(0, cy - ry):min(h, cy + ry + 1),
+                    max(0, cx - rx):min(w, cx + rx + 1)] = 70
     return dot
 
 
@@ -535,8 +565,9 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None, 
         tags.append("inverted")
 
     if allow_dpm and rng.random() < 0.10 * p_deg:                     # DPM 도트 각인
+        # 피치는 **실수 그대로** 넘긴다(정수화하면 코드 끝이 밀린다).
         a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8),
-                    step=max(3, int(round(mod_px)))).astype(np.float32)
+                    step=max(3.0, float(mod_px))).astype(np.float32)
         phys["dpm"] = 1
         tags.append("dpm")
 
@@ -1116,6 +1147,7 @@ SWEEP_BASE = {
     "sym": "QR", "ec": "M", "count": 1, "module": 4.0, "angle": 0.0,
     "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
     "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0, "invert": 0.0,
+    "dpm": 0.0,
 }
 SWEEP_HELP = {
     "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
@@ -1125,6 +1157,8 @@ SWEEP_HELP = {
     "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
     "shadow": "그림자 밝기 배율 (1.0=없음)",
+    "dpm": "도트 각인 (0=없음, 1=적용). 모듈 하나에 점 하나를 찍는다 — "
+            "격자는 코드 상자에 맞추고 피치는 실수로 유지한다(_to_dpm 주석)",
     "invert": "흑백 반전 (0=없음, 1=반전). 반전 전에 흰 여백을 덧대므로 "
               "반전 후 어두운 정지대가 남는다 — '정지대 파괴'가 아닌 순수 반전 케이스",
 }
@@ -1262,6 +1296,12 @@ def build_sweep(index, combo, cfg):
                 sym = sym.resize((max(24, int(sym.width * k)),
                                   max(24, int(sym.height * k))), Image.LANCZOS)
                 eff_mod *= k
+        if float(p["dpm"]) >= 0.5:
+            # 반전보다 **먼저** 찍는다 — 실제 공정도 각인한 뒤에 촬영 극성이
+            # 정해지지, 반전된 이미지를 각인하지는 않는다.
+            sym = Image.fromarray(
+                _to_dpm(np.array(sym).astype(np.uint8), step=max(3.0, float(eff_mod))),
+                mode="L")
         if float(p["invert"]) >= 0.5:
             # 난수 경로(_degrade)와 같은 방식: 반전 전에 흰 여백을 덧대야
             # 반전 후에 어두운 정지대가 남는다. 안 그러면 "반전"이 아니라

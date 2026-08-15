@@ -313,6 +313,25 @@ if [ "$STK_FP" != "$STK_EXPECT" ]; then
   exit 1
 fi
 
+echo ">> [3.77/5] 도트 각인(DPM) 축 — 모듈 4~10"
+# DPM은 오래 "안 되는 축"이었는데 원인이 세 번 다 **생성기**였다(§3.83,
+# §3.97). 이제 통제 스윕에서 세 심볼로지가 다 열리므로, 다시 썩지 않게
+# 여기서 지킨다. 모듈 3은 3px 피치에 점 반지름 1px이라 해상도 한계라
+# 빼고 잰다(실측: 세 심볼로지 다 module 3만 실패).
+DPM_BAD=0
+DPM_LINE=""
+for S in DATAMATRIX QR CODE128; do
+  r=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "module:4:10:1" \
+        --base "sym=$S,count=1,dpm=1" --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+      | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet 2>/dev/null \
+      | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+  DPM_LINE="$DPM_LINE $S=${r}%"
+  if awk -v a="${r:-0}" 'BEGIN{exit !(a < 100.0)}'; then DPM_BAD=1; fi
+done
+echo "  $DPM_LINE"
+if [ "$DPM_BAD" != "0" ]; then
+  echo "!! DPM 축이 100% 아래로 내려갔다"; exit 1; fi
+
 echo ">> [3.79/5] 자동 기대 개수 (개수를 모를 때 남은 코드를 찾는가)"
 # auto_expected_codes는 기본 OFF라, 켜지 않으면 게이트가 통째로 못 본다.
 # 다중 코드 프레임에서 **켰을 때만** 더 찾는다는 것을 여기서 지킨다.
