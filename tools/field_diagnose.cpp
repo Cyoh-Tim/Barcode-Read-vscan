@@ -179,6 +179,28 @@ void cfgAccurateLocate(vscan_config_t& c) { cfgQrOnly(c); c.accurate_locate = 1;
 // 있는데, 줄이면 타일 경계에 걸린 코드를 잃는다 — 그 균형점은 현장 코드
 // 크기가 정하므로 여기서 직접 재게 한다. 근거는 vscan.h의 tile_overlap_px.
 void cfgOverlap240(vscan_config_t& c) { c.tile_overlap_px = 240; }
+// [개수를 몰라도 남은 코드를 찾는다 — §3.92]
+// 파이프라인은 기본적으로 코드 하나를 찾으면 끝낸다. 이 손잡이는 로케이터가
+// 준 후보 중 이미 읽은 코드로 설명되지 않는 것이 남아 있으면 계속 찾는다.
+// **한 프레임에 코드가 여럿인 배치에서만** 뜻이 있다 — 하나뿐이면 추정값이
+// 1이라 동작도 지연도 기본과 같다.
+void cfgAutoExp(vscan_config_t& c) { c.auto_expected_codes = 1; }
+// 위와 마감을 같이. §3.94/§3.96 실측으로 이 조합이 기본보다 검출·평균·p95가
+// 다 낫다. 마감은 절대 벽시계라 이 값(60ms)은 x86 기준이다.
+void cfgAutoExpDl(vscan_config_t& c) { c.auto_expected_codes = 1; c.max_frame_ms = 60;
+                                       c.two_stage_self_budget = 1; }
+// [상대 마감 — §3.95] max_frame_ms는 절대 벽시계라 하드웨어가 바뀌면 뜻이
+// 바뀐다. 이건 "이 프레임을 한 번 훑는 값의 몇 배"라 안 바뀐다.
+void cfgTsBudget(vscan_config_t& c) { c.two_stage_self_budget = 1; }
+// [컨베이어 권장 조합 그대로 — examples/conveyor_capture_controlled.cpp]
+// 재촬영이 가능하고, 심볼로지가 QR로 좁고, 극성이 일정한 배치의 조합이다.
+// 판정 최대를 보고 목표에 드는지 보는 것이 목적이다.
+void cfgConveyor(vscan_config_t& c) {
+    cfgQrOnly(c);
+    c.fast_no_read = 1;
+    c.decode_flags = VSCAN_FLAG_NO_INVERT;
+    c.max_frame_ms = 120;   // 보드 기준. x86에서 재는 중이면 15쯤이 같은 뜻이다
+}
 
 const Variant kVariants[] = {
     {"기본(full)", "vscan_process_gray() 그대로", false, cfgBase},
@@ -204,14 +226,30 @@ const Variant kVariants[] = {
     // 쥐어짜는 대신 빨리 포기하고 다시 찍는 전략이라, 잃은 검출은 다음
     // 프레임에서 회수한다는 전제가 깔린다.
     {"빠른 불판독(2단계)", "fast_no_read=1. 이미지 수술 단계(큰코드폴백/평탄화/"
-  "영역구제/노이즈구제/최종승격)를 전부 끊는다. **재촬영이 가능한 배치 전용** —"
-  " 안 되면 그냥 검출을 잃는 것이다", true, cfgFastNoRead},
+  "노이즈구제/최종승격, 그리고 영역 구제의 대비·원근·곡면·반전 단)를 끊는다."
+  " **영역 구제의 자르기는 남는다** — 그게 회전을 담당해서, 통째로 끄면 회전된"
+  " 1D를 잃는다(§3.78). **재촬영이 가능한 배치 전용** — 안 되면 그냥 검출을"
+  " 잃는 것이다", true, cfgFastNoRead},
     {"빠른 불판독(full)", "같은 설정을 vscan_process_gray()로. 판정이 2단계보다"
   " 훨씬 싼 대신 저SNR 프레임에서 덜 찾을 수 있다 — 두 줄의 코드 수를 비교할 것",
   false, cfgFastNoReadFull},
     {"옛 이진화(대조군)", "accurate_locate=1. 1단계 이진화를 예전 LocalAverage로."
   " 기본보다 코드가 많이 나오면 이 현장은 우리 코퍼스에 없는 축이라는 뜻이다",
   true, cfgAccurateLocate},
+    // [한 프레임에 코드가 여럿인 배치] 기본은 하나 찾으면 멈춘다.
+    // 개수를 알면 min_expected_codes가 낫고, 모르면 아래를 본다.
+    {"자동 기대 개수", "auto_expected_codes=1. 로케이터 후보 중 아직 안 읽힌 것이"
+  " 남아 있으면 계속 찾는다. **코드 수가 기본보다 늘면** 이 배치는 지금 부분"
+  " 검출을 하고 있었다는 뜻이다. 코드가 하나뿐인 프레임이면 아무 변화가 없다",
+  true, cfgAutoExp},
+    {"자동 기대 개수+마감", "위에 max_frame_ms=60과 상대 마감을 같이. 실측(§3.96)"
+  "으로 이 조합이 기본보다 검출·평균·p95가 다 낫다. 마감은 x86 기준값이라"
+  " 느린 보드에서는 8배쯤으로 줄 것", true, cfgAutoExpDl},
+    {"상대 마감", "two_stage_self_budget=1. \"이 프레임을 한 번 훑는 값의 몇 배\"로"
+  " 마감을 잡는다. 절대 ms와 달리 하드웨어가 바뀌어도 다시 안 재도 된다", true, cfgTsBudget},
+    {"컨베이어 권장 조합", "QR마스크 + fast_no_read + NO_INVERT + 마감. 여기서 볼 것은"
+  " 코드 수가 아니라 **판정 최대**다 — 목표에 드는지 보라. 전제 셋(재촬영 가능/"
+  "QR만/극성 일정)이 다 맞아야 한다", true, cfgConveyor},
     {"타일겹침 240", "tile_overlap_px=240(기본 500). 겹침은 그대로 중복 작업이다."
   " **코드 수가 같으면** 그만큼이 낭비였다는 뜻이고, 줄면 경계에 걸린 코드를"
   " 잃은 것이다 — 현장 코드의 세로 크기가 이 균형을 정한다", false, cfgOverlap240},
@@ -446,6 +484,20 @@ int main(int argc, char** argv) {
             std::printf("     다만 이 프레임들에서는 값이 %.1f -> %.1fms로 **더 비싸다** —\n"
                         "     승격이 자주 걸린다는 뜻이다. 검출이 같다면 기본 경로가 낫다.\n",
                         bMs, tMs);
+        // [개수를 모르는 배치] min_expected_codes는 "몇 개인지 안다"를 전제한다.
+        // 모르면 auto_expected_codes가 그 자리를 대신한다 — 다만 마감을 같이
+        // 걸어야 값이 산다(§3.94/§3.96). 실제로 이 프레임들에서 늘었을 때만
+        // 말한다.
+        const Run* pae = runByName("자동 기대 개수+마감");
+        if (pae && pae->codes > two.codes) {
+            std::printf("     **개수를 모르는 배치라면 `auto_expected_codes=1`**을 볼 것 —\n"
+                        "     로케이터 후보 중 아직 안 읽힌 것이 남아 있으면 계속 찾는다.\n"
+                        "       2단계 기본        코드 %d, 최대 %.0fms\n"
+                        "       자동 기대+마감    코드 %d, 최대 %.0fms\n"
+                        "     **마감을 같이 걸 것**(위 값은 max_frame_ms=60 + 상대 마감).\n"
+                        "     자동 추정은 \"더 찾아라\"라고만 하고 언제 멈출지는 말하지 않는다.\n",
+                        two.codes, two.worstMs, pae->codes, pae->worstMs);
+        }
     }
 
     // 심볼로지가 한두 종뿐이면 마스크를 좁히라고 권한다 — 실측 2.3~2.9배.
