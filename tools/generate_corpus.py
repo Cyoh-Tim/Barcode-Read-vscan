@@ -838,6 +838,38 @@ def background(rng, w, h, style, tags):
     return img
 
 
+# ============================================================ 센서 노이즈 바닥
+def sensor_noise_floor(arr, rng, extra_sigma=0.0):
+    """실기 센서의 **항상 있는** 노이즈를 얹는다(읽기 + 샷).
+
+    왜 필요한가. 이 생성기는 코드를 **순수 0/255**로 그리고, 노이즈는 그
+    축이 뽑혔을 때만 넣었다. 실기 센서는 밝은 데서도 읽기 노이즈와 샷
+    노이즈가 항상 있다 — 그 한 가지 차이로 전처리 결론이 실제로 뒤집혔다
+    (§3.101: "극단 화소만 남기고 번져 채우기"가 합성에서는 실패 프레임을
+    열었는데 센서 물리를 모델링한 저조도 코퍼스에서는 30 -> 0코드로
+    전멸했다).
+
+    [샷 계수는 저조도 모델의 것을 그대로 쓰면 안 된다]
+    처음에 `generate_lowlight.py`의 계수(0.55)를 그대로 썼다가 되돌렸다.
+    그 값은 **AGC 이전의 어두운 신호**에 대한 것이라, 이미 잘 노출된
+    프레임에 걸면 게인을 두 번 세는 셈이다. 실제로 그 값이면 밝은 영역
+    시그마가 8.4가 되고, 게이트의 ITF 각도 스윕이 검출 94.7% / 오디코딩 1로
+    떨어졌다 — 물리가 아니라 과장이다.
+
+    잘 노출된 프레임의 물리로 다시 잡는다. 풀웰 1만 e-가 255 DN에
+    대응한다고 보면 DN 220에서 샷 시그마는 sqrt(8600) e- = 93 e- =
+    **2.4 DN**이다. 계수 0.16이 그 값을 준다(sqrt(220) x 0.16 = 2.4).
+    읽기 노이즈 2.2와 합치면 밝은 영역 총 시그마 약 3.3 DN이다.
+
+    extra_sigma: 노이즈 축이 따로 잡혀 있으면 그 값을 제곱합으로 더한다.
+    [[vscan-lite-sensor-noise-floor]]
+    """
+    read = 2.2
+    shot = np.sqrt(np.maximum(arr, 0.0)) * 0.16
+    sigma = np.sqrt(read ** 2 + shot ** 2 + float(extra_sigma) ** 2)
+    return arr + rng.normal(0, 1, size=arr.shape) * sigma
+
+
 # ============================================================ 프레임 열화
 def _motion_blur(a, length, angle_deg):
     rad = math.radians(angle_deg)
@@ -1043,11 +1075,14 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes, phys=None):
         phys["gain"] = g
         tags.append("underexposed" + ("-strong" if g < 0.25 else ""))
 
+    extra = 0.0
     if "noise" in picks:
-        s = float(np.interp(sev, [0, 1], [12, 58]))
-        a = a + rng.normal(0, s, size=(h, w))
-        phys["noise"] = s
-        tags.append("noise" + ("-strong" if s > 35 else ""))
+        extra = float(np.interp(sev, [0, 1], [12, 58]))
+        phys["noise"] = extra
+        tags.append("noise" + ("-strong" if extra > 35 else ""))
+    # 센서 노이즈는 **항상** 있다([[vscan-lite-sensor-noise-floor]]).
+    # 축이 잡혔으면 그 값을 제곱합으로 함께 넣는다.
+    a = sensor_noise_floor(a, rng, extra)
 
     return a
 
@@ -1481,8 +1516,9 @@ def build_sweep(index, combo, cfg):
         arr = arr * band
     if p["bright"] != 1.0:
         arr = arr * float(p["bright"])
-    if p["noise"]:
-        arr = arr + rng.normal(0, float(p["noise"]), size=(h, w))
+    # 센서 노이즈 바닥은 축과 무관하게 항상 얹는다
+    # ([[vscan-lite-sensor-noise-floor]]). 축이 있으면 제곱합으로 합친다.
+    arr = sensor_noise_floor(arr, rng, float(p["noise"]))
 
     fphys = {"blur": float(p["blur"]), "motion": float(p["motion"]),
              "noise": float(p["noise"]), "gain": float(p["bright"]),
