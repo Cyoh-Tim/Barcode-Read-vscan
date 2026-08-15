@@ -393,10 +393,14 @@ CLU_MAX=$(VSCAN_FASTNR=1 VSCAN_FMTMASK=1 VSCAN_FLAGS=1 VSCAN_MAXFRAME=15 \
           "$VERIFY" "$CLU_DIR" --paths 2stage --reps 3 --quiet --csv "$WORK/clu.csv" 2>/dev/null >/dev/null; \
           awk -F, 'NR>1 && $8>m {m=$8} END{printf "%.1f", m}' "$WORK/clu.csv")
 CLU_GHOST=$(awk -F, 'NR>1 {s+=$4} END{print s+0}' "$WORK/clu.csv")
-echo "   판정 최대 ${CLU_MAX}ms (보드 환산 x8) / 유령 ${CLU_GHOST}개"
-# 상한 20ms = 보드 160ms. 실측 11.2ms의 1.8배로 둔다.
+# [단위 — 틀렸던 자리다] 예전에는 x86 실측값을 찍으면서 "(보드 환산 x8)"
+# 이라고 붙여 놨다. 값은 x86인데 라벨은 보드였다. 이 저장소의 모든 측정이
+# x86이고 보드는 x8이라는 규칙(§3.60)이 있으니, **두 값을 같이 찍는다.**
+CLU_MAX_BOARD=$(awk -v a="${CLU_MAX:-0}" 'BEGIN{printf "%.0f", a*8}')
+echo "   판정 최대 x86 ${CLU_MAX}ms  =  보드 환산 ${CLU_MAX_BOARD}ms / 유령 ${CLU_GHOST}개"
+# 상한은 **x86 20ms = 보드 160ms**. 실측 x86 11.2ms의 1.8배로 둔다.
 if awk -v a="${CLU_MAX:-999}" 'BEGIN{exit !(a > 20.0)}'; then
-  echo "!! 컨베이어 설정의 판정 최대가 20ms(보드 160ms)를 넘었다"; exit 1; fi
+  echo "!! 컨베이어 설정의 판정 최대가 x86 20ms(= 보드 160ms)를 넘었다"; exit 1; fi
 if [ "${CLU_GHOST:-99}" != "0" ]; then
   echo "!! 잡동사니 프레임에서 코드가 나왔다 — 전부 유령이다"; exit 1; fi
 
@@ -500,7 +504,9 @@ norm() { awk -v a="$1" -v r="$2" 'BEGIN{ if (r>0) printf "%.2f", a/r*1000; else 
 MEANR="$(norm "$MEAN" "$REF_MS")"
 P95R="$(norm "$P95" "$REF_MS")"
 echo "   개수 줌: 검출 ${RATE}% / 오디코딩 ${MISDEC} / 중복 ${DUP}"
-echo "   개수 모름(현장): 검출 ${FRATE}% / 평균 ${MEAN}ms / p95 ${P95}ms"
+# 시간은 전부 **x86 실측**이다(보드는 x8 — §3.60). 라벨을 안 붙이면
+# 다음 사람이 보드 값으로 읽는다. 실제로 위에서 한 번 그렇게 틀렸다.
+echo "   개수 모름(현장): 검출 ${FRATE}% / 평균 ${MEAN}ms / p95 ${P95}ms  [x86 · 보드는 x8]"
 echo "   (기준 작업량 ${REF_MS}ms 대비: 평균 ${MEANR} / p95 ${P95R})"
 
 echo ">> [5/5] 기준선 비교"

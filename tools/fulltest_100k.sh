@@ -14,6 +14,11 @@
 #
 #   tools/fulltest_100k.sh [출력디렉터리]
 #
+# **시간 단위**: 요약의 mean_ms_x86 / p95_ms_x86은 전부 x86 실측이다.
+# 보드(i.MX8MP) 값은 x8을 곱한다(§3.60). 그리고 이 스크립트가 로그에 찍는
+# 진행 시간(장당 몇 ms, 전체 몇 시간)은 **파이썬 생성기 시간까지 포함한
+# 벽시계**라 라이브러리 성능 지표가 아니다 — 성능은 요약 표의 두 열이다.
+#
 # 환경변수:
 #   FT_JOBS     생성 병렬도 (기본 nproc)
 #   FT_MODULES  격자를 돌릴 기준 모듈 크기 (기본 "4 8")
@@ -36,7 +41,10 @@ g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/verify_accuracy.cpp" \
 SYMS="$(python3 -c "import sys;sys.path.insert(0,'$ROOT/tools');import generate_corpus as g;print(' '.join(sorted(g._SWEEP_PAYLOAD)))")"
 
 SUMMARY="$OUT/summary.tsv"
-[ -f "$SUMMARY" ] || printf 'grid\tsym\tmodule\tframes\tcodes_found\tcodes_total\trate\tmisdec\tdup\tmean_ms\tp95_ms\n' > "$SUMMARY"
+# [단위] mean_ms / p95_ms는 **x86 실측**이다. 이 저장소 기준 보드(i.MX8MP)는
+# 약 8배 느리므로 보드 값은 x8이다(§3.60). 열 이름에 박아 둔다 — 라벨이
+# 없으면 다음 사람이 보드 값으로 읽는다(게이트에서 실제로 그렇게 틀렸다).
+[ -f "$SUMMARY" ] || printf 'grid\tsym\tmodule\tframes\tcodes_found\tcodes_total\trate\tmisdec\tdup\tmean_ms_x86\tp95_ms_x86\n' > "$SUMMARY"
 
 # 한 격자를 돌리고 요약 한 줄을 남긴다. 축은 여러 개를 곱한다(데카르트 곱).
 # FT_WH="가로 세로"를 주면 그 해상도로 만든다(기본은 생성기 기본값).
