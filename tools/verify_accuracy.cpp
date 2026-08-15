@@ -363,6 +363,7 @@ int main(int argc, char** argv) {
             // 이게 실제로 일하고 있는지는 껐을 때의 차이로만 알 수 있다.
             c.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             c.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
+            c.auto_expected_codes = getenv("VSCAN_AUTOEXP") != nullptr;
             c.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             if (const char* me = getenv("VSCAN_MINEXP")) c.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) c.decode_flags = strtoul(df, nullptr, 0);
@@ -411,6 +412,7 @@ int main(int argc, char** argv) {
             cfg.validate_itf_checksum = getenv("VSCAN_ITFSUM") != nullptr;
             cfg.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             cfg.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
+            cfg.auto_expected_codes = getenv("VSCAN_AUTOEXP") != nullptr;
             cfg.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
             if (const char* me = getenv("VSCAN_MINEXP")) cfg.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) cfg.decode_flags = strtoul(df, nullptr, 0);

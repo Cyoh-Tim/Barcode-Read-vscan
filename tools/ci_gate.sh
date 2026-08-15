@@ -313,6 +313,24 @@ if [ "$STK_FP" != "$STK_EXPECT" ]; then
   exit 1
 fi
 
+echo ">> [3.79/5] 자동 기대 개수 (개수를 모를 때 남은 코드를 찾는가)"
+# auto_expected_codes는 기본 OFF라, 켜지 않으면 게이트가 통째로 못 본다.
+# 다중 코드 프레임에서 **켰을 때만** 더 찾는다는 것을 여기서 지킨다.
+# 지표는 코드 단위 텍스트 일치율이고, 개수는 안 준다(그게 이 손잡이의 전제다).
+AE_OFF=$(python3 "$ROOT/tools/generate_corpus.py" -n 120 --difficulty mixed \
+           --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
+         | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --no-min-expected 2>/dev/null \
+         | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+AE_ON=$(python3 "$ROOT/tools/generate_corpus.py" -n 120 --difficulty mixed \
+          --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
+        | VSCAN_AUTOEXP=1 "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --no-min-expected 2>/dev/null \
+        | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+echo "   개수 모름: 끔 ${AE_OFF}% -> 켬 ${AE_ON}%"
+if awk -v a="${AE_ON:-0}" -v b="${AE_OFF:-0}" 'BEGIN{exit !(a < b + 15.0)}'; then
+  echo "!! auto_expected_codes가 값을 못 한다 (15%p 이상 올라야 한다)"
+  exit 1
+fi
+
 echo ">> [3.8/5] 공개 손잡이 생존 확인"
 AUDIT="$WORK/audit_config"
 g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/audit_config.cpp" \

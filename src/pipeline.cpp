@@ -467,6 +467,87 @@ GrayView Pipeline::preprocessFrame(const GrayView& image) {
     return GrayView(denoiseBuf_);
 }
 
+/*
+ * [기대 개수를 프레임에서 추정한다]
+ *
+ * 에너지 로케이터를 한 번 돌려 후보 영역을 얻고, **이미 읽은 코드로
+ * 설명되지 않는** 영역을 센다. 그 수만큼 더 있다고 보고 need로 쓴다.
+ *
+ * 왜 이렇게 하나. `min_expected_codes`는 "개수를 안다"를 전제하는데
+ * 현장에서 모르는 경우가 많고, 모르면 파이프라인은 하나 찾고 끝낸다.
+ * 그렇다고 고정값을 크게 주면 **코드 하나짜리 프레임까지** 끝까지 찾느라
+ * 시간을 쓴다. 프레임에서 추정하면 그 둘을 가른다 — 남는 후보가 없으면
+ * 추정값이 hits 개수 그대로라 지연이 안 는다.
+ *
+ * 설명 판정은 "영역 넓이의 50% 이상이 이미 읽은 상자 안"이다. 로케이터
+ * 상자는 타일 격자(원본 128px) 단위라 늘 코드보다 헐렁해서, 완전 포함을
+ * 요구하면 자기 코드도 설명이 안 된다.
+ *
+ * 상한을 두는 이유는 유령이다. 벨트 리브나 나무결 같은 무늬가 후보로
+ * 잡히면 없는 코드를 계속 찾게 되는데, 그 시간은 통째로 헛돈다.
+ * [[vscan-lite-auto-expected]]
+ */
+int Pipeline::estimateExpectedCodes(const GrayView& view,
+                                    const std::vector<PipelineResult>& hits) {
+    const int have = static_cast<int>(hits.size());
+    // 후보를 넉넉히 뽑되(12) 상한은 아래에서 다시 건다.
+    /*
+     * [임계 0.30 / 상한 8 — 스윕으로 정했다]
+     * 씨드 101 300장, 개수를 안 준 조건(full 경로):
+     *   er 0.20 mr 8   414/550  172ms      er 0.20 mr 12  413  170ms
+     *   er 0.30 mr 8  **415**   164ms      er 0.30 mr 12  414  161ms
+     *   er 0.40 mr 8   411      154ms      er 0.40 mr 12  412  158ms
+     * 단일 코드 프레임 비용도 같이 봤다(QR 대비 스윕 10장):
+     *   er 0.20  30.8ms / er 0.30  30.4ms / er 0.40  36.4ms  (끔 31.0ms)
+     * 0.30이 검출 최대이면서 단일 코드에서 **공짜**다.
+     * 영역 구제의 기본 임계(0.20)보다 높은 이유는, 여기서 세는 것이
+     * "볼 가치가 있는 후보"가 아니라 "코드가 하나 더 있다는 주장"이라
+     * 더 확실한 것만 세야 하기 때문이다.
+     */
+    auto regions = findCodeRegions(view, 8, 32, 4, 0.30f);
+    if (regions.empty()) return std::max(1, have);
+
+    std::vector<Rect> known;
+    known.reserve(hits.size());
+    for (const auto& h : hits) {
+        int x0 = h.symbol.position[0].first,  x1 = x0;
+        int y0 = h.symbol.position[0].second, y1 = y0;
+        for (const auto& pt : h.symbol.position) {
+            x0 = std::min(x0, pt.first);  x1 = std::max(x1, pt.first);
+            y0 = std::min(y0, pt.second); y1 = std::max(y1, pt.second);
+        }
+        known.push_back(Rect{x0, y0, x1, y1});
+    }
+
+    int unexplained = 0;
+    for (const auto& r : regions) {
+        const double w = r.bbox.x1 - r.bbox.x0, h = r.bbox.y1 - r.bbox.y0;
+        const double ra = w * h;
+        if (ra <= 0) continue;
+        // 프레임을 통째로 덮는 상자는 코드가 아니라 배경이다(영역 구제와 같은 기준).
+        if (ra > 0.60 * static_cast<double>(view.width) * view.height) continue;
+        /*
+         * [설명 판정은 **중심점**으로 한다 — 넓이 비로 하면 안 된다]
+         * 처음에는 "영역 넓이의 50% 이상이 이미 읽은 상자 안"으로 했다가
+         * 단일 코드 프레임이 31 -> 58ms로 느려졌다. 원인이 명확하다:
+         * 로케이터 상자는 타일 격자(원본 128px) 단위라 **작은 코드보다
+         * 훨씬 크다.** 그러면 자기 코드가 든 영역조차 넓이 비를 못 넘어
+         * "설명 안 됨"으로 세어지고, 없는 코드를 계속 찾게 된다.
+         * 읽은 코드의 중심이 영역 안에 있으면 그 영역은 설명된 것이다.
+         */
+        bool covered = false;
+        for (const Rect& k : known) {
+            const double cx = 0.5 * (k.x0 + k.x1), cy = 0.5 * (k.y0 + k.y1);
+            if (cx >= r.bbox.x0 && cx <= r.bbox.x1 && cy >= r.bbox.y0 && cy <= r.bbox.y1) {
+                covered = true; break;
+            }
+        }
+        if (!covered) ++unexplained;
+    }
+    if (unexplained <= 0) return std::max(1, have);
+    return std::max(1, std::min(have + unexplained, 12));
+}
+
 std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     BudgetGuard budget(this);
     // 코드가 물리적으로 존재할 수 없는 프레임(컨베이어 아이템 사이 등)은
@@ -499,8 +580,27 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
      * `!empty()`와 같으므로 **동작이 완전히 동일하다.**
      * [[vscan-lite-full-path-need]]
      */
-    const int need = std::max(1, cfg_.minExpectedCodes);
-    if ((int)hits.size() >= need) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
+    int need = std::max(1, cfg_.minExpectedCodes);
+    /*
+     * [기대 개수 추정은 **끝내려는 순간에만** 한다]
+     *
+     * 추정에는 로케이터 한 번(실측 약 4ms)이 든다. 프레임마다 미리 돌리면
+     * 빈손 프레임에서는 통째로 헛돈다 — 어차피 계속 찾을 거라 개수를 알
+     * 필요가 없기 때문이다. 필요한 순간은 **"이제 끝내도 되나"를 묻는
+     * 그때** 하나뿐이다. 그래서 need를 채웠다고 판단될 때 한 번만 센다.
+     * ([[vscan-lite-auto-expected]])
+     */
+    bool needEstimated = false;
+    auto enough = [&](const std::vector<PipelineResult>& h) -> bool {
+        if ((int)h.size() < need) return false;
+        if (cfg_.autoExpectedCodes && cfg_.minExpectedCodes <= 1 && !needEstimated) {
+            needEstimated = true;
+            Stage st("autoexp");
+            need = std::max(need, estimateExpectedCodes(view, h));
+        }
+        return (int)h.size() >= need;
+    };
+    if (enough(hits)) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
 
     /*
      * [부분 검출 프레임에서는 프레임 전체를 다시 수술하지 않는다]
@@ -587,7 +687,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                 hits = dedup(std::move(hits));
             }
         }
-        return (int)hits.size() >= need;
+        return enough(hits);
     };
     // [큰 코드 폴백] 타일보다 큰 코드는 어느 타일에도 온전히 안 들어간다.
     // 예전에는 processViewCore() 안에 있었는데, 여기로 뺀 이유는 예산
@@ -632,7 +732,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         auto big = dedup(decodeTile(view, 0));
         // need를 채웠을 때만 끊는다(바로 위 [[vscan-lite-full-path-need]]).
         // 못 채웠어도 지금까지보다 많이 찾았으면 들고 간다.
-        if ((int)big.size() >= need) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
+        if (enough(big)) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
         if (big.size() > hits.size()) hits = std::move(big);
     }
 
@@ -650,7 +750,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     if (adaptiveNarrowed_) {
         adaptiveWiden();
         auto wide = processViewCore(view);
-        if ((int)wide.size() >= need) { adaptiveObserve(wide); return wide; }
+        if (enough(wide)) { adaptiveObserve(wide); return wide; }
         if (wide.size() > hits.size()) hits = std::move(wide);
     }
 
@@ -678,7 +778,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     if (cfg_.enableRegionRescue && !regionCropDone_ &&
         estimateLocalRange(view) < cfg_.lowContrastRange) {
         const auto rgT0 = std::chrono::steady_clock::now();
-        auto early = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
+        auto early = tryRegionRescue(view, need, RegionPass::Both);
         prof().add("region-early", std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - rgT0).count());
         if (absorb(std::move(early))) {
@@ -800,7 +900,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     if (cfg_.enableRegionRescue &&
         !(regionCropDone_ && regionRotDone_)) {
         const auto rgT0 = std::chrono::steady_clock::now();
-        auto regionHits = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes),
+        auto regionHits = tryRegionRescue(view, need,
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
         prof().add("region", std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - rgT0).count());
@@ -857,7 +957,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 있다. QR 파인더 패턴으로 직접 찾는다. [[vscan-lite-qr-finder-locate]]
     if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
         Stage st("qrfinder");
-        auto qrHits = tryQrFinderRescue(view, std::max(1, cfg_.minExpectedCodes));
+        auto qrHits = tryQrFinderRescue(view, need);
         if (absorb(std::move(qrHits))) {
             prof().dump("성공:qrfinder");
             return hits;
@@ -1796,13 +1896,18 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
             const float rad = useAngle * 3.14159265358979323846f / 180.0f;
             const float cc = std::cos(rad), ss = std::sin(rad);
             const float px = static_cast<float>(rw) / 2.0f, py = static_cast<float>(rh) / 2.0f;
-            for (auto& r : rotHits)
+            for (auto& r : rotHits) {
                 for (auto& pt : r.symbol.position) {
                     const float dx = static_cast<float>(pt.first + tightX) - px;
                     const float dy = static_cast<float>(pt.second + tightY) - py;
                     pt.first = rc.x0 + static_cast<int>(dx * cc - dy * ss + px);
                     pt.second = rc.y0 + static_cast<int>(dx * ss + dy * cc + py);
                 }
+                // 이 역회전은 근사다(tightX/tightY가 중심 유지 가정).
+                // 표시해 두면 dedup이 기하로 추측하지 않아도 된다.
+                // [[vscan-lite-approx-position]]
+                r.approxPosition = true;
+            }
             if (take(std::move(rotHits))) return true;
         }
     }
@@ -2030,7 +2135,20 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     fastCfg.binarizer = cfg_.locateBinarizer;
     fastCfg.tryDownscale = cfg_.locateTryDownscale;
 
-    const int need = std::max(1, cfg_.minExpectedCodes);
+    int need = std::max(1, cfg_.minExpectedCodes);
+    // processView와 같은 게으른 추정([[vscan-lite-auto-expected]]).
+    // 2단계 경로는 첫 단이 하나만 찾아도 반환하므로, 그 반환 직전에
+    // "정말 하나뿐인가"를 프레임에 물어보는 자리가 여기다.
+    bool needEstimated = false;
+    auto enough = [&](const std::vector<PipelineResult>& h) -> bool {
+        if ((int)h.size() < need) return false;
+        if (cfg_.autoExpectedCodes && cfg_.minExpectedCodes <= 1 && !needEstimated) {
+            needEstimated = true;
+            Stage st("autoexp");
+            need = std::max(need, estimateExpectedCodes(view, h));
+        }
+        return (int)h.size() >= need;
+    };
 
     // [S4 — 저대비 프레임은 순서를 뒤집는다]
     // 풀프레임 패스(coarse + fast, 합쳐서 12ms)는 대비가 무너진 프레임에서
@@ -2065,7 +2183,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
         Stage st("ts:region");
         auto roiHits = tryRegionRescue(view, need,
                                        earlyRotate ? RegionPass::Both : RegionPass::CropOnly);
-        if ((int)roiHits.size() >= need) { acc = std::move(roiHits); return true; }
+        if (enough(roiHits)) { acc = std::move(roiHits); return true; }
         if (roiHits.size() > acc.size()) acc = std::move(roiHits);
         return false;
     };
@@ -2092,7 +2210,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
             Pipeline coarse(fastCfg);
             Stage st("ts:coarse");
             auto ch = coarse.processViewCore(GrayView(coarseBuf_));
-            if ((int)ch.size() >= need) {
+            if (enough(ch)) {
                 // 축소본 좌표 -> 원본 좌표로 환산
                 for (auto& r : ch)
                     for (auto& pt : r.symbol.position) { pt.first *= cf; pt.second *= cf; }
@@ -2111,7 +2229,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     Pipeline fast(fastCfg);
     std::vector<PipelineResult> hits;
     { Stage st("ts:fast"); hits = fast.processViewCore(view); }
-    if ((int)hits.size() >= need) { adaptiveObserve(hits); return hits; }
+    if (enough(hits)) { adaptiveObserve(hits); return hits; }
     if (lowContrastPartial_.size() > hits.size()) hits = lowContrastPartial_;
 
     // [1.5단계 — 위치부터 찾고 그 자리만 본다]
@@ -2189,7 +2307,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
         Pipeline harder(harderCfg);
         std::vector<PipelineResult> hardHits;
         { Stage st("ts:harder"); hardHits = harder.processViewCore(view); }
-        if ((int)hardHits.size() >= need) return hardHits;
+        if (enough(hardHits)) return hardHits;
         if (hardHits.size() > hits.size()) hits = std::move(hardHits);
         if (budgetExceeded()) return hits;
     }
@@ -2221,7 +2339,7 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
         Pipeline hi(hiCfg);
         std::vector<PipelineResult> hiHits;
         { Stage st("ts:invert"); hiHits = hi.processViewCore(view); }
-        if ((int)hiHits.size() >= need) return hiHits;
+        if (enough(hiHits)) return hiHits;
         if (hiHits.size() > hits.size()) hits = std::move(hiHits);
         if (budgetExceeded()) return hits;
     }
@@ -2836,7 +2954,14 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
             bool near = std::sqrt(dx * dx + dy * dy) < kCenterDup;
 
             const bool partial = candIsPart || keptIsPart;
-            if (near || containRatio(candBox, keptBox) >= kOverlapDup ||
+            // [위치를 못 믿는 결과는 자리를 주장할 수 없다]
+            // 회전 패스의 역회전은 근사라 같은 코드가 100px 넘게 어긋날 수
+            // 있다([[vscan-lite-approx-position]]). 그러면 아래 기하 규칙이
+            // 전부 빗나가 같은 코드가 두 번 나간다. 같은 심볼로지 + 같은
+            // 텍스트인데 한쪽이 근사 위치면 중복으로 본다 — 꼭짓점이 겹친
+            // 결과를 그렇게 다루는 규칙과 같은 논리다.
+            const bool approxPair = sameText && (cand.approxPosition || kept.approxPosition);
+            if (near || containRatio(candBox, keptBox) >= kOverlapDup || approxPair ||
                 hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol) ||
                 (partial && onSameBarcodeBand(candBox, keptBox)) ||
                 (sameText && isStackedBand(candBox, keptBox)) ||
@@ -2847,7 +2972,12 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
                 // 타일 경계에서 잘린 조각보다 온전한 쪽의 꼭짓점이 정확하다.
-                const bool takeCand = partial ? keptIsPart : (areaOf(candBox) > areaOf(keptBox));
+                // 근사 위치와 정확한 위치가 붙으면 **정확한 쪽**을 남긴다.
+                // 넓이는 근사 쪽이 클 수도 있어서 기준이 안 된다.
+                bool takeCand;
+                if (cand.approxPosition != kept.approxPosition) takeCand = !cand.approxPosition;
+                else if (partial) takeCand = keptIsPart;
+                else takeCand = areaOf(candBox) > areaOf(keptBox);
                 if (takeCand) kept = std::move(cand);
                 break;
             }

@@ -12,6 +12,27 @@ namespace vscan {
 struct PipelineResult {
     DecodedSymbol symbol;
     GS1Result gs1; // symbol.isGS1일 때만 유효
+    /*
+     * [위치가 근사인가]
+     *
+     * 영역 구제의 **회전 패스**는 크롭을 각도만큼 되돌린 뒤 디코드하고,
+     * 나온 좌표를 크롭 중심 기준으로 역회전해서 되돌린다. 그 역회전은
+     * 설계상 근사다(코드 주석 [[vscan-lite-region-rotate]] 참고) — 되돌린
+     * 뒤 tightenToContent()가 상자를 또 줄이므로 중심이 밀린다.
+     *
+     * 보통은 상관없다. 그런데 **같은 코드를 다른 단이 정확한 좌표로도
+     * 읽은 경우**, 두 상자가 서로 겹치지 않을 만큼 어긋날 수 있고 그러면
+     * dedup의 기하 규칙이 전부 빗나가 같은 코드가 두 번 나간다. 실측
+     * (씨드 101 c000132, QR 62x62): 정확한 쪽이 (1414,1313), 근사한 쪽이
+     * (1300,1304)로 **114px** 어긋났다.
+     *
+     * 기하로 추측하는 대신 사실을 들고 다닌다. 위치를 못 믿는 결과는
+     * "다른 자리에 있는 다른 코드"임을 주장할 근거가 없으므로, 같은
+     * 심볼로지 + 같은 텍스트면 dedup이 중복으로 본다(꼭짓점이 겹친
+     * 결과를 그렇게 다루는 [[vscan-lite-dedup-degenerate-quad]]와 같은
+     * 논리다). [[vscan-lite-approx-position]]
+     */
+    bool approxPosition = false;
 };
 
 struct PipelineConfig {
@@ -613,6 +634,9 @@ struct PipelineConfig {
      * 0으로 두면 끈다(그러면 예전처럼 뒤쪽 dnAgain만 남는다).
      */
     float autoDenoiseStrongNoise = 45.0f;
+    // 개수를 모를 때 프레임에서 기대 개수를 추정한다(vscan.h의
+    // auto_expected_codes 주석 참고). [[vscan-lite-auto-expected]]
+    bool autoExpectedCodes = false;
 
     /*
      * [S4 — 저대비 프레임은 영역 경로를 먼저]
@@ -839,6 +863,10 @@ private:
     };
     // 노이즈를 재서, 필요하면 뭉갠 사본을 가리키는 뷰를 돌려준다.
     // 필요 없으면 입력을 그대로 돌려준다(복사 없음).
+    // 이미 읽은 코드로 설명되지 않는 후보 영역을 세어 기대 개수를 추정한다.
+    int estimateExpectedCodes(const GrayView& view,
+                              const std::vector<PipelineResult>& hits);
+
     GrayView preprocessFrame(const GrayView& image);
 
     std::vector<PipelineResult> decodeTile(const GrayView& tile, int yOffset);
