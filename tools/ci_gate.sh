@@ -291,6 +291,15 @@ python3 "$ROOT/tools/generate_stacked_labels.py" --outdir "$STK_DIR" >/dev/null 
 # csv: file,path,expected,found,...  파일명이 gapNNN_2.pgm 이라 간격만 뗀다.
 # 지문을 통째로 비교한다 — "몇 개 나왔나"가 아니라 **어느 간격에서 갈리나**가
 # 지켜야 할 값이기 때문이다. 한 칸이라도 움직이면 사람이 판단해야 한다.
+#
+# 실제로 두 번 움직였고, 그게 이 단을 넣은 값이었다.
+#  (1) full 경로가 min_expected_codes를 존중하게 되자 full:120이 1 -> 2.
+#  (2) 단계별 결과를 합치게 되자([[vscan-lite-merge-partials]]) 다시 1.
+#      원인까지 확인했다: 코어 패스가 두 라벨을 **하나의 상자로 합쳐**
+#      돌려주고(isStackedBand의 알려진 대가), 합치기가 그 굵은 상자를
+#      들고 가면 뒤 단계가 낸 가는 상자 둘을 dedup이 "포함되니 중복"으로
+#      지운다. 즉 full:120=1은 예전과 같은 값으로 되돌아온 것이다.
+# 지문이 바뀌면 이렇게 어느 쪽이 맞는지 보고 판단하면 된다.
 STK_FP="$(awk -F, 'NR>1 {g=$1; gsub(/^gap0*|_2\.pgm$/,"",g); printf "%s:%s=%s ", $2, g, $4}' \
           "$WORK/stacked.csv")"
 STK_EXPECT="full:10=1 2stage:10=1 full:30=1 2stage:30=1 full:60=1 2stage:60=1 full:120=1 2stage:120=2 full:240=2 2stage:240=2 "
@@ -323,27 +332,51 @@ else
 fi
 
 echo ">> [4/5] 고정 시드 코퍼스 ($CORPUS_N장, 디스크 0)"
+# [두 조건으로 잰다 — 검출은 개수를 알 때, 시간은 모를 때]
+#
+# 이 코퍼스는 라벨의 기대 개수를 min_expected_codes로 넘겨준다. §3.85에
+# 적은 대로 그건 **하네스만 아는 정보**다. 그 조건 하나로 둘 다 재면
+# 지표가 서로를 가린다:
+#
+#  - 검출을 "개수를 모를 때"로 재면, min_expected_codes를 존중하도록 고친
+#    개선이 지표에 아예 안 보인다(정의상 need=1이라 동작이 같다).
+#  - 시간을 "개수를 알 때"로 재면, 호출자가 명시적으로 요구한 더 깊은
+#    탐색까지 지연 회귀로 잡힌다. 실제로 그렇게 잡혔다 —
+#    [[vscan-lite-full-path-need]]로 검출이 74.7 -> 75.3%가 됐는데 같은
+#    조건의 평균이 +27%라 게이트가 떨어졌다. 그런데 **현장 조건(개수 0)
+#    에서는 220/550 47.6ms로 이전과 소수점까지 같았다.**
+#
+# 그래서 나눈다. 검출/오디코딩/중복은 개수를 준 조건(더 엄격한 채점),
+# 평균/p95는 개수를 안 준 조건(현장에서 실제로 나는 지연)에서 잰다.
 python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
         --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
   | "$VERIFY" --stdin --paths 2stage --reps 2 > "$WORK/corpus.txt" 2>/dev/null
+python3 "$ROOT/tools/generate_corpus.py" -n "$CORPUS_N" --difficulty mixed \
+        --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
+  | "$VERIFY" --stdin --paths 2stage --reps 2 --no-min-expected \
+  > "$WORK/corpus_field.txt" 2>/dev/null
 
 # 8번째 줄: path | img_pass% | codes | text_ok% | misdec | dup | mean | p50 | p95
 # 게이트 지표는 text_ok(코드 단위 텍스트 일치율) — 개수만 세는 것보다 엄격하다
-read -r _ _ _ RATE MISDEC DUP MEAN _ P95 <<<"$(sed -n '8p' "$WORK/corpus.txt" | tr -s ' ')"
+read -r _ _ _ RATE MISDEC DUP _ _ _ <<<"$(sed -n '8p' "$WORK/corpus.txt" | tr -s ' ')"
 RATE="${RATE%\%}"
+# 시간은 현장 조건(개수 0) 실행에서 가져온다 — 바로 위 주석 참고.
+read -r _ _ _ FRATE _ _ MEAN _ P95 <<<"$(sed -n '8p' "$WORK/corpus_field.txt" | tr -s ' ')"
+FRATE="${FRATE%\%}"
 # 기준 작업량 대비로 환산 (x1000은 소수점 자리 확보용)
 # mawk는 printf 인자 안의 삼항 연산자를 조용히 삼킨다(빈 문자열이 나온다).
 # if로 쓸 것.
 norm() { awk -v a="$1" -v r="$2" 'BEGIN{ if (r>0) printf "%.2f", a/r*1000; else printf "0" }'; }
 MEANR="$(norm "$MEAN" "$REF_MS")"
 P95R="$(norm "$P95" "$REF_MS")"
-echo "   검출 ${RATE}% / 평균 ${MEAN}ms / p95 ${P95}ms / 오디코딩 ${MISDEC} / 중복 ${DUP}"
+echo "   개수 줌: 검출 ${RATE}% / 오디코딩 ${MISDEC} / 중복 ${DUP}"
+echo "   개수 모름(현장): 검출 ${FRATE}% / 평균 ${MEAN}ms / p95 ${P95}ms"
 echo "   (기준 작업량 ${REF_MS}ms 대비: 평균 ${MEANR} / p95 ${P95R})"
 
 echo ">> [5/5] 기준선 비교"
 if [ "$UPDATE" = 1 ] || [ ! -f "$BASELINE" ]; then
-  printf 'rate=%s\nmean=%s\np95=%s\nmisdec=%s\ndup=%s\nmeanr=%s\np95r=%s\nref=%s\n' \
-         "$RATE" "$MEAN" "$P95" "$MISDEC" "$DUP" "$MEANR" "$P95R" "$REF_MS" > "$BASELINE"
+  printf 'rate=%s\nfrate=%s\nmean=%s\np95=%s\nmisdec=%s\ndup=%s\nmeanr=%s\np95r=%s\nref=%s\n' \
+         "$RATE" "$FRATE" "$MEAN" "$P95" "$MISDEC" "$DUP" "$MEANR" "$P95R" "$REF_MS" > "$BASELINE"
   echo "   기준선 저장: $BASELINE"
   exit 0
 fi
@@ -358,12 +391,18 @@ if [ -z "$BASE_MEAN" ]; then
   BASE_P95=$(grep '^p95='  "$BASELINE" | cut -d= -f2); P95R="$P95"
 fi
 BASE_DUP=$(grep '^dup='  "$BASELINE" | cut -d= -f2)
+# 현장 조건 검출률. 예전 형식 기준선에는 없으므로 없으면 비교를 건너뛴다.
+BASE_FRATE=$(grep '^frate=' "$BASELINE" | cut -d= -f2)
 
 # 허용치: 검출률 -1.0%p, 평균/p95 +20%(측정 잡음이 10% 안팎이라 그 두 배),
 #         중복은 0에서 늘어나면 무조건 실패(정확성 문제라 잡음 여지가 없다)
 fail=0
 awk -v a="$RATE" -v b="$BASE_RATE" 'BEGIN{exit !(a < b - 1.0)}' && {
-  echo "!! 검출률 회귀: ${BASE_RATE}% -> ${RATE}%"; fail=1; }
+  echo "!! 검출률 회귀(개수 줌): ${BASE_RATE}% -> ${RATE}%"; fail=1; }
+if [ -n "$BASE_FRATE" ]; then
+  awk -v a="$FRATE" -v b="$BASE_FRATE" 'BEGIN{exit !(a < b - 1.0)}' && {
+    echo "!! 검출률 회귀(현장 조건): ${BASE_FRATE}% -> ${FRATE}%"; fail=1; }
+fi
 awk -v a="$MEANR" -v b="$BASE_MEAN" 'BEGIN{exit !(a > b * 1.20)}' && {
   echo "!! 평균 시간 회귀(기준 작업량 대비): ${BASE_MEAN} -> ${MEANR}"; fail=1; }
 awk -v a="$P95R" -v b="$BASE_P95" 'BEGIN{exit !(a > b * 1.20)}' && {

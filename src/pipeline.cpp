@@ -482,7 +482,113 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     { Stage st("core"); hits = processViewCore(view, /*tileFallback=*/false); }
     const double coreMs = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - coreT0).count();
-    if (!hits.empty()) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
+    /*
+     * [빈손이 아니라 **개수**로 끊는다]
+     *
+     * 예전에는 `!hits.empty()`였다. 그러면 `min_expected_codes`를 줘도
+     * full 경로는 **코드 하나만 찾으면 즉시 반환한다** — 이 옵션이 두 번째
+     * 코드부터를 위해 존재하는데도. 2단계 경로는 모든 단이 need를 보고
+     * 있었으므로 두 경로의 동작이 갈려 있었다.
+     *
+     * 실측(난수 코퍼스 씨드 101에서 뽑은 다중 코드 프레임, 기대개수를
+     * 그대로 준 조건): 같은 프레임이 full 1/3 17.7ms 대 2stage 2/3 127.9ms,
+     * full 1/4 47.5ms 대 2stage 2/4 247.2ms였다. 빠른 게 아니라 **덜 찾고
+     * 일찍 끝난 것**이다.
+     *
+     * 기본값(min_expected_codes=0 -> need=1)에서는 `size() >= 1`이
+     * `!empty()`와 같으므로 **동작이 완전히 동일하다.**
+     * [[vscan-lite-full-path-need]]
+     */
+    const int need = std::max(1, cfg_.minExpectedCodes);
+    if ((int)hits.size() >= need) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
+
+    /*
+     * [부분 검출 프레임에서는 프레임 전체를 다시 수술하지 않는다]
+     *
+     * 아래 단들(노이즈 구제 / 평탄화 구제 / DPM 구제)은 전부
+     * 주석에 "여기까지 왔다는 건 풀프레임이 **빈손**이라는 뜻"이라고 적고
+     * 만들어졌다. need를 존중하게 되면서 그 전제가 처음으로 깨진다 —
+     * 코드 2개를 이미 읽은 프레임이 need 6을 못 채워 여기로 내려온다.
+     *
+     * 그 프레임에 프레임 전체 수술을 거는 것은 전제가 틀린 일이다. 노이즈나
+     * 조명은 **프레임 전역** 결함인데, 같은 프레임의 코드가 코어 패스에서
+     * 그냥 읽혔다면 그 결함은 없다. 못 읽은 코드는 **국소적으로** 어렵다.
+     *
+     * 실측(c000372, 코어에서 2/6): 전체 224.8ms 중 dn 49.9 / ff 48.0 =
+     * **98ms가 프레임 재수술**이고 검출은 하나도 안 늘었다.
+     *
+     * 빈손 프레임에서는 `partialFrame`이 false라 예전과 완전히 같다.
+     * [[vscan-lite-partial-skips-global-surgery]]
+     */
+    const bool partialFrame = !hits.empty();
+
+    /*
+     * [단계별 결과를 **합친다** — 큰 쪽만 남기지 않는다]
+     *
+     * 예전에는 구제 단마다 `if (x.size() > hits.size()) hits = x;` 였다.
+     * 즉 여러 단이 **서로 다른 코드**를 하나씩 찾아도 그중 가장 많이 찾은
+     * 한 단의 결과만 남는다. 코드가 하나뿐인 프레임에서는 차이가 없어서
+     * 오래 안 보였는데, 다중 코드 프레임에서는 그대로 미검출이다 —
+     * 코어가 2개, 영역 구제가 다른 3개를 찾으면 답은 5여야 하는데 3이 된다.
+     *
+     * 합칠 때 생기는 중복/모순은 dedup()이 이미 담당한다(같은 자리 다른
+     * 내용이면 큰 상자를 남기는 규칙까지 포함). 그러니 max가 아니라 합집합이
+     * 맞다. [[vscan-lite-merge-partials]]
+     */
+    /*
+     * [덧붙이는 결과에는 **더 엄한 잣대**를 댄다]
+     *
+     * 빈손 프레임에서는 구제가 준 결과가 유일한 답이라, 조금 미덥더라도
+     * 없는 것보다 낫다. 그런데 이미 코드를 읽은 프레임에 하나를 **덧붙이는**
+     * 것은 성격이 다르다 — 틀리면 호출자는 맞는 품번 사이에 섞인 없는
+     * 품번을 받는다. 이 저장소가 일관되게 미검출보다 나쁘다고 본 것이다.
+     *
+     * 그래서 hits가 이미 있으면 **자기검증되는 심볼로지만** 덧붙인다.
+     * 2D는 오류정정이 있고, EAN/UPC·Code128·Code93·DataBar는 체크문자가
+     * 규격상 필수다. 반면 ITF·Codabar·2of5·Code39는 체크문자가 선택이라
+     * **부분 스캔이 그대로 유효한 코드로 보인다** — 이 저장소의 오디코딩
+     * 기록이 거의 다 그쪽이다(1도 스윕 ITF 13건).
+     *
+     * 실측(난수 4시드 2083코드, 기대개수 조건, full 경로):
+     *
+     *   합치기 없음(예전)      1435 (68.9%) / 오디코딩 2 / 평균  86ms
+     *   전부 합침              1520 (73.0%) / 오디코딩 **4** / 평균 126ms
+     *   **자기검증만 합침**    1494 (71.7%) / 오디코딩 2 / 평균 118ms
+     *   max만 유지(합치기X)    1496 (71.8%) / 오디코딩 3 / 평균 144ms
+     *
+     * 마지막 줄이 합치기의 값을 보여준다. 검출은 같은데 **18% 빠르다** —
+     * need를 더 일찍 채워서 남은 단들이 안 돌기 때문이다. 오디코딩도 하나
+     * 적다. 그래서 "자기검증만 합침"을 쓴다.
+     * [[vscan-lite-merge-selfchecking-only]]
+     */
+    auto selfChecking = [](Symbology s) {
+        switch (s) {
+            case Symbology::ITF:
+            case Symbology::INDUSTRIAL_2OF5:
+            case Symbology::COOP_2OF5:
+            case Symbology::CODABAR:
+            case Symbology::CODE39:
+            case Symbology::CODE39_FULL_ASCII:
+            case Symbology::TRIOPTIC_CODE39:
+            case Symbology::PHARMACODE:
+                return false;
+            default:
+                return true;
+        }
+    };
+    auto absorb = [&](std::vector<PipelineResult>&& more) -> bool {
+        if (!more.empty()) {
+            if (hits.empty()) {
+                hits = std::move(more);
+            } else {
+                hits.reserve(hits.size() + more.size());
+                for (auto& m : more)
+                    if (selfChecking(m.symbol.symbology)) hits.push_back(std::move(m));
+                hits = dedup(std::move(hits));
+            }
+        }
+        return (int)hits.size() >= need;
+    };
     // [큰 코드 폴백] 타일보다 큰 코드는 어느 타일에도 온전히 안 들어간다.
     // 예전에는 processViewCore() 안에 있었는데, 여기로 뺀 이유는 예산
     // 기준을 정직하게 만들기 위해서다 — 아래 참고.
@@ -515,10 +621,19 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // reps 3, maxFrameMs=100): 최대 147.5 -> 140.4ms, 평균 37.9 -> 38.2로
     // 측정 노이즈 수준이다. 넘침을 줄이려면 단계를 건너뛰는 게 아니라
     // **일 자체를 줄여야 한다**(§3.62).
+    // [큰 코드 폴백은 partialFrame에서도 돈다]
+    // 처음에는 이것도 partialFrame에서 껐다가 되돌렸다. 이 단은 "이미지가
+    // 상했다"는 전제가 아니라 **타일 격자 기하**의 문제를 푸는 단이다 —
+    // 타일보다 큰 코드, 타일 경계에 걸친 코드. 부분 검출이라고 해서 그
+    // 전제가 사라지지 않는다. 실제로 껐더니 같은 라벨 2장 양성 대조에서
+    // full 경로가 120px 간격을 2 -> 1로 놓쳤다(게이트 [3.78]이 잡았다).
     if (!cfg_.disableTileFallback && !cfg_.fastNoRead) {
         Stage st("tilefb");
         auto big = dedup(decodeTile(view, 0));
-        if (!big.empty()) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
+        // need를 채웠을 때만 끊는다(바로 위 [[vscan-lite-full-path-need]]).
+        // 못 채웠어도 지금까지보다 많이 찾았으면 들고 간다.
+        if ((int)big.size() >= need) { adaptiveObserve(big); prof().dump("성공:tilefb"); return big; }
+        if (big.size() > hits.size()) hits = std::move(big);
     }
 
     // [자기 보정 예산] "이 프레임을 한 번 제대로 훑는 값"을 기준으로 잡는다.
@@ -534,8 +649,9 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 이 프레임을 다시 본다. 되돌린 뒤에도 못 찾으면 아래 구제로 내려간다.
     if (adaptiveNarrowed_) {
         adaptiveWiden();
-        hits = processViewCore(view);
-        if (!hits.empty()) { adaptiveObserve(hits); return hits; }
+        auto wide = processViewCore(view);
+        if ((int)wide.size() >= need) { adaptiveObserve(wide); return wide; }
+        if (wide.size() > hits.size()) hits = std::move(wide);
     }
 
     // 여기부터는 구제 단계(DPM/1D 회전)다 — 실패 프레임에서만 도는,
@@ -565,13 +681,11 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         auto early = tryRegionRescue(view, std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
         prof().add("region-early", std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - rgT0).count());
-        if ((int)early.size() >= std::max(1, cfg_.minExpectedCodes)) {
-            adaptiveObserve(early);
+        if (absorb(std::move(early))) {
+            adaptiveObserve(hits);
             prof().dump("성공:region-early");
-            return early;
+            return hits;
         }
-        if (early.size() > hits.size()) hits = std::move(early);
-
     }
 
     // [노이즈 구제] 노이즈가 심해 이진화가 무너진 경우를 살린다.
@@ -607,7 +721,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     //   혼합   257 -> 256코드, 판정 107.4 -> 76.8ms (-29%)
     // 뭉개서 다시 보는 값이 재촬영보다 비싸다. 단 **선 디노이즈는 남긴다** —
     // 그것까지 빼면 저조도가 23 -> 16코드로 무너진다(§3.61).
-    if (!cfg_.disableDenoiseRescue && !cfg_.fastNoRead && (!preDenoised_ || dnAgain)) {
+    if (!cfg_.disableDenoiseRescue && !cfg_.fastNoRead && !partialFrame && (!preDenoised_ || dnAgain)) {
         GrayImage smoothed;
         { Stage st("dn:filter");
           if (dnAgain) boxBlur(view, 2, smoothed);
@@ -616,7 +730,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         // 여기서부터는 구제라 ZBar를 붙인다 — 전처리된 판본에서 zxing보다
         // 강하다(pipeline.hpp의 zbarAsRescue 주석). [[vscan-lite-zbar-rescue]]
         auto dnHits = locateAndDecode(GrayView(smoothed));
-        if ((int)dnHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:denoise"); return dnHits; }
+        if (absorb(std::move(dnHits))) { prof().dump("성공:denoise"); return hits; }
     }
 
     // [조명 평탄화 구제] 그림자가 코드를 가로지르면 한 프레임 안에서
@@ -632,14 +746,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 배경이 이미 평평하면 flattenIllumination()이 false를 돌려주므로
     // (뭉갠 판본의 상하위 2% 차이가 40 미만) 그림자 없는 프레임에서는
     // 뭉개기 한 번 값만 든다. [[vscan-lite-flatten-illumination]]
-    if (!cfg_.fastNoRead) {
+    if (!cfg_.fastNoRead && !partialFrame) {
         GrayImage flat;
         bool flatOk;
         { Stage st("ff:filter"); flatOk = flattenIllumination(view, 32, flat); }
         if (flatOk) {
             Stage st("ff:decode");
             auto ffHits = locateAndDecode(GrayView(flat));
-            if ((int)ffHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:flatten"); return ffHits; }
+            if (absorb(std::move(ffHits))) { prof().dump("성공:flatten"); return hits; }
         }
     }
 
@@ -648,14 +762,14 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 검증까지 완료된 구제책 — §6.4 대화 참고. 위치 탐색이 필요
     // 없는 전역 전처리라 1D 회전 구제보다 먼저 시도한다(더 싸다).
     // [[vscan-lite-dpm-rescue]]
-    if (cfg_.enableDPMRescue) {
+    if (cfg_.enableDPMRescue && !partialFrame) {
         Stage st("dpm");
         GrayImage closed;
         morphologicalCloseInverted(view, cfg_.dpmKernelSize, closed);
         auto dpmHits = processViewCore(GrayView(closed));
-        if ((int)dpmHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+        if (absorb(std::move(dpmHits))) {
             prof().dump("성공:dpm");
-            return dpmHits;
+            return hits;
         }
         // [닫은 판본에 영역 구제를 걸어봤고 값을 못 했다 — 2026-08-03 기각]
         // §3.17("못 읽는 게 아니라 못 찾는 것")대로 닫은 판본에 영역 구제를
@@ -690,8 +804,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                                           regionCropDone_ ? RegionPass::RotateOnly : RegionPass::Both);
         prof().add("region", std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - rgT0).count());
-        if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:region"); return regionHits; }
-        if (regionHits.size() > hits.size()) hits = std::move(regionHits);
+        if (absorb(std::move(regionHits))) { prof().dump("성공:region"); return hits; }
 
         // [반전 + 회전] 영역 구제 안에도 반전 단(`rg:invert`)이 있지만,
         // 그건 **자르기 패스 안에만** 있어서 뒤집은 뒤에 회전을 못 한다.
@@ -731,11 +844,10 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                                             std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
             prof().add("rg:inv-full", std::chrono::duration<double, std::milli>(
                                           std::chrono::steady_clock::now() - ivT0).count());
-            if ((int)ivHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+            if (absorb(std::move(ivHits))) {
                 prof().dump("성공:region-invert");
-                return ivHits;
+                return hits;
             }
-            if (ivHits.size() > hits.size()) hits = std::move(ivHits);
         }
     }
 
@@ -746,11 +858,10 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     if (cfg_.enableQrFinderRescue && !budgetExceeded()) {
         Stage st("qrfinder");
         auto qrHits = tryQrFinderRescue(view, std::max(1, cfg_.minExpectedCodes));
-        if ((int)qrHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+        if (absorb(std::move(qrHits))) {
             prof().dump("성공:qrfinder");
-            return qrHits;
+            return hits;
         }
-        if (qrHits.size() > hits.size()) hits = std::move(qrHits);
     }
 
     // [1D 바코드 회전 구제] processViewCore()가 이미 풀옵션(TryHarder+
@@ -764,11 +875,12 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         prof().dump(hits.empty() ? "실패:끝" : "부분:끝");
         return hits;
     }
-    int need = std::max(1, cfg_.minExpectedCodes);
     Stage st("deskew1d");
     auto rescued = tryDeskewRescue1D(view, need);
-    prof().dump(rescued.empty() ? (hits.empty() ? "실패:끝" : "부분:끝") : "성공:deskew1d");
-    return rescued.empty() ? hits : rescued;
+    const bool got = !rescued.empty();
+    absorb(std::move(rescued));
+    prof().dump(got ? "성공:deskew1d" : (hits.empty() ? "실패:끝" : "부분:끝"));
+    return hits;
 }
 
 std::vector<PipelineResult> Pipeline::tryRegionRescue(const GrayView& image, int need, RegionPass pass,

@@ -1,8 +1,9 @@
-rate=74.7
-mean=173.91
-p95=515.35
+rate=75.3
+frate=40.0
+mean=46.37
+p95=235.59
 misdec=0
 dup=0
-meanr=65.31
-p95r=193.53
-ref=2662.9
+meanr=25.65
+p95r=130.31
+ref=1807.9
