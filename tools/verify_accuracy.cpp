@@ -509,6 +509,32 @@ int main(int argc, char** argv) {
                         expected, n, textOk, bad, dups, best, tg.c_str());
             }
             if (useTags && lab) {
+                /*
+                 * [열화가 **몇 겹**인가]
+                 *
+                 * 조건별 리프트를 아무리 봐도 1.1~1.4로 평평해서 "어느 축이
+                 * 문제인가"가 안 나오는 코퍼스가 있다. 그때 답은 축이 아니라
+                 * **겹수**다 — 실측(씨드 101, 권장 read-all 조합):
+                 *   0~1겹 100% / 2~3겹 85% / 4~6겹 61~67% / 7~8겹 59~68%
+                 * 태그 하나로 나눈 표는 이 구조를 통째로 가린다(한 코드가
+                 * 여러 태그에 동시에 들어가므로 겹수가 평균에 묻힌다).
+                 * 그래서 겹수 행을 따로 만든다. `deg=N` 이름으로 넣으면
+                 * 기존 태그 표에 그대로 실린다. [[vscan-lite-degradation-depth]]
+                 */
+                int degN = 0;
+                for (const auto& t : lab->tags) {
+                    static const char* kSkip[] = {"sym-", "img-", "mod-", "dec-", "n", "deg="};
+                    bool skip = (t.empty() || (t[0] >= '0' && t[0] <= '9'));
+                    for (const char* pre : kSkip)
+                        if (!skip && t.rfind(pre, 0) == 0) skip = true;
+                    // 난이도/버킷 이름도 열화가 아니다
+                    if (!skip && (t == "mixed" || t == "easy" || t == "hard" ||
+                                  t == "ok" || t == "borderline" || t == "impossible" ||
+                                  t == "sweep")) skip = true;
+                    if (!skip) ++degN;
+                }
+                if (degN > 8) degN = 8;
+                const std::string degTag = "deg=" + std::to_string(degN);
                 auto slot = [&](const std::string& t) -> TagStat& {
                     auto& v = byTag[t];
                     if (v.empty()) v.resize(NP);
@@ -521,6 +547,7 @@ int main(int argc, char** argv) {
                         for (const auto& t : lab->tags) {
                             TagStat& ts = slot(t); ts.expected++; ts.found += hit ? 1 : 0;
                         }
+                        { TagStat& ts = slot(degTag); ts.expected++; ts.found += hit ? 1 : 0; }
                         if (j < lab->codeTags.size()) {
                             for (const auto& t : split(lab->codeTags[j], '&')) {
                                 if (t.empty() || t == "-") continue;
@@ -535,9 +562,12 @@ int main(int argc, char** argv) {
                         ts.expected += expected;
                         ts.found += std::min<long>(n, expected);
                     }
+                    { TagStat& ts = slot(degTag);
+                      ts.expected += expected; ts.found += std::min<long>(n, expected); }
                 }
                 // 시간/이미지 수는 이미지당 한 번
                 std::vector<std::string> seenTags = lab->tags;
+                seenTags.push_back(degTag);
                 for (const auto& ct : lab->codeTags)
                     for (const auto& t : split(ct, '&'))
                         if (!t.empty() && t != "-") seenTags.push_back(t);
@@ -659,6 +689,35 @@ int main(int argc, char** argv) {
             }
             printf("★ 개선 지표는 'ok' 행이다. 'impossible'은 실패가 정상이고,\n"
                    "  100%%에 가까우면 오히려 분류 기준이 느슨하다는 뜻이다.\n");
+        }
+    }
+
+    /*
+     * ---- 열화 **겹수**별: 태그 하나로는 안 보이는 구조
+     *
+     * 조건별 표는 한 코드가 여러 행에 동시에 들어가므로 겹수가 평균에
+     * 묻힌다. 그래서 리프트가 전부 1.1~1.4로 평평해도 실제로는 겹수에
+     * 따라 100% -> 60%로 떨어질 수 있다(§3.100). 겹수는 **분할**이라
+     * 행끼리 안 겹치므로 따로, 순서대로 낸다.
+     * [[vscan-lite-degradation-depth]]
+     */
+    if (useTags && !byTag.empty()) {
+        bool any = false;
+        for (int d = 0; d <= 8; ++d) if (byTag.count("deg=" + std::to_string(d))) any = true;
+        if (any) {
+            printf("\n열화 겹수별 (코드 단위) — 행끼리 안 겹치는 **분할**이다\n");
+            printf("%-10s %6s", "겹수", "imgs");
+            for (auto& p : paths) printf(" | %-16s", p.name);
+            printf("\n%s\n", std::string(17 + NP * 19, '-').c_str());
+            for (int d = 0; d <= 8; ++d) {
+                auto it = byTag.find("deg=" + std::to_string(d));
+                if (it == byTag.end()) continue;
+                printf("%-10d %6d", d, it->second[0].images);
+                for (int i = 0; i < NP; ++i)
+                    printf(" | %5.1f%% %8.2f", it->second[i].rate(), it->second[i].mean());
+                printf("\n");
+            }
+            printf("겹수가 늘수록 떨어지면 남은 격차는 **특정 축이 아니라 조합**이다.\n");
         }
     }
 
