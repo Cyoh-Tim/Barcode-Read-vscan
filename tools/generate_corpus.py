@@ -476,14 +476,35 @@ def make_symbol(kind, rng, box_w, box_h, mod_range):
 
 # ============================================================ 코드 단위 열화
 def _to_dpm(arr, step=5):
-    """도트 각인(DPM) 흉내 — 모듈을 점으로만 찍는다. 21_dpm_dotpeen과 동일 원리."""
+    """도트 각인(DPM) 흉내 — 모듈을 점으로만 찍는다.
+
+    [step은 모듈 폭이어야 한다 — 2026-08-03 수정]
+    실제 도트 각인은 **모듈 하나에 점 하나**를 찍는다. 그런데 여기 step이
+    5로 고정돼 있어서, 모듈이 5px보다 작으면 한 모듈에 점이 하나도 안
+    들어가고 코드가 **생성 단계에서 파괴됐다.**
+
+    실측으로 드러난 경위: 난수 코퍼스에서 DPM 축의 놓침률이 46%(리프트
+    1.61)로 최악이었는데, `enable_dpm_rescue`를 켜도 160ms만 쓰고 한 개도
+    더 못 찾았다. 그런데 40종의 21_dpm_dotpeen은 구제 없이도 읽힌다.
+    차이는 모듈 폭이었다 — 40종은 QR을 400px로 그려 모듈 16px(모듈당 점
+    3개)이고, 코퍼스는 모듈 중앙값 6.5px(1.3개), 18개 중 5개는 5px 미만
+    이었다.
+
+    §3.29(원근)·§3.41(반전)에 이어 **세 번째로 "축이 생성기 결함이었다"**
+    가 나온 자리다. 그래서 호출부에서 모듈 폭을 넘겨받는다.
+    """
     dot = np.full_like(arr, 255)
     h, w = arr.shape
+    # [점 크기도 같이 커져야 한다]
+    # 점을 3x3으로 고정하면 모듈이 커질수록 채움률이 떨어져서(모듈 7px에
+    # 3x3이면 18%) 실제 각인보다 훨씬 성글어진다. 실제 도트 각인은 점이
+    # 모듈 피치의 상당 부분을 채우고 이웃과 거의 닿는다.
+    r = max(1, int(round(step * 0.35)))          # 지름이 피치의 약 70%
     for y0 in range(0, h, step):
         for x0 in range(0, w, step):
             if arr[y0:y0 + step, x0:x0 + step].mean() < 128:
                 cy, cx = y0 + step // 2, x0 + step // 2
-                dot[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2] = 70
+                dot[max(0, cy - r):cy + r + 1, max(0, cx - r):cx + r + 1] = 70
     return dot
 
 
@@ -514,7 +535,8 @@ def degrade_symbol(img, rng, sev, tags, allow_dpm, is_2d, p_deg=1.0, phys=None, 
         tags.append("inverted")
 
     if allow_dpm and rng.random() < 0.10 * p_deg:                     # DPM 도트 각인
-        a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8)).astype(np.float32)
+        a = _to_dpm(np.clip(a, 0, 255).astype(np.uint8),
+                    step=max(3, int(round(mod_px)))).astype(np.float32)
         phys["dpm"] = 1
         tags.append("dpm")
 
