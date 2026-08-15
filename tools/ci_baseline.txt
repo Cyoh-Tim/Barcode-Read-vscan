@@ -1,8 +1,8 @@
-rate=74.2
+rate=74.7
 mean=173.91
 p95=515.35
 misdec=0
-dup=1
+dup=0
 meanr=65.31
 p95r=193.53
 ref=2662.9

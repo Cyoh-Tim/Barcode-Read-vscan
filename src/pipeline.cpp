@@ -860,14 +860,33 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                   }), regions.end());
     if (regions.empty()) return {};
 
-    // [헛수고 차단] 영역 하나당 코드는 많아야 하나다. 찾은 영역이 요구
-    // 개수보다 적으면 이 단계는 어차피 need를 못 채우고 뒤 단계로 넘어간다 —
-    // 그럴 거면 크롭 디코드를 돌 이유가 없다. locate 자체는 4ms라 여기서
-    // 끊는 비용은 무시할 만하다.
-    // 실측(코드 1~12개가 섞인 300장, need=기대개수): 이 검사가 없으면
-    // 평균 147 -> 235ms(+60%)로 뛰는데 검출은 +1.0%p뿐이었다. 다중 코드
-    // 프레임에서는 영역 4개로 12개를 채울 수 없으니 전부 헛돈 것이다.
-    if ((int)regions.size() < need) return {};
+    /*
+     * [요구 개수는 찾은 영역 수로 깎는다 — 통째로 포기하지는 않는다]
+     *
+     * 영역 하나당 코드는 많아야 하나이므로, 영역이 need보다 적으면 이 단계는
+     * need를 절대 못 채운다. 그래서 원래 여기서 `return {}` 했다. 근거는
+     * 실측이었다(코드 1~12개가 섞인 300장, need=기대개수): 이 검사가 없으면
+     * 평균 147 -> 235ms(+60%)인데 검출은 +1.0%p뿐이었다.
+     *
+     * **그 실측은 need가 실제 개수와 같은 조건에서 잰 것이라 일반화가
+     * 틀렸다.** 현장에서 min_expected_codes는 "이 라인에 보통 몇 개가
+     * 들어온다"는 힌트라 실제보다 클 수 있고, 그때 이 검사는 코드가 1개뿐인
+     * 프레임의 영역 구제를 통째로 끈다. 40종에서 need=6으로 두면
+     * 18_lowcontrast_extreme / 21_dpm_dotpeen / 26_perspective_strong /
+     * 39_rot1d_45deg 넷이 전부 1/1 -> 0/1이 되는데, 넷 다 로케이터가 찾은
+     * 영역은 **1개**다(need=0일 때와 같은 1개). 즉 영역 수가 흩어져서가
+     * 아니라 이 검사가 구제를 아예 안 돌렸던 것이다. 검사만 빼면 넷 다
+     * 되돌아온다.
+     *
+     * 고칠 자리는 검사가 아니라 **need의 의미**다. 이 단계 안에서 달성
+     * 가능한 상한은 영역 수이므로 need를 거기까지 깎는다. 그러면
+     *   - 영역 4개 x need 12 (원래 실측 조건): effNeed=4. 12를 못 채우는
+     *     헛수고는 그대로 막히되, 4개를 찾은 시점에 **일찍 빠져나온다** —
+     *     예전 `return {}`가 아끼던 시간의 대부분이 여기서 다시 나온다.
+     *   - 영역 1개 x need 6 (힌트가 큰 단일 코드): effNeed=1. 구제가 돌고,
+     *     하나 읽는 순간 끝난다.
+     * 아래 take()가 effNeed를 본다.
+     */
 
     PipelineConfig roiCfg = cfg_;
     roiCfg.tileThreads = 1;          // ROI는 작아서 타일링이 손해다
@@ -1032,8 +1051,11 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
         return refined[i];
     };
 
+    // 위 주석 참고: 이 단계가 달성할 수 있는 상한은 영역(=크롭) 수다.
+    const int effNeed = std::max(1, std::min(need, (int)rects.size()));
+
     auto take = [&](std::vector<PipelineResult>&& found) -> bool {
-        if ((int)found.size() >= need) { hits = std::move(found); return true; }
+        if ((int)found.size() >= effNeed) { hits = std::move(found); return true; }
         if (found.size() > hits.size()) hits = std::move(found);
         return false;
     };
@@ -2449,6 +2471,47 @@ bool isTwinBand(const BBox& a, const BBox& b) {
            twin(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
 }
 
+// 한쪽이 **자기 길이에 비해 스캔 밴드일 뿐**인가.
+//
+// isThinSlice()는 "상대적으로" 얇은지(두께비 35%)를 보고, isTwinBand()는
+// 양쪽 다 실오라기(두께가 길이의 3% 이하)일 때를 본다. 둘 사이에 구멍이
+// 있다 — 실측(난수 코퍼스 씨드 101, c000299, EAN13 module 3.6):
+//   "3122459843278" (1108,1084)-(1451,1122)  길이 343 두께 38
+//   "3122459843278" (1108,1380)-(1451,1470)  길이 343 두께 90
+// 정답 상자는 (1072,1077)-(1488,1482)이므로 **둘 다 이 코드 안**이다.
+// 그런데 두께비가 38/90 = 0.42라 isThinSlice(0.35)를 아슬아슬하게 넘고,
+// 38/343 = 11%라 isTwinBand(3%)에도 안 걸리며, 세로 간격 258이 결합 두께
+// 386의 67%라 isStackedBand(25%)도 못 넘는다.
+//
+// 판정의 근거는 **자기 길이 대비 두께**다. 1D 코드의 막대 높이가 코드
+// 길이의 15% 이하인 라벨은 사실상 없다(EAN13 규격은 폭 95모듈에 높이
+// 약 69모듈 = 73%이고, 잘라 쓰는 경우에도 이 정도로 납작하지 않다).
+// 그러니 그런 상자는 라벨이 아니라 **그 코드를 스쳐 지나간 스캔 한 줄**
+// 이다. 여기에 (1) 긴 축 90% 정렬, (2) 간격이 코드 길이 이내라는 물리적
+// 상한을 함께 걸면 같은 코드의 두 밴드로 볼 수 있다.
+//
+// **같은 라벨 2장이 세로로 붙은 배치**는 이 규칙에 안 걸린다 — 그때는
+// 양쪽 다 온전한 라벨이라 두께가 자기 길이의 15%를 넘는다. 걸리려면
+// 한쪽이 밴드로만 읽혀야 하는데, 그 경우엔 애초에 그 한 장을 온전히
+// 본 것이 아니므로 합치는 쪽이 덜 틀린다.
+// [[vscan-lite-dedup-single-band]]
+bool isBandOfSameCode(const BBox& a, const BBox& b) {
+    auto band = [](double aLo, double aHi, double bLo, double bHi,   // 긴 축
+                   double cLo, double cHi, double dLo, double dHi) { // 두께 축
+        const double la = aHi - aLo, lb = bHi - bLo;
+        const double ta = cHi - cLo, tb = dHi - dLo;
+        if (la <= 0 || lb <= 0) return false;
+        // 적어도 한쪽이 "자기 길이의 15% 이하 두께" = 온전한 라벨이 아니다.
+        if (ta > 0.15 * la && tb > 0.15 * lb) return false;
+        const double ov = std::min(aHi, bHi) - std::max(aLo, bLo);
+        if (ov < 0.90 * std::min(la, lb)) return false;              // 긴 축이 안 맞는다
+        const double gap = std::max(cLo, dLo) - std::min(cHi, dHi);
+        return gap <= std::min(la, lb);      // 한 코드 안의 두 밴드는 코드 길이보다 멀 수 없다
+    };
+    return band(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
+           band(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
+}
+
 bool hasDegenerateQuad(const DecodedSymbol& s) {
     for (int i = 0; i < 4; ++i)
         for (int j = i + 1; j < 4; ++j)
@@ -2666,7 +2729,8 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                 (partial && onSameBarcodeBand(candBox, keptBox)) ||
                 (sameText && isStackedBand(candBox, keptBox)) ||
                 (sameText && isThinSlice(candBox, keptBox)) ||
-                (sameText && isTwinBand(candBox, keptBox))) {
+                (sameText && isTwinBand(candBox, keptBox)) ||
+                (sameText && isBandOfSameCode(candBox, keptBox))) {
                 isDup = true;
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —

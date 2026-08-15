@@ -276,6 +276,34 @@ if [ "${EMPTY_GHOST:-99}" != "0" ]; then
   exit 1
 fi
 
+echo ">> [3.78/5] 같은 라벨 2장 양성 대조 (dedup 밴드 규칙)"
+# dedup의 밴드 규칙들은 "같은 텍스트 + 기하 조건"으로 지운다. 그 규칙들이
+# 깨뜨릴 수 있는 유일한 실제 배치가 **박스에 같은 라벨이 여러 장** 붙은
+# 경우다. 규칙을 새로 넣거나 문턱을 만질 때 여기가 조용히 바뀌면
+# "중복이 줄었다"가 사실은 "코드를 하나 먹었다"일 수 있다.
+#
+# 기준은 개수가 아니라 **경계**다. 간격 60px 이하가 하나로 합쳐지는 것은
+# isStackedBand가 원래 안고 있는 알려진 대가이고(그 주석 참고), 120px
+# 이상은 반드시 둘로 남아야 한다.
+STK_DIR="$WORK/stacked"
+python3 "$ROOT/tools/generate_stacked_labels.py" --outdir "$STK_DIR" >/dev/null 2>&1
+"$VERIFY" "$STK_DIR" --paths full,2stage --reps 1 --quiet --csv "$WORK/stacked.csv" >/dev/null 2>&1
+# csv: file,path,expected,found,...  파일명이 gapNNN_2.pgm 이라 간격만 뗀다.
+# 지문을 통째로 비교한다 — "몇 개 나왔나"가 아니라 **어느 간격에서 갈리나**가
+# 지켜야 할 값이기 때문이다. 한 칸이라도 움직이면 사람이 판단해야 한다.
+STK_FP="$(awk -F, 'NR>1 {g=$1; gsub(/^gap0*|_2\.pgm$/,"",g); printf "%s:%s=%s ", $2, g, $4}' \
+          "$WORK/stacked.csv")"
+STK_EXPECT="full:10=1 2stage:10=1 full:30=1 2stage:30=1 full:60=1 2stage:60=1 full:120=1 2stage:120=2 full:240=2 2stage:240=2 "
+echo "   같은 라벨 2장: $STK_FP"
+if [ "$STK_FP" != "$STK_EXPECT" ]; then
+  echo "!! dedup 밴드 규칙의 경계가 움직였다"
+  echo "   기대: $STK_EXPECT"
+  echo "   실제: $STK_FP"
+  echo "   (간격이 커졌는데 1이 되면 코드를 먹은 것이고, 작은데 2가 되면"
+  echo "    같은 코드를 두 번 돌려준 것이다. 어느 쪽인지 보고 판단할 것.)"
+  exit 1
+fi
+
 echo ">> [3.8/5] 공개 손잡이 생존 확인"
 AUDIT="$WORK/audit_config"
 g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/audit_config.cpp" \
