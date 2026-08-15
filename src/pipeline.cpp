@@ -1261,6 +1261,54 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
     auto regions = findCodeRegions(locateView, maxRegions, 32, 4, energyRatio);
 
     /*
+     * [로케이터가 **프레임 전체**를 돌려줄 때 — 노이즈가 상대 랭킹을 무너뜨린다]
+     *
+     * findCodeRegions()의 임계는 **프레임 최대 타일 에너지에 대한 비율**이다.
+     * 센서 노이즈가 얹히면 배경 타일의 에너지가 통째로 올라가서, 작은 코드
+     * 하나짜리 프레임에서도 거의 모든 타일이 임계를 넘는다. 그러면 영역이
+     * 하나로 뭉쳐 **프레임 전체 상자**가 나온다. 크롭이 원본과 같아지므로
+     * 2단계의 정밀 단이 아무것도 못 벌고, 코드는 그대로 미검출로 남는다.
+     *
+     * 실측(모듈 3px, 노이즈 25, 4배 축소, 임계 0.20):
+     *
+     *   심볼로지      정답 크기    영역 크기        정확한 크롭을 주면
+     *   DataMatrix     60x60     2048x1536(전체)      읽힌다
+     *   PDF417        525x39     2048x1536(전체)      읽힌다
+     *
+     * 즉 **디코더는 멀쩡하고 찾기만 실패**한다. 같은 프레임을 노이즈 0으로
+     * 만들면 영역이 256x256으로 정확히 나온다 — 임계가 아니라 노이즈가
+     * 상대 랭킹을 무너뜨린 것이다.
+     *
+     * 임계를 처음부터 올리는 것은 안 된다. 코드가 여러 개인 프레임에서
+     * 약한 코드가 강한 코드에 밀려 후보에서 빠진다. 그래서 **결과가 이미
+     * 쓸모없을 때만** 올려서 다시 찾는다. 프레임 전체 상자는 정보가 0이라
+     * 잃을 것이 없다(그 크롭은 이미 실패한 core 패스와 같은 그림이다).
+     *
+     * 임계 0.65의 근거(같은 실측): DataMatrix는 0.50까지 전체가 나오고
+     * 0.65에서 256x256이 된다. PDF417은 0.35부터 512x256으로 잡힌다.
+     * 노이즈 0인 프레임은 어느 임계에서도 256x256이라 대가가 없다.
+     * [[vscan-lite-locate-degenerate-escalate]]
+     */
+    static const bool escOff = getenv("VSCAN_NO_LOC_ESCALATE") != nullptr;
+    if (!regions.empty() && !escOff) {
+        const double frameArea = (double)locateView.width * locateView.height;
+        auto degenerate = [&](const CodeRegion& r) {
+            return (double)(r.bbox.x1 - r.bbox.x0) * (r.bbox.y1 - r.bbox.y0) > 0.55 * frameArea;
+        };
+        if (std::any_of(regions.begin(), regions.end(), degenerate)) {
+            auto tight = findCodeRegions(locateView, maxRegions, 32, 4, 0.65f);
+            if (!tight.empty() && !std::any_of(tight.begin(), tight.end(), degenerate)) {
+                regions.erase(std::remove_if(regions.begin(), regions.end(), degenerate),
+                              regions.end());
+                for (auto& t : tight) {
+                    if ((int)regions.size() >= maxRegions) break;
+                    regions.push_back(t);
+                }
+            }
+        }
+    }
+
+    /*
      * [로케이터 두 번째 패스 — 저대비 코드는 상대 랭킹에 묻힌다]
      *
      * findCodeRegions()는 **프레임 최대 타일 에너지 대비** 20% 이상만 후보로
