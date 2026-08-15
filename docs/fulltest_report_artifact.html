@@ -1,0 +1,620 @@
+<title>vscan-lite 풀테스트</title>
+<style>
+:root{
+  --ground:#FBFBFC; --surface:#F1F3F6; --surface2:#E8EBF0;
+  --ink:#14171C; --ink2:#454C57; --ink3:#6B7380;
+  --rule:#D6DAE2; --rule2:#BFC5D0;
+  --accent:#0B6E75; --accent-soft:#E2F0F1;
+  --alarm:#C0341B; --alarm-soft:#FBE9E5;
+  --ok:#12734F;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1116; --surface:#161A21; --surface2:#1D222B;
+    --ink:#E6E9EE; --ink2:#A7AEBA; --ink3:#7C8593;
+    --rule:#262C36; --rule2:#39414E;
+    --accent:#4FD1C5; --accent-soft:#12262A;
+    --alarm:#FF7A5C; --alarm-soft:#2A1512;
+    --ok:#3DD68C;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1116; --surface:#161A21; --surface2:#1D222B;
+  --ink:#E6E9EE; --ink2:#A7AEBA; --ink3:#7C8593;
+  --rule:#262C36; --rule2:#39414E;
+  --accent:#4FD1C5; --accent-soft:#12262A;
+  --alarm:#FF7A5C; --alarm-soft:#2A1512;
+  --ok:#3DD68C;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard",
+    "Malgun Gothic","Noto Sans KR",system-ui,sans-serif;
+  font-size:16px; line-height:1.75; letter-spacing:-.003em;
+}
+.mono,code,pre,td.n,th{
+  font-family:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+.wrap{max-width:1180px; margin:0 auto; padding:0 28px 120px}
+.col{max-width:70ch}
+
+/* ---- 표제 ---- */
+header{border-bottom:1px solid var(--rule); margin-bottom:44px; padding:64px 0 34px}
+.eyebrow{
+  font-size:11.5px; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--accent); font-weight:650; margin:0 0 18px;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;
+}
+h1.doc{
+  font-size:clamp(30px,4.4vw,46px); line-height:1.14; margin:0 0 16px;
+  font-weight:680; letter-spacing:-.028em; text-wrap:balance; max-width:20ch;
+}
+.dek{color:var(--ink2); font-size:17px; margin:0; max-width:62ch}
+
+/* ---- 헤드라인 수치 ---- */
+.stats{
+  display:grid; gap:1px; background:var(--rule); border:1px solid var(--rule);
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); margin:36px 0 0;
+}
+.stat{background:var(--ground); padding:18px 20px}
+.stat .k{
+  font-size:10.5px; letter-spacing:.13em; text-transform:uppercase;
+  color:var(--ink3); font-weight:640; margin:0 0 8px;
+  font-family:ui-monospace,Menlo,monospace;
+}
+.stat .v{
+  font-size:27px; font-weight:660; letter-spacing:-.02em; line-height:1;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums;
+}
+.stat .u{font-size:12.5px; color:var(--ink3); margin-left:5px; font-weight:500}
+.stat.bad{background:var(--alarm-soft)}
+.stat.bad .v{color:var(--alarm)}
+.stat.bad .k{color:var(--alarm)}
+
+/* ---- 본문 ---- */
+h2{
+  display:flex; gap:16px; align-items:baseline;
+  font-size:25px; font-weight:670; letter-spacing:-.022em; line-height:1.28;
+  margin:72px 0 20px; padding-top:22px; border-top:2px solid var(--ink);
+  text-wrap:balance;
+}
+h3{
+  display:flex; gap:13px; align-items:baseline;
+  font-size:17.5px; font-weight:660; letter-spacing:-.012em;
+  margin:44px 0 14px; text-wrap:balance;
+}
+h4{font-size:15px; font-weight:660; margin:32px 0 10px; color:var(--ink2)}
+h2 .mark{
+  font-family:ui-monospace,Menlo,monospace; font-size:14px; font-weight:650;
+  color:var(--accent); letter-spacing:.04em; flex:none; min-width:2.4ch;
+}
+h3 .mark{
+  font-family:ui-monospace,Menlo,monospace; font-size:12.5px; font-weight:640;
+  color:var(--ink3); flex:none;
+}
+p{margin:0 0 18px; max-width:70ch}
+strong{font-weight:670}
+code{
+  font-size:.885em; background:var(--surface); border:1px solid var(--rule);
+  border-radius:3px; padding:.08em .34em;
+}
+pre{
+  background:var(--surface); border:1px solid var(--rule); border-left:3px solid var(--accent);
+  padding:16px 18px; overflow-x:auto; font-size:13px; line-height:1.62; margin:0 0 22px;
+}
+pre code{background:none; border:0; padding:0; font-size:inherit}
+blockquote{
+  margin:0 0 22px; padding:14px 20px; background:var(--accent-soft);
+  border-left:3px solid var(--accent); color:var(--ink2); max-width:70ch;
+}
+blockquote strong{color:var(--ink)}
+hr{border:0; border-top:1px solid var(--rule); margin:56px 0}
+
+/* ---- 표 ---- */
+.tw{overflow-x:auto; margin:0 0 26px; border:1px solid var(--rule); background:var(--ground)}
+table{border-collapse:collapse; width:100%; font-size:13px; line-height:1.5}
+th{
+  text-align:left; font-weight:640; font-size:11px; letter-spacing:.05em;
+  color:var(--ink2); background:var(--surface2); padding:10px 13px;
+  border-bottom:1px solid var(--rule2); white-space:nowrap;
+}
+td{padding:9px 13px; border-bottom:1px solid var(--rule); vertical-align:top}
+td.n{text-align:right; white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:nth-child(even) td{background:var(--surface)}
+td strong{color:var(--ink)}
+
+@media (max-width:640px){
+  .wrap{padding:0 18px 80px}
+  header{padding:44px 0 26px}
+  h2{font-size:21px; margin-top:52px}
+}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">실측 보고서 · 2026-08-15</p>
+  <h1 class="doc">vscan-lite 풀테스트</h1>
+  <p class="dek">전 심볼로지 x 전 조건 격자를 처음부터 다시 돌린 결과다.
+  검출률의 절대값이 아니라 <strong>축이 어디서 끊기는가</strong>와
+  <strong>오디코딩 88건의 정체</strong>를 보려고 만들었다.</p>
+  <div class="stats">
+    <div class="stat"><p class="k">프레임</p><div class="v">67,680<span class="u">장</span></div></div>
+    <div class="stat"><p class="k">코드</p><div class="v">122,092<span class="u">개</span></div></div>
+    <div class="stat"><p class="k">텍스트 일치</p><div class="v">56.9<span class="u">%</span></div></div>
+    <div class="stat bad"><p class="k">오디코딩</p><div class="v">88<span class="u">건</span></div></div>
+    <div class="stat"><p class="k">소요</p><div class="v">176<span class="u">분</span></div></div>
+  </div>
+</header>
+<blockquote>격자에는 물리적으로 불가능한 모서리를 <strong>일부러</strong> 넣는다. 검출률의 절대값이 아니라 심볼로지·축 사이의 <strong>차이</strong>를 볼 것.</blockquote>
+<h2 id="s1"><span class="mark">1</span><span>심볼로지 x 격자 (텍스트 일치 %)</span></h2>
+<div class="tw"><table>
+<thead><tr><th>심볼로지</th><th>contrast_bright</th><th>module_angle</th><th>noise_blur</th><th>persp_curve</th><th>glare_shadow</th><th>dirty_damaged</th><th>zone_print</th><th>H</th><th>tinymod_contrast</th><th>tinymod_noise</th><th>mod_density</th><th>res_module</th><th>전체</th></tr></thead>
+<tbody>
+<tr><td class="">CODABAR</td><td class="n">96.2</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">44.6</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">99.0</td><td class="n">-</td><td class="n">99.1</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>92.2</strong></td></tr>
+<tr><td class="">CODE128</td><td class="n">95.3</td><td class="n">100.0</td><td class="n">56.1</td><td class="n">52.6</td><td class="n">95.8</td><td class="n">74.1</td><td class="n">75.0</td><td class="n">-</td><td class="n">80.2</td><td class="n">65.8</td><td class="n">59.6</td><td class="n">95.2</td><td class="n"><strong>73.5</strong></td></tr>
+<tr><td class="">CODE39</td><td class="n">95.0</td><td class="n">100.0</td><td class="n">56.1</td><td class="n">44.9</td><td class="n">96.6</td><td class="n">90.5</td><td class="n">100.0</td><td class="n">-</td><td class="n">95.4</td><td class="n">73.3</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>84.5</strong></td></tr>
+<tr><td class="">CODE93</td><td class="n">98.1</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">47.4</td><td class="n">100.0</td><td class="n">71.4</td><td class="n">100.0</td><td class="n">-</td><td class="n">99.7</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>88.4</strong></td></tr>
+<tr><td class="">DATABAR</td><td class="n">96.2</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">30.5</td><td class="n">100.0</td><td class="n">80.3</td><td class="n">100.0</td><td class="n">-</td><td class="n">99.4</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>87.4</strong></td></tr>
+<tr><td class="">DATABAREXP</td><td class="n">95.0</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">28.3</td><td class="n">100.0</td><td class="n">95.2</td><td class="n">80.0</td><td class="n">-</td><td class="n">99.7</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>88.6</strong></td></tr>
+<tr><td class="">DATAMATRIX</td><td class="n">88.8</td><td class="n">91.8</td><td class="n">36.2</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">16.1</td><td class="n">100.0</td><td class="n">-</td><td class="n">40.2</td><td class="n">17.1</td><td class="n">74.6</td><td class="n">81.0</td><td class="n"><strong>69.4</strong></td></tr>
+<tr><td class="">EAN13</td><td class="n">95.6</td><td class="n">99.8</td><td class="n">56.6</td><td class="n">83.1</td><td class="n">100.0</td><td class="n">77.6</td><td class="n">76.0</td><td class="n">-</td><td class="n">75.9</td><td class="n">70.6</td><td class="n">74.3</td><td class="n">95.2</td><td class="n"><strong>81.5</strong></td></tr>
+<tr><td class="">EAN8</td><td class="n">92.5</td><td class="n">99.8</td><td class="n">62.4</td><td class="n">95.0</td><td class="n">100.0</td><td class="n">70.1</td><td class="n">97.0</td><td class="n">-</td><td class="n">70.3</td><td class="n">71.7</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>85.3</strong></td></tr>
+<tr><td class="">ITF</td><td class="n">97.5</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">65.1</td><td class="n">100.0</td><td class="n">94.6</td><td class="n">95.0</td><td class="n">-</td><td class="n">96.9</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>93.8</strong></td></tr>
+<tr><td class="">PDF417</td><td class="n">91.9</td><td class="n">60.8</td><td class="n">28.1</td><td class="n">29.1</td><td class="n">100.0</td><td class="n">66.4</td><td class="n">92.0</td><td class="n">-</td><td class="n">60.4</td><td class="n">22.5</td><td class="n">52.6</td><td class="n">88.1</td><td class="n"><strong>59.5</strong></td></tr>
+<tr><td class="">QR</td><td class="n">83.8</td><td class="n">96.0</td><td class="n">40.7</td><td class="n">87.5</td><td class="n">100.0</td><td class="n">14.7</td><td class="n">100.0</td><td class="n">-</td><td class="n">44.3</td><td class="n">28.9</td><td class="n">92.0</td><td class="n">85.7</td><td class="n"><strong>75.0</strong></td></tr>
+<tr><td class="">UPCA</td><td class="n">95.6</td><td class="n">99.8</td><td class="n">58.4</td><td class="n">84.2</td><td class="n">100.0</td><td class="n">72.3</td><td class="n">87.0</td><td class="n">-</td><td class="n">81.4</td><td class="n">71.7</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>85.2</strong></td></tr>
+<tr><td class="">UPCE</td><td class="n">98.1</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">76.5</td><td class="n">100.0</td><td class="n">85.7</td><td class="n">100.0</td><td class="n">-</td><td class="n">91.0</td><td class="n">100.0</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>93.4</strong></td></tr>
+<tr><td class="">random</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">42.3</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n"><strong>42.3</strong></td></tr>
+</tbody></table></div>
+<h2 id="s2"><span class="mark">2</span><span>축별 절단점 — 값이 커질수록 어디서 끊기는가</span></h2>
+<p>각 축의 값별 텍스트 일치율이다. <strong>50%를 지나는 값</strong>이 그 축의 벽이다.</p>
+<h3>축 <code>angle</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>angle</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">100.0</td><td class="n">350</td></tr>
+<tr><td class="n">10</td><td class="n">96.6</td><td class="n">350</td></tr>
+<tr><td class="n">20</td><td class="n">96.3</td><td class="n">350</td></tr>
+<tr><td class="n">30</td><td class="n">96.0</td><td class="n">350</td></tr>
+<tr><td class="n">40</td><td class="n">96.0</td><td class="n">350</td></tr>
+<tr><td class="n">50</td><td class="n">95.7</td><td class="n">350</td></tr>
+<tr><td class="n">60</td><td class="n">95.1</td><td class="n">350</td></tr>
+<tr><td class="n">70</td><td class="n">95.4</td><td class="n">350</td></tr>
+<tr><td class="n">80</td><td class="n">95.7</td><td class="n">350</td></tr>
+<tr><td class="n">90</td><td class="n">98.6</td><td class="n">350</td></tr>
+</tbody></table></div>
+<h3>축 <code>blur</code> — 50% 아래로 내려가는 첫 값: <strong>2.75</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>blur</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">96.7</td><td class="n">182</td></tr>
+<tr><td class="n">0.5</td><td class="n">97.3</td><td class="n">182</td></tr>
+<tr><td class="n">1</td><td class="n">97.3</td><td class="n">182</td></tr>
+<tr><td class="n">1.5</td><td class="n">89.6</td><td class="n">182</td></tr>
+<tr><td class="n">2</td><td class="n">80.2</td><td class="n">182</td></tr>
+<tr><td class="n">2.5</td><td class="n">50.0</td><td class="n">182</td></tr>
+<tr><td class="n">3</td><td class="n">42.9</td><td class="n">182</td></tr>
+<tr><td class="n">3.5</td><td class="n">42.9</td><td class="n">182</td></tr>
+<tr><td class="n">4</td><td class="n">42.9</td><td class="n">182</td></tr>
+</tbody></table></div>
+<h3>축 <code>bright</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>bright</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0.3</td><td class="n">80.4</td><td class="n">280</td></tr>
+<tr><td class="n">0.5</td><td class="n">88.2</td><td class="n">280</td></tr>
+<tr><td class="n">0.7</td><td class="n">91.8</td><td class="n">280</td></tr>
+<tr><td class="n">0.9</td><td class="n">94.6</td><td class="n">280</td></tr>
+<tr><td class="n">1.1</td><td class="n">95.0</td><td class="n">280</td></tr>
+<tr><td class="n">1.3</td><td class="n">99.3</td><td class="n">280</td></tr>
+<tr><td class="n">1.5</td><td class="n">100.0</td><td class="n">280</td></tr>
+<tr><td class="n">1.7</td><td class="n">99.6</td><td class="n">280</td></tr>
+</tbody></table></div>
+<h3>축 <code>contrast</code> — 50% 아래로 내려가는 첫 값: <strong>0.05</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>contrast</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0.05</td><td class="n">49.6</td><td class="n">224</td></tr>
+<tr><td class="n">0.15</td><td class="n">72.3</td><td class="n">462</td></tr>
+<tr><td class="n">0.25</td><td class="n">81.6</td><td class="n">462</td></tr>
+<tr><td class="n">0.35</td><td class="n">87.7</td><td class="n">462</td></tr>
+<tr><td class="n">0.45</td><td class="n">91.8</td><td class="n">462</td></tr>
+<tr><td class="n">0.55</td><td class="n">93.5</td><td class="n">462</td></tr>
+<tr><td class="n">0.65</td><td class="n">94.2</td><td class="n">462</td></tr>
+<tr><td class="n">0.75</td><td class="n">93.9</td><td class="n">462</td></tr>
+<tr><td class="n">0.85</td><td class="n">94.6</td><td class="n">462</td></tr>
+<tr><td class="n">0.95</td><td class="n">94.2</td><td class="n">462</td></tr>
+</tbody></table></div>
+<h3>축 <code>count</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>count</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">1</td><td class="n">96.0</td><td class="n">50</td></tr>
+<tr><td class="n">3</td><td class="n">86.0</td><td class="n">50</td></tr>
+<tr><td class="n">5</td><td class="n">78.4</td><td class="n">50</td></tr>
+<tr><td class="n">7</td><td class="n">68.9</td><td class="n">50</td></tr>
+<tr><td class="n">9</td><td class="n">68.0</td><td class="n">50</td></tr>
+<tr><td class="n">11</td><td class="n">66.9</td><td class="n">50</td></tr>
+<tr><td class="n">13</td><td class="n">70.6</td><td class="n">50</td></tr>
+<tr><td class="n">15</td><td class="n">70.0</td><td class="n">50</td></tr>
+</tbody></table></div>
+<h3>축 <code>curve</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>curve</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">64.7</td><td class="n">266</td></tr>
+<tr><td class="n">0.1</td><td class="n">59.4</td><td class="n">266</td></tr>
+<tr><td class="n">0.2</td><td class="n">60.2</td><td class="n">266</td></tr>
+<tr><td class="n">0.3</td><td class="n">60.2</td><td class="n">266</td></tr>
+<tr><td class="n">0.4</td><td class="n">60.2</td><td class="n">266</td></tr>
+<tr><td class="n">0.5</td><td class="n">62.0</td><td class="n">266</td></tr>
+<tr><td class="n">0.6</td><td class="n">62.4</td><td class="n">266</td></tr>
+<tr><td class="n">0.7</td><td class="n">62.8</td><td class="n">266</td></tr>
+<tr><td class="n">0.8</td><td class="n">64.3</td><td class="n">266</td></tr>
+<tr><td class="n">0.9</td><td class="n">65.4</td><td class="n">266</td></tr>
+</tbody></table></div>
+<h3>축 <code>damaged</code> — 50% 아래로 내려가는 첫 값: <strong>0.75</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>damaged</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">91.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.1</td><td class="n">92.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.2</td><td class="n">91.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.3</td><td class="n">91.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.4</td><td class="n">80.3</td><td class="n">294</td></tr>
+<tr><td class="n">0.5</td><td class="n">84.7</td><td class="n">294</td></tr>
+<tr><td class="n">0.6</td><td class="n">78.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.7</td><td class="n">69.4</td><td class="n">294</td></tr>
+<tr><td class="n">0.8</td><td class="n">49.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.9</td><td class="n">41.5</td><td class="n">294</td></tr>
+<tr><td class="n">1</td><td class="n">18.0</td><td class="n">294</td></tr>
+</tbody></table></div>
+<h3>축 <code>dirty</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>dirty</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">78.6</td><td class="n">294</td></tr>
+<tr><td class="n">0.1</td><td class="n">78.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.2</td><td class="n">77.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.3</td><td class="n">75.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.4</td><td class="n">73.5</td><td class="n">294</td></tr>
+<tr><td class="n">0.5</td><td class="n">71.1</td><td class="n">294</td></tr>
+<tr><td class="n">0.6</td><td class="n">70.1</td><td class="n">294</td></tr>
+<tr><td class="n">0.7</td><td class="n">69.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.8</td><td class="n">67.3</td><td class="n">294</td></tr>
+<tr><td class="n">0.9</td><td class="n">67.0</td><td class="n">294</td></tr>
+<tr><td class="n">1</td><td class="n">64.6</td><td class="n">294</td></tr>
+</tbody></table></div>
+<h3>축 <code>dpm</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>dpm</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">100.0</td><td class="n">700</td></tr>
+<tr><td class="n">1</td><td class="n">85.9</td><td class="n">700</td></tr>
+</tbody></table></div>
+<h3>축 <code>glare</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>glare</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">99.6</td><td class="n">238</td></tr>
+<tr><td class="n">0.1</td><td class="n">99.2</td><td class="n">238</td></tr>
+<tr><td class="n">0.2</td><td class="n">99.2</td><td class="n">238</td></tr>
+<tr><td class="n">0.3</td><td class="n">99.6</td><td class="n">238</td></tr>
+<tr><td class="n">0.4</td><td class="n">100.0</td><td class="n">238</td></tr>
+<tr><td class="n">0.5</td><td class="n">99.6</td><td class="n">238</td></tr>
+<tr><td class="n">0.6</td><td class="n">99.6</td><td class="n">238</td></tr>
+<tr><td class="n">0.7</td><td class="n">99.2</td><td class="n">238</td></tr>
+<tr><td class="n">0.8</td><td class="n">99.6</td><td class="n">238</td></tr>
+<tr><td class="n">0.9</td><td class="n">99.2</td><td class="n">238</td></tr>
+<tr><td class="n">1</td><td class="n">99.2</td><td class="n">238</td></tr>
+</tbody></table></div>
+<h3>축 <code>invert</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>invert</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">99.1</td><td class="n">700</td></tr>
+<tr><td class="n">1</td><td class="n">86.7</td><td class="n">700</td></tr>
+</tbody></table></div>
+<h3>축 <code>module</code> — 50% 아래로 내려가는 첫 값: <strong>1.125</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>module</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">1</td><td class="n">58.6</td><td class="n">440</td></tr>
+<tr><td class="n">1.5</td><td class="n">59.3</td><td class="n">520</td></tr>
+<tr><td class="n">2</td><td class="n">76.7</td><td class="n">786</td></tr>
+<tr><td class="n">2.5</td><td class="n">82.5</td><td class="n">786</td></tr>
+<tr><td class="n">3</td><td class="n">86.1</td><td class="n">786</td></tr>
+<tr><td class="n">4</td><td class="n">79.5</td><td class="n">366</td></tr>
+<tr><td class="n">5</td><td class="n">80.0</td><td class="n">366</td></tr>
+<tr><td class="n">6</td><td class="n">80.3</td><td class="n">366</td></tr>
+<tr><td class="n">7</td><td class="n">100.0</td><td class="n">266</td></tr>
+<tr><td class="n">8</td><td class="n">100.0</td><td class="n">266</td></tr>
+</tbody></table></div>
+<h3>축 <code>noise</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>noise</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">83.8</td><td class="n">476</td></tr>
+<tr><td class="n">5</td><td class="n">75.2</td><td class="n">238</td></tr>
+<tr><td class="n">10</td><td class="n">74.8</td><td class="n">238</td></tr>
+<tr><td class="n">15</td><td class="n">73.1</td><td class="n">238</td></tr>
+<tr><td class="n">20</td><td class="n">69.7</td><td class="n">476</td></tr>
+<tr><td class="n">25</td><td class="n">69.7</td><td class="n">238</td></tr>
+<tr><td class="n">30</td><td class="n">69.7</td><td class="n">238</td></tr>
+<tr><td class="n">35</td><td class="n">68.5</td><td class="n">238</td></tr>
+<tr><td class="n">40</td><td class="n">66.8</td><td class="n">476</td></tr>
+<tr><td class="n">50</td><td class="n">68.5</td><td class="n">238</td></tr>
+<tr><td class="n">60</td><td class="n">69.7</td><td class="n">238</td></tr>
+</tbody></table></div>
+<h3>축 <code>persp</code> — 50% 아래로 내려가는 첫 값: <strong>0.6</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>persp</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">96.6</td><td class="n">266</td></tr>
+<tr><td class="n">0.1</td><td class="n">96.6</td><td class="n">266</td></tr>
+<tr><td class="n">0.2</td><td class="n">91.0</td><td class="n">266</td></tr>
+<tr><td class="n">0.3</td><td class="n">88.7</td><td class="n">266</td></tr>
+<tr><td class="n">0.4</td><td class="n">73.3</td><td class="n">266</td></tr>
+<tr><td class="n">0.5</td><td class="n">51.1</td><td class="n">266</td></tr>
+<tr><td class="n">0.6</td><td class="n">45.5</td><td class="n">266</td></tr>
+<tr><td class="n">0.7</td><td class="n">42.5</td><td class="n">266</td></tr>
+<tr><td class="n">0.8</td><td class="n">17.3</td><td class="n">266</td></tr>
+<tr><td class="n">0.9</td><td class="n">9.4</td><td class="n">266</td></tr>
+</tbody></table></div>
+<h3>축 <code>printdefect</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>printdefect</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">93.2</td><td class="n">280</td></tr>
+<tr><td class="n">0.25</td><td class="n">92.9</td><td class="n">280</td></tr>
+<tr><td class="n">0.5</td><td class="n">92.5</td><td class="n">280</td></tr>
+<tr><td class="n">0.75</td><td class="n">93.6</td><td class="n">280</td></tr>
+<tr><td class="n">1</td><td class="n">92.5</td><td class="n">280</td></tr>
+</tbody></table></div>
+<h3>축 <code>quietzone</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>quietzone</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">93.6</td><td class="n">280</td></tr>
+<tr><td class="n">0.25</td><td class="n">92.9</td><td class="n">280</td></tr>
+<tr><td class="n">0.5</td><td class="n">92.9</td><td class="n">280</td></tr>
+<tr><td class="n">0.75</td><td class="n">93.9</td><td class="n">280</td></tr>
+<tr><td class="n">1</td><td class="n">91.4</td><td class="n">280</td></tr>
+</tbody></table></div>
+<h3>축 <code>shadow</code> — 50% 아래로 내려가는 첫 값: <strong>없음(끝까지 버팀)</strong></h3>
+<div class="tw"><table>
+<thead><tr><th>shadow</th><th>일치%</th><th>프레임</th></tr></thead>
+<tbody>
+<tr><td class="n">0.2</td><td class="n">92.2</td><td class="n">294</td></tr>
+<tr><td class="n">0.3</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.4</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.5</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.6</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.7</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.8</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">0.9</td><td class="n">100.0</td><td class="n">294</td></tr>
+<tr><td class="n">1</td><td class="n">100.0</td><td class="n">294</td></tr>
+</tbody></table></div>
+<h2 id="s3"><span class="mark">3</span><span>실제 모듈 px별 — 크기 교란을 걷어낸 비교</span></h2>
+<p>§3.105: 요청 모듈과 실제 모듈이 다를 수 있어서 태그의 <code>modpx</code>를 쓴다.</p>
+<div class="tw"><table>
+<thead><tr><th>실제 모듈</th><th>일치%</th><th>프레임</th><th>오디코딩</th></tr></thead>
+<tbody>
+<tr><td class="">0~2px</td><td class="n">52.6</td><td class="n">4983</td><td class="n">0</td></tr>
+<tr><td class="">2~3px</td><td class="n">81.1</td><td class="n">5387</td><td class="n">0</td></tr>
+<tr><td class="">3~4px</td><td class="n">77.6</td><td class="n">2311</td><td class="n">1</td></tr>
+<tr><td class="">4~6px</td><td class="n">84.7</td><td class="n">23518</td><td class="n">1</td></tr>
+<tr><td class="">6~8px</td><td class="n">98.7</td><td class="n">3593</td><td class="n">0</td></tr>
+<tr><td class="">8~12px</td><td class="n">98.3</td><td class="n">418</td><td class="n">0</td></tr>
+</tbody></table></div>
+<h3 id="s3.1"><span class="mark">3.1</span><span>심볼로지 x 실제 모듈 — 같은 크기에서 비교해야 심볼로지 비교다</span></h3>
+<div class="tw"><table>
+<thead><tr><th>심볼로지</th><th>1.5~2.5px</th><th>2.5~3.5px</th><th>3.5~4.5px</th><th>4.5~6.5px</th><th>6.5~9px</th></tr></thead>
+<tbody>
+<tr><td class="">CODABAR</td><td class="n">88.4</td><td class="n">86.6</td><td class="n">95.6</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">CODE128</td><td class="n">78.4</td><td class="n">73.5</td><td class="n">75.5</td><td class="n">73.7</td><td class="n">100.0</td></tr>
+<tr><td class="">CODE39</td><td class="n">83.0</td><td class="n">86.6</td><td class="n">85.9</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">CODE93</td><td class="n">88.7</td><td class="n">76.3</td><td class="n">91.5</td><td class="n">100.0</td><td class="n">-</td></tr>
+<tr><td class="">DATABAR</td><td class="n">83.0</td><td class="n">76.3</td><td class="n">93.2</td><td class="n">95.8</td><td class="n">93.7</td></tr>
+<tr><td class="">DATABAREXP</td><td class="n">79.1</td><td class="n">77.8</td><td class="n">94.7</td><td class="n">94.7</td><td class="n">98.7</td></tr>
+<tr><td class="">DATAMATRIX</td><td class="n">19.1</td><td class="n">68.3</td><td class="n">69.7</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">EAN13</td><td class="n">92.9</td><td class="n">100.0</td><td class="n">81.4</td><td class="n">69.0</td><td class="n">100.0</td></tr>
+<tr><td class="">EAN8</td><td class="n">78.8</td><td class="n">99.6</td><td class="n">84.4</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">ITF</td><td class="n">100.0</td><td class="n">100.0</td><td class="n">97.6</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">PDF417</td><td class="n">50.2</td><td class="n">53.7</td><td class="n">65.9</td><td class="n">64.8</td><td class="n">96.8</td></tr>
+<tr><td class="">QR</td><td class="n">50.7</td><td class="n">90.9</td><td class="n">69.0</td><td class="n">94.5</td><td class="n">100.0</td></tr>
+<tr><td class="">UPCA</td><td class="n">89.9</td><td class="n">100.0</td><td class="n">84.5</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">UPCE</td><td class="n">98.1</td><td class="n">96.2</td><td class="n">95.5</td><td class="n">100.0</td><td class="n">100.0</td></tr>
+<tr><td class="">random</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td><td class="n">-</td></tr>
+</tbody></table></div>
+<h2 id="s4"><span class="mark">4</span><span>열화 겹수별 — 남은 격차는 축이 아니라 겹수다 (§3.100)</span></h2>
+<div class="tw"><table>
+<thead><tr><th>겹수</th><th>일치%</th><th>프레임</th><th>평균 ms(x86)</th><th>평균 ms(보드)</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">95.6</td><td class="n">7630</td><td class="n">22.2</td><td class="n">178</td></tr>
+<tr><td class="n">1</td><td class="n">76.9</td><td class="n">10743</td><td class="n">49.7</td><td class="n">397</td></tr>
+<tr><td class="n">2</td><td class="n">79.2</td><td class="n">24352</td><td class="n">80.7</td><td class="n">646</td></tr>
+<tr><td class="n">3</td><td class="n">72.8</td><td class="n">5248</td><td class="n">57.3</td><td class="n">458</td></tr>
+<tr><td class="n">4</td><td class="n">58.4</td><td class="n">5550</td><td class="n">80.9</td><td class="n">648</td></tr>
+<tr><td class="n">5</td><td class="n">47.7</td><td class="n">4656</td><td class="n">89.7</td><td class="n">718</td></tr>
+<tr><td class="n">6</td><td class="n">38.4</td><td class="n">3508</td><td class="n">67.8</td><td class="n">542</td></tr>
+<tr><td class="n">7</td><td class="n">32.6</td><td class="n">2468</td><td class="n">46.4</td><td class="n">371</td></tr>
+<tr><td class="n">8</td><td class="n">28.8</td><td class="n">1707</td><td class="n">28.7</td><td class="n">229</td></tr>
+<tr><td class="n">9</td><td class="n">25.2</td><td class="n">1038</td><td class="n">18.2</td><td class="n">146</td></tr>
+<tr><td class="n">10</td><td class="n">23.5</td><td class="n">520</td><td class="n">16.6</td><td class="n">133</td></tr>
+<tr><td class="n">11</td><td class="n">21.1</td><td class="n">207</td><td class="n">16.5</td><td class="n">132</td></tr>
+<tr><td class="n">12</td><td class="n">19.6</td><td class="n">49</td><td class="n">11.9</td><td class="n">95</td></tr>
+<tr><td class="n">13</td><td class="n">13.2</td><td class="n">4</td><td class="n">2.0</td><td class="n">16</td></tr>
+</tbody></table></div>
+<h2 id="s5"><span class="mark">5</span><span>오디코딩 전수 — 미검출보다 나쁘다, 그래서 한 건씩 적는다</span></h2>
+<p><strong>88건</strong> (프레임 67,680장 중 0.130%)</p>
+<div class="tw"><table>
+<thead><tr><th>심볼로지</th><th>격자</th><th>프레임</th><th>건수</th><th>태그</th></tr></thead>
+<tbody>
+<tr><td class="">EAN13</td><td class="">C_noise_blur</td><td class="">sw_blur-2_noise-45_1</td><td class="n">1</td><td class="">blur=2;noise=45;sym-EAN_13;modpx-4.00;img-borderline</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000443_1</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;rot-free;quietzone;curved;overexpo</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000518_4</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;mod-5px+;sym-QR;inverted;sym-EAN13</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000652_1</td><td class="n">1</td><td class="">mixed;mod-5px+;sym-ITF;inverted;printdefect;perspective;shadow;underex</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001571_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;perspective-strong;quietzone;glare;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001696_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;rot-small;glare;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001977_1</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;damaged;rot-small;curved;noise-str</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c002951_3</td><td class="n">1</td><td class="">mixed;clutter-warehouse;mod-3px;sym-CODE128;lowcontrast;rot-small;mod-</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c002962_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;rot-small;dirty;glare;noise;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004158_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-ITF;inverted;perspective;quietz</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004169_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-QR;dpm;overexposed;noise-stron</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004283_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;inverted;rot-free;shadow;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004729_1</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;damaged;rot-ortho;quietzone;curved</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005112_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-EAN13;perspective;curved;glare;sym-EAN_13;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005298_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-EAN13;inverted;dirty;shadow;und</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005437_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-ITF;shadow;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005665_5</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-ITF;lowcontrast;printdefect;sym</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c006830_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;rot-ortho;printdefect;dirty;shadow;n2;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007962_2</td><td class="n">1</td><td class="">mixed;clutter-warehouse;mod-3px;sym-ITF;lowcontrast;rot-free;dirty;cur</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000020_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;rot-free;shadow;n2;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000525_2</td><td class="n">1</td><td class="">mixed;clutter-label;mod-5px+;sym-CODE128;rot-free;perspective;mod-3px;</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001894_9</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-ITF;rot-small;sym-CODE128;rot-f</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c003697_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-QR;printdefect;curved;sym-QR_C</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004272_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;rot-free;perspective;glare;shadow;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c006253_3</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;printdefect;damaged;rot-small;mod-</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007424_7</td><td class="n">1</td><td class="">mixed;mod-5px+;sym-QR;lowcontrast;mod-3px;sym-EAN13;inverted;rot-small</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c009071_6</td><td class="n">1</td><td class="">mixed;mod-5px+;sym-QR;dpm;mod-3px;sym-CODE128;lowcontrast;rot-small;sy</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000532_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-CODE39;lowcontrast;dirty;undere</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000805_1</td><td class="n">2</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;rot-small;overexposed;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000831_1</td><td class="n">1</td><td class="">mixed;clutter-label;mod-3px;sym-ITF;printdefect;rot-small;shadow;overe</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001404_6</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;mod-5px+;sym-EAN13;printdefect;damaged;sym-CODE1</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001450_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;rot-free;glare;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001468_3</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-CODE128;inverted;damaged;sym-Q</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001921_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;sym-CODE128;rot-small;curved;shadow;underexposed</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c002411_2</td><td class="n">1</td><td class="">mixed;clutter-warehouse;mod-3px;sym-ITF;inverted;rot-ortho;lowcontrast</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c003685_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-CODE39;lowcontrast;rot-free;sym-ITF;curved;sym-CODE_</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004172_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;sym-CODE128;lowcontrast;quietzone;dirty;glare;sy</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c004179_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-CODE128;shadow;sym-CODE_128;n1;</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005484_2</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-CODE128;sym-CODE39;curved;under</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005558_3</td><td class="n">1</td><td class="">mixed;clutter-label;mod-5px+;sym-EAN13;sym-ITF;rot-ortho;rot-small;per</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005718_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;rot-ortho;shadow;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c006697_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;rot-small;glare;shadow;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c006950_3</td><td class="n">1</td><td class="">mixed;clutter-warehouse;mod-3px;sym-QR;sym-ITF;rot-free;damaged;rot-sm</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007294_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-QR;dirty;underexposed;sym-QR_C</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007390_2</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-EAN13;rot-small;perspective;mod</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007469_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-ITF;damaged;rot-small;quietzon</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c007760_8</td><td class="n">1</td><td class="">mixed;mod-5px+;sym-QR;inverted;rot-ortho;mod-3px;sym-ITF;perspective;r</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c008032_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-CODE128;perspective-strong;cur</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c008994_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-QR;shadow;underexposed;sym-QR_C</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000481_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-ITF;rot-free;glare;overexposed;</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000520_1</td><td class="n">1</td><td class="">mixed;clutter-warehouse;mod-3px;sym-ITF;rot-small;shadow;underexposed;</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c000700_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-EAN13;overexposed;sym-EAN_13;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001151_8</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-QR;damaged;perspective-strong;</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001473_2</td><td class="n">1</td><td class="">mixed;mod-3px;sym-QR;inverted;rot-free;sym-ITF;lowcontrast;perspective</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c001569_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-CODE128;printdefect;rot-small;q</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c002434_1</td><td class="n">1</td><td class="">mixed;mod-3px;sym-ITF;lowcontrast;rot-small;shadow;overexposed;n1;img-</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c002564_1</td><td class="n">1</td><td class="">mixed;mod-5px+;sym-QR;rot-ortho;curved;glare;sym-QR_CODE;n1;img-ok</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c003611_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-ITF;lowcontrast;perspective;un</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c003705_1</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-3px;sym-ITF;lowcontrast;inverted;damage</td></tr>
+<tr><td class="">random</td><td class="">H</td><td class="">c005326_2</td><td class="n">1</td><td class="">mixed;clutter-falsepattern;mod-5px+;sym-QR;dpm;damaged;perspective-str</td></tr>
+</tbody></table></div>
+<p>(위 60건만 표시 — 전체 88건)</p>
+<h2 id="s6"><span class="mark">6</span><span>시간 — x86 실측과 보드 환산</span></h2>
+<p>보드(i.MX8MP)는 x86의 약 8배 느리다(§3.60). <strong>두 값을 같이 적는다.</strong></p>
+<div class="tw"><table>
+<thead><tr><th>심볼로지</th><th>평균(x86)</th><th>p95(x86)</th><th>평균(보드)</th><th>p95(보드)</th></tr></thead>
+<tbody>
+<tr><td class="">CODABAR</td><td class="n">67.6</td><td class="n">478.0</td><td class="n">541</td><td class="n">3824</td></tr>
+<tr><td class="">CODE128</td><td class="n">92.3</td><td class="n">397.8</td><td class="n">738</td><td class="n">3182</td></tr>
+<tr><td class="">CODE39</td><td class="n">83.7</td><td class="n">518.5</td><td class="n">670</td><td class="n">4148</td></tr>
+<tr><td class="">CODE93</td><td class="n">91.3</td><td class="n">529.5</td><td class="n">730</td><td class="n">4236</td></tr>
+<tr><td class="">DATABAR</td><td class="n">80.0</td><td class="n">412.3</td><td class="n">640</td><td class="n">3299</td></tr>
+<tr><td class="">DATABAREXP</td><td class="n">99.3</td><td class="n">612.1</td><td class="n">794</td><td class="n">4897</td></tr>
+<tr><td class="">DATAMATRIX</td><td class="n">49.2</td><td class="n">173.4</td><td class="n">394</td><td class="n">1387</td></tr>
+<tr><td class="">EAN13</td><td class="n">48.2</td><td class="n">220.6</td><td class="n">386</td><td class="n">1765</td></tr>
+<tr><td class="">EAN8</td><td class="n">39.3</td><td class="n">173.5</td><td class="n">314</td><td class="n">1388</td></tr>
+<tr><td class="">ITF</td><td class="n">38.3</td><td class="n">215.3</td><td class="n">306</td><td class="n">1722</td></tr>
+<tr><td class="">PDF417</td><td class="n">94.9</td><td class="n">321.5</td><td class="n">759</td><td class="n">2572</td></tr>
+<tr><td class="">QR</td><td class="n">45.7</td><td class="n">163.0</td><td class="n">366</td><td class="n">1304</td></tr>
+<tr><td class="">UPCA</td><td class="n">43.2</td><td class="n">191.6</td><td class="n">345</td><td class="n">1532</td></tr>
+<tr><td class="">UPCE</td><td class="n">36.9</td><td class="n">194.9</td><td class="n">295</td><td class="n">1559</td></tr>
+<tr><td class="">random</td><td class="n">60.3</td><td class="n">325.1</td><td class="n">482</td><td class="n">2601</td></tr>
+</tbody></table></div>
+<hr>
+<h2 id="s7"><span class="mark">7</span><span>분석 — 오디코딩 88건을 한 건씩 뜯어봤다</span></h2>
+<p>이 저장소의 우선순위는 <strong>미검출 &lt; 오디코딩</strong>이다. 검출률 56.9%는 격자에 물리적으로 불가능한 모서리를 일부러 넣은 결과라 그 자체로는 나쁜 숫자가 아니지만, <strong>오디코딩 88건은 그냥 나쁜 숫자다.</strong> 그래서 88건을 전부 재생성해서 어떤 심볼로지가 무엇을 잘못 냈는지 직접 확인했다.</p>
+<h3 id="s7.1"><span class="mark">7.1</span><span>어디에 몰려 있나</span></h3>
+<div class="tw"><table>
+<thead><tr><th>격자</th><th>프레임</th><th>오디코딩</th></tr></thead>
+<tbody>
+<tr><td class="">H (난수 혼합)</td><td class="n">27,470</td><td class="n"><strong>89</strong></td></tr>
+<tr><td class="">C 노이즈x블러 / EAN13</td><td class="n">221</td><td class="n">1</td></tr>
+<tr><td class="">S1 작은모듈x대비 / DATABAREXP</td><td class="n">323</td><td class="n">1</td></tr>
+<tr><td class="">나머지 격자 전부</td><td class="n">39,666</td><td class="n"><strong>0</strong></td></tr>
+</tbody></table></div>
+<p><strong>격자는 깨끗하고 난수 혼합만 더럽다.</strong> 둘의 차이는 두 가지다 — 난수는 (1) 한 프레임에 코드가 여럿이고 (2) 열화가 겹친다. 격자는 축 두 개만 곱한 코드 1개짜리다.</p>
+<h3 id="s7.2"><span class="mark">7.2</span><span>유령을 낸 심볼로지와 그 정체</span></h3>
+<p>86개 프레임을 재생성해 디코더 출력을 정답과 대조했다.</p>
+<div class="tw"><table>
+<thead><tr><th>심볼로지</th><th>부분 스캔인가</th><th>진짜 코드도 나왔나</th><th>건수</th></tr></thead>
+<tbody>
+<tr><td class="">ITF</td><td class="">예 (정답의 부분 문자열)</td><td class=""><strong>아니오</strong></td><td class="n"><strong>34</strong></td></tr>
+<tr><td class="">EAN/UPC</td><td class="">아니오 (진짜 오독)</td><td class="n">-</td><td class="n"><strong>25</strong></td></tr>
+<tr><td class="">ITF</td><td class="">아니오 (진짜 오독)</td><td class="n">-</td><td class="n"><strong>21</strong></td></tr>
+<tr><td class="">Code128</td><td class="">예</td><td class="">아니오</td><td class="n">3</td></tr>
+<tr><td class="">MicroQR</td><td class="">아니오</td><td class="n">-</td><td class="n">2</td></tr>
+<tr><td class="">Code128</td><td class="">아니오</td><td class="n">-</td><td class="n">1</td></tr>
+<tr><td class="">ITF</td><td class="">예</td><td class="">예</td><td class="n"><strong>1</strong></td></tr>
+</tbody></table></div>
+<p>부분 스캔의 실제 모습:</p>
+<pre><code>c000443_1   ITF &#x27;681731&#x27;          &lt;- 정답 &#x27;867935681731&#x27; 의 뒤 6자리
+c001571_1   ITF &#x27;31803327&#x27;        &lt;- 정답 &#x27;7631803327&#x27;   의 뒤 8자리
+c001696_1   ITF &#x27;632847406755&#x27;    &lt;- 정답 &#x27;66632847406755&#x27; 의 뒤 12자리
+c001977_1   ITF &#x27;664416&#x27;          &lt;- 정답 &#x27;855807664416&#x27; 의 뒤 6자리</code></pre>
+<p>전부 <strong>정답의 꼬리</strong>다. 바 열을 끝까지 못 훑고 중간부터 읽은 것이다. ITF는 체크디짓이 규격상 선택이라 잘린 조각도 문법에 맞는 유효한 코드가 된다.</p>
+<h3 id="s7.3"><span class="mark">7.3</span><span>여기서 나온 가장 중요한 사실</span></h3>
+<p><strong>기존 dedup은 제 몫을 하고 있다.</strong> 부분 스캔을 지우는 규칙들 (<code>textContains</code> + 기하 겹침, 밴드 규칙 네 가지)이 잡을 수 있는 경우는 <strong>87건 중 1건뿐</strong>이었다. 나머지는 전부 <strong>진짜 코드가 아예 안 나온</strong> 프레임이라, 대조할 상대가 없어서 dedup이 원리적으로 개입할 수 없다.</p>
+<p>즉 &quot;dedup 규칙을 더 넣자&quot;는 방향은 값이 거의 없다. 남은 88건을 줄이려면 <strong>단독으로 서 있는 결과 자체의 타당성</strong>을 봐야 한다.</p>
+<h3 id="s7.4"><span class="mark">7.4</span><span>축은 어디서 끊기는가</span></h3>
+<div class="tw"><table>
+<thead><tr><th>축</th><th>50%를 지나는 값</th><th>읽는 법</th></tr></thead>
+<tbody>
+<tr><td class=""><code>module</code></td><td class=""><strong>1.125px</strong></td><td class="">1px 아래는 물리적으로 표본이 없다. 벽이 여기다.</td></tr>
+<tr><td class=""><code>blur</code></td><td class=""><strong>2.75</strong> (시그마)</td><td class="">모듈 4px에 시그마 2.75면 이미 코드가 아니다.</td></tr>
+<tr><td class=""><code>persp</code></td><td class="n"><strong>0.6</strong></td><td class="">원근이 남은 축 중 가장 이르게 끊긴다.</td></tr>
+<tr><td class=""><code>damaged</code></td><td class="n"><strong>0.75</strong></td><td class="">오류정정 용량 밖이라 정상.</td></tr>
+<tr><td class=""><code>contrast</code></td><td class="n"><strong>0.05</strong></td><td class="">대비 0.05는 SNR 벽(§3.61).</td></tr>
+<tr><td class="">angle / noise / glare / shadow / dirty / quietzone / printdefect / invert / dpm / curve / count</td><td class="">없음</td><td class=""><strong>끝까지 버틴다.</strong></td></tr>
+</tbody></table></div>
+<p>훑은 축 17개 중 <strong>11개가 끝까지 안 무너진다.</strong> 남은 다섯 개도 물리 한계에 붙어 있다. 그래서 다음 개선은 축이 아니라 아래 두 곳이다.</p>
+<h3 id="s7.5"><span class="mark">7.5</span><span>겹수가 여전히 지배한다 (§3.100 재확인)</span></h3>
+<div class="tw"><table>
+<thead><tr><th>겹수</th><th>0</th><th>1</th><th>2</th><th>4</th><th>6</th><th>8</th><th>10</th><th>12</th></tr></thead>
+<tbody>
+<tr><td class="">일치%</td><td class="n">95.6</td><td class="n">76.9</td><td class="n">79.2</td><td class="n">58.4</td><td class="n">38.4</td><td class="n">28.8</td><td class="n">23.5</td><td class="n">19.6</td></tr>
+</tbody></table></div>
+<p>단일 축은 다 버티는데 <strong>겹치면 무너진다.</strong> 그리고 오디코딩 88건도 전부 겹수가 높은 난수 코퍼스에 있다. 두 현상이 같은 자리를 가리킨다.</p>
+<h3 id="s7.6"><span class="mark">7.6</span><span>크기 교란을 걷어낸 심볼로지 비교</span></h3>
+<p>§3.105를 고친 덕에 이번에는 <strong>같은 실제 모듈 px에서</strong> 비교할 수 있다. 2.5~3.5px 구간(현장에서 가장 흔한 구간)만 뽑으면:</p>
+<div class="tw"><table>
+<thead><tr><th>잘 되는 쪽</th><th></th><th>안 되는 쪽</th><th></th></tr></thead>
+<tbody>
+<tr><td class="">ITF</td><td class="n">100.0</td><td class="">PDF417</td><td class="n"><strong>53.7</strong></td></tr>
+<tr><td class="">EAN13 / UPCA</td><td class="n">100.0</td><td class="">DATAMATRIX</td><td class="n"><strong>68.3</strong></td></tr>
+<tr><td class="">UPCE</td><td class="n">96.2</td><td class="">CODE128</td><td class="n"><strong>73.5</strong></td></tr>
+<tr><td class="">CODE39 / CODABAR</td><td class="n">86.6</td><td class="">CODE93</td><td class="n">76.3</td></tr>
+</tbody></table></div>
+<p><strong>PDF417이 이 구간에서 가장 약하다</strong>(53.7%). 2D인데 QR(90.9%)의 절반을 조금 넘는다. 이건 크기 교란이 아니라 진짜 차이다.</p>
+<hr>
+<h2 id="s8"><span class="mark">8</span><span>다음 개선 대상 — 이 보고서가 가리키는 곳</span></h2>
+<p>우선순위는 <strong>오디코딩 &gt; 검출</strong>이다.</p>
+<h3>[1] 단독으로 선 1D 결과의 <strong>정지대 확인</strong> (오디코딩 37건 겨냥)</h3>
+<p>부분 스캔 37건(ITF 34 + Code128 3)은 전부 &quot;진짜 코드는 못 읽고 조각만 낸&quot; 경우다. 런타임에 정답을 모르지만 <strong>물리 신호는 있다</strong> — 진짜 1D 코드는 양 끝에 정지대(quiet zone, 좁은 요소의 10배)가 있고, <strong>부분 스캔은 잘린 자리 바로 바깥에 바가 계속 있다.</strong></p>
+<p>그래서 이렇게 본다:</p>
+<blockquote>선형 코드 결과의 꼭짓점 양 끝 바깥을 코드 축 방향으로 들여다본다. 정지대가 아니라 바 같은 변조가 있으면 그것은 부분 스캔이다.</blockquote>
+<p>규격에 있는 성질이라 코퍼스에 맞춘 문턱이 아니다. 대가는 프레임 가장자리 코드와 잡동사니가 바짝 붙은 코드다 — 넣기 전에 실측한다.</p>
+<h3>[2] 낮은 SNR에서 1D의 <strong>다중 읽기 합의</strong> (오디코딩 49건 겨냥)</h3>
+<p>부분 스캔이 아닌 49건(EAN/UPC 25, ITF 21, …)은 진짜 오독이다. EAN13은 체크디짓이 필수인데도 통과했다 — 체크디짓 하나는 무작위 오류의 1/10만 막는다. 예: 정답 <code>4907304703100</code> -&gt; <code>4907304713109</code>.</p>
+<p>산업용 리더기가 쓰는 방법은 <strong>여러 스캔 라인/패스가 같은 값을 낼 때만 받는 것</strong>이다. 이 파이프라인은 이미 패스를 여러 개 돌리므로, 낮은 품질 구간에서만 합의를 요구하면 지연 없이 얹을 수 있다.</p>
+<h3>[3] PDF417의 작은 모듈 (검출 겨냥)</h3>
+<p>같은 2.5~3.5px에서 PDF417 53.7% / QR 90.9%. PDF417은 행 높이가 낮아 행 동기화가 먼저 깨진다는 가설이 있으나 <strong>아직 안 쟀다.</strong></p>
+<h3>[4] 원근 0.6 (검출 겨냥)</h3>
+<p>끊기는 다섯 축 중 물리 한계가 아닌 유일한 축이다. §3.29에서 한 번 건드렸고 그때 리프트 1.50을 얻었다. 지금 격자에서 <code>persp</code> 0.6이 벽이다.</p></div>
