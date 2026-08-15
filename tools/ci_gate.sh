@@ -350,8 +350,11 @@ if awk -v a="${AER_RATE:-0}" 'BEGIN{exit !(a < 55.0)}'; then
   echo "!! 권장 조합의 검출이 55% 아래로 내려갔다"; exit 1; fi
 if [ "${AER_MIS:-99}" != "0" ]; then
   echo "!! 권장 조합에서 오디코딩이 나왔다"; exit 1; fi
-if awk -v a="${AER_P95:-999}" 'BEGIN{exit !(a > 220.0)}'; then
-  echo "!! 마감 60ms를 걸었는데 p95가 220ms를 넘었다 — 마감이 안 문다"; exit 1; fi
+# 상한 160ms의 근거: §3.96에서 tilefb가 마감을 존중하게 한 뒤 실측 p95가
+# 87~97ms다. 그 1.7배로 둔다 — 마감이 다시 새기 시작하면(그런 일이 실제로
+# 있었다, §3.95) 바로 걸린다.
+if awk -v a="${AER_P95:-999}" 'BEGIN{exit !(a > 160.0)}'; then
+  echo "!! 마감 60ms를 걸었는데 p95가 160ms를 넘었다 — 마감이 새고 있다"; exit 1; fi
 
 echo ">> [3.8/5] 공개 손잡이 생존 확인"
 AUDIT="$WORK/audit_config"

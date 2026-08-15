@@ -734,7 +734,23 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
     // 타일보다 큰 코드, 타일 경계에 걸친 코드. 부분 검출이라고 해서 그
     // 전제가 사라지지 않는다. 실제로 껐더니 같은 라벨 2장 양성 대조에서
     // full 경로가 120px 간격을 2 -> 1로 놓쳤다(게이트 [3.78]이 잡았다).
-    if (!cfg_.disableTileFallback && !cfg_.fastNoRead) {
+    // [마감을 넘겼으면 이 단은 건너뛴다 — 2026-08-04 재실측]
+    //
+    // 바로 위 주석("마감 검사를 여기 넣어봤고 값을 못 했다")은 **마감이
+    // 실제로는 안 물던 시절**의 측정이다. §3.95에서 max_frame_ms가 첫 영역
+    // 마감을 통해 새고 있던 것을 고치고 나서 다시 쟀더니 값이 달라졌다.
+    //
+    // 실측(권장 조합 autoexp + 상대마감 + max_frame_ms=60, 씨드 101 300장):
+    //   검사 없음   66.5%  평균 66.0ms  **p95 131.9ms**
+    //   검사 있음   65.6%  평균 58.8ms  **p95  97.4ms**
+    // p95 -26%에 검출 -0.9%p다. 마감을 건 배치에서 지키려는 것이 바로
+    // 그 p95이므로 이쪽이 계약에 맞다.
+    //
+    // **마감이 없으면 아무 변화가 없다** — 실측으로 확인했다(기본 설정
+    // 220/550 40.0% 동일, 40종 60/60 동일). 넘침 계측(VSOVER)에서 이 단이
+    // 초과 시간 1위(합계 569.7ms)였던 것도 근거다: 프레임 전체를 단일
+    // 스레드로 한 번 더 훑는 단이라 한 번 시작하면 중간에 못 멈춘다.
+    if (!cfg_.disableTileFallback && !cfg_.fastNoRead && !budgetExceeded()) {
         Stage st("tilefb");
         auto big = dedup(decodeTile(view, 0));
         // need를 채웠을 때만 끊는다(바로 위 [[vscan-lite-full-path-need]]).
