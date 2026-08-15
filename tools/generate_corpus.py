@@ -1159,6 +1159,7 @@ SWEEP_BASE = {
     "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
     "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0, "invert": 0.0,
     "dpm": 0.0, "printdefect": 0.0, "damaged": 0.0, "quietzone": 0.0, "dirty": 0.0,
+    "clutter": 0.0,
 }
 SWEEP_HELP = {
     "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
@@ -1168,6 +1169,7 @@ SWEEP_HELP = {
     "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
     "shadow": "그림자 밝기 배율 (1.0=없음)",
+    "clutter": "배경 잡동사니 0=없음 / 1=물류라벨 / 2=창고 / 3=가짜 파인더+1D 미끼",
     "printdefect": "인쇄 불량(잉크 끊김) 세기 0~1. 가로 줄이 규칙적으로 빠진다",
     "damaged": "물리 손상(긁힘) 세기 0~1. 2D는 모서리 결손도 같이 난다",
     "quietzone": "정지대 침범 세기 0~1. 코드에 밀착한 테두리와 텍스트",
@@ -1282,6 +1284,14 @@ def build_sweep(index, combo, cfg):
     ys = np.arange(h, dtype=np.float32)[:, None] / h
     a = 195 + 25 * (1 - xs * 0.6 - ys * 0.3) + rng.normal(0, 3, size=(h, w))
     img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+    # [배경 잡동사니] 난수 경로에만 있던 축을 스윕으로도 낸다. 값은 세기가
+    # 아니라 **종류**다(1=물류라벨 / 2=창고 / 3=가짜 파인더+1D 미끼) —
+    # 이 열화는 연속량이 아니라 장면 종류이기 때문이다. 코드를 얹기 전에
+    # 그려야 잡동사니가 코드를 덮지 않는다.
+    _cl = int(round(float(p["clutter"])))
+    if _cl > 0:
+        img = background(rng, w, h, {1: "label", 2: "warehouse", 3: "falsepattern"}[
+            min(3, _cl)], [])
 
     k = max(1, int(p["count"]))
     cols = int(min(4, max(1, math.ceil(math.sqrt(k * w / h)))))

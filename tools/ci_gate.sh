@@ -263,6 +263,10 @@ python3 "$ROOT/tools/generate_empty.py" "$EMPTY_DIR" >/dev/null 2>&1
 # 1D 바코드처럼 보이는 무늬(벨트 리브 / 슬랫 / 나무결 / 그물)도 같이 넣는다.
 # 컨베이어에서 유령이 실제로 태어나는 자리다.
 python3 "$ROOT/tools/generate_texture.py" "$EMPTY_DIR" >/dev/null 2>&1 || true
+# 인공 구조물 장면도 같이 넣는다 — 물류 라벨의 활자/표 줄, 박스 모서리,
+# 그리고 **가짜 파인더(체커보드) + 1D 미끼 막대열**. 자연 무늬보다 유령이
+# 태어나기 쉬운 쪽이고, 판정 지연이 가장 큰 프레임이기도 하다(§3.99).
+python3 "$ROOT/tools/generate_clutter_empty.py" "$EMPTY_DIR" >/dev/null 2>&1 || true
 EMPTY_OUT=$("$VERIFY" "$EMPTY_DIR" --paths full,2stage --reps 1 --quiet 2>/dev/null \
             | grep -E "^(full|2stage) " | tr -s ' ')
 # 3번째 칸은 "찾은수/기대수" 꼴이라 앞 숫자만 뗀다. awk가 "0/0"을 0으로
@@ -357,6 +361,24 @@ done
 echo "  6종 최저:$DEG_LINE"
 if [ "$DEG_BAD" != "0" ]; then
   echo "!! 손상/오염 축이 100% 아래로 내려갔다"; exit 1; fi
+
+echo ">> [3.76/5] 컨베이어 권장 설정의 **판정 최대** (잡동사니 빈 프레임)"
+# examples/conveyor_capture_controlled.cpp의 설정 그대로. 이 예제가 주장하는
+# "판정 최대"는 오래 **저조도 QR 프레임**에서만 재고 있었는데, 현장에서
+# 판정이 가장 오래 걸리는 것은 코드가 없고 잡동사니가 있는 프레임이다.
+# 그 주장을 여기서 지킨다(§3.99).
+CLU_DIR="$WORK/clutter"
+python3 "$ROOT/tools/generate_clutter_empty.py" "$CLU_DIR" >/dev/null 2>&1
+CLU_MAX=$(VSCAN_FASTNR=1 VSCAN_FMTMASK=1 VSCAN_FLAGS=1 VSCAN_MAXFRAME=15 \
+          "$VERIFY" "$CLU_DIR" --paths 2stage --reps 3 --quiet --csv "$WORK/clu.csv" 2>/dev/null >/dev/null; \
+          awk -F, 'NR>1 && $8>m {m=$8} END{printf "%.1f", m}' "$WORK/clu.csv")
+CLU_GHOST=$(awk -F, 'NR>1 {s+=$4} END{print s+0}' "$WORK/clu.csv")
+echo "   판정 최대 ${CLU_MAX}ms (보드 환산 x8) / 유령 ${CLU_GHOST}개"
+# 상한 20ms = 보드 160ms. 실측 11.2ms의 1.8배로 둔다.
+if awk -v a="${CLU_MAX:-999}" 'BEGIN{exit !(a > 20.0)}'; then
+  echo "!! 컨베이어 설정의 판정 최대가 20ms(보드 160ms)를 넘었다"; exit 1; fi
+if [ "${CLU_GHOST:-99}" != "0" ]; then
+  echo "!! 잡동사니 프레임에서 코드가 나왔다 — 전부 유령이다"; exit 1; fi
 
 echo ">> [3.79/5] 자동 기대 개수 (개수를 모를 때 남은 코드를 찾는가)"
 # auto_expected_codes는 기본 OFF라, 켜지 않으면 게이트가 통째로 못 본다.
