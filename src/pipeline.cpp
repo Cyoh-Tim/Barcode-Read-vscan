@@ -1011,7 +1011,14 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
     std::vector<float> refined(regions.size(), kNotMeasured);
     auto angleOf = [&](size_t i) -> float {
         if (refined[i] == kNotMeasured) {
-            float a = refineRegionAngle(image, regions[i].bbox);
+            // [각도는 **찾는 뷰**에서 잰다]
+            // 각도는 기하 정보라 극성과 무관하고, 영역 자체도 찾는 뷰에서
+            // 나온 것이다. 읽는 뷰로 재면 그 둘이 어긋난다 — 반전 판본을
+            // 읽는 뷰로 넘기는 경로(§3.81)에서 실제로 어긋났고, **각도 창이
+            // 가장 좁은 PDF417만** 그 오차에 걸려 0도와 90도 말고는 전부
+            // 실패했다(다른 1D는 창이 넓어 살아남았다). 창이 8도 남짓이라는
+            // 것은 바로 아래 "각도 정밀화" 주석에 이미 적혀 있던 사실이다.
+            float a = refineRegionAngle(locateView, regions[i].bbox);
             // 원본 해상도에서 방향성이 안 잡히면 축소본 추정값이라도 쓴다.
             refined[i] = (a >= CodeRegion::kAngleUnknown) ? regions[i].angleDeg : a;
         }
