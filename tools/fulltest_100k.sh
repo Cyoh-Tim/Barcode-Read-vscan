@@ -39,16 +39,24 @@ SUMMARY="$OUT/summary.tsv"
 [ -f "$SUMMARY" ] || printf 'grid\tsym\tmodule\tframes\tcodes_found\tcodes_total\trate\tmisdec\tdup\tmean_ms\tp95_ms\n' > "$SUMMARY"
 
 # 한 격자를 돌리고 요약 한 줄을 남긴다. 축은 여러 개를 곱한다(데카르트 곱).
+# FT_WH="가로 세로"를 주면 그 해상도로 만든다(기본은 생성기 기본값).
+# FT_COUNT를 주면 코드 개수를 바꾼다(기본 1).
 run_grid() {  # $1=격자이름 $2=심볼로지 $3=모듈 $4.. = --sweep 인자들
   local name="$1" sym="$2" mod="$3"; shift 3
-  local tag="${name}_${sym}_m${mod}"
+  local wh=() whtag=""
+  if [ -n "${FT_WH:-}" ]; then
+    local ww hh
+    ww="${FT_WH%% *}"; hh="${FT_WH##* }"
+    wh=(--width "$ww" --height "$hh"); whtag="_${ww}x${hh}"
+  fi
+  local tag="${name}_${sym}_m${mod}${whtag}"
   local csv="$OUT/${tag}.csv"
   [ -s "$csv" ] && return 0                       # 이미 돈 격자는 건너뛴다(재개 가능)
   local sweeps=()
   for a in "$@"; do sweeps+=(--sweep "$a"); done
   local line
-  line="$(python3 "$ROOT/tools/generate_corpus.py" "${sweeps[@]}" \
-            --base "sym=$sym,module=$mod,count=1" --stream --jobs "$JOBS" 2>/dev/null \
+  line="$(python3 "$ROOT/tools/generate_corpus.py" "${sweeps[@]}" "${wh[@]}" \
+            --base "sym=$sym,module=$mod,count=${FT_COUNT:-1}" --stream --jobs "$JOBS" 2>/dev/null \
           | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --csv "$csv" 2>/dev/null \
           | grep -E '^2stage ' | tr -s ' ')"
   [ -z "$line" ] && { echo "  !! $tag 실패"; return 1; }
@@ -95,6 +103,37 @@ for SYM in $SYMS; do
   run_grid B_module_angle "$SYM" 8 "module:2:10:0.25" "angle:0:90:5"
   # D 원근 x 곡면
   run_grid D_persp_curve  "$SYM" 8 "persp:0:0.9:0.05" "curve:0:0.9:0.05"
+done
+
+# --- S 격자: **크기** -----------------------------------------------------
+# 위 격자들은 전부 기준 모듈 4/8px에 코드 1개, 프레임 2048x1536 고정이다.
+# 즉 **크기 축이 사실상 빠져 있었다.** 그런데 이 저장소가 실제로 막힌
+# 자리는 대부분 크기였다 — §3.17(회전이 아니라 탐색 면적), §3.20/§3.103
+# (실물 차트의 모듈 2.1px), §3.61(모듈 2px의 SNR 벽).
+#
+# 크기는 세 가지 뜻이 있고 셋 다 따로 재야 한다:
+#   (1) 모듈 절대 크기 px    — 디코더가 모듈당 표본을 몇 개 얻나
+#   (2) 프레임 대비 코드 크기 — 로케이터가 찾을 수 있나(§3.17)
+#   (3) 한 프레임의 코드 밀도 — 타일 하나에 몇 개가 뭉치나(§3.103)
+# S1/S2가 (1), S4가 (2), S3이 (3)이다.
+#
+# 모듈은 **2px 미만까지** 내려간다. 예비 실측에서 벽이 1.75px 근처였다
+# (1.75 읽힘 / 1.5 이하 실패). 기존 격자는 2px에서 시작해 그 벽을 못 봤다.
+echo "  -- S 격자 (크기) --"
+for SYM in $SYMS; do
+  run_grid S1_tinymod_contrast "$SYM" 8 "module:1:3:0.125" "contrast:0.1:1.0:0.05"
+  run_grid S2_tinymod_noise    "$SYM" 8 "module:1:3:0.125" "noise:0:40:4"
+done
+# S3 모듈 x 코드 밀도 — 실물 차트가 막힌 자리(작은 코드 여럿)
+for SYM in QR DATAMATRIX CODE128 EAN13 PDF417; do
+  run_grid S3_mod_density "$SYM" 8 "module:1.5:6:0.5" "count:1:16:1"
+done
+# S4 프레임 해상도 x 모듈 — 같은 물리 코드를 센서 해상도만 바꿔 본다.
+# 해상도가 바뀌면 "프레임 대비 코드 크기"가 바뀌므로 로케이터 쪽 축이다.
+for WH in "1024 768" "1280 960" "2048 1536" "2592 1944"; do
+  for SYM in QR DATAMATRIX CODE128 EAN13 PDF417; do
+    FT_WH="$WH" run_grid S4_res_module "$SYM" 8 "module:1:6:0.25"
+  done
 done
 
 # --- 난수 혼합 (다중 코드 + 열화 겹침) -----------------------------------
