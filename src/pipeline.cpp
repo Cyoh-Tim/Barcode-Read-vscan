@@ -385,19 +385,6 @@ int trusted(const std::vector<PipelineResult>& h) {
     return n;
 }
 
-// 프레임을 내보내기 직전: 믿을 만한 결과가 하나라도 있으면 강등된 것은
-// 버린다. 하나도 없으면 강등된 것이라도 돌려준다(없는 것보다 낫다).
-std::vector<PipelineResult> finalizeConfidence(std::vector<PipelineResult>&& h) {
-    if (h.empty()) return std::move(h);
-    bool anyTrusted = false;
-    for (const auto& r : h) if (!r.lowConfidence) { anyTrusted = true; break; }
-    if (!anyTrusted) return std::move(h);
-    h.erase(std::remove_if(h.begin(), h.end(),
-                           [](const PipelineResult& r) { return r.lowConfidence; }),
-            h.end());
-    return std::move(h);
-}
-
 struct Stage {
     const char* key;
     std::chrono::steady_clock::time_point t0;
@@ -519,16 +506,12 @@ void Pipeline::addDecoder(std::unique_ptr<IDecoder> decoder) {
     decoders_.push_back(std::move(decoder));
 }
 
-std::vector<PipelineResult> Pipeline::finalize(std::vector<PipelineResult>&& h) {
-    return finalizeConfidence(std::move(h));
-}
-
 std::vector<PipelineResult> Pipeline::process(const Frame& frame) {
     if (frame.empty()) return {};
 
     GrayImage fallback; // YUYV/NV12 폴백일 때만 실제로 채워짐
     GrayView view = toGrayView(frame, fallback);
-    return finalizeConfidence(processView(view));
+    return finalize(processView(view));
 }
 
 std::vector<PipelineResult> Pipeline::decodeTile(const GrayView& tile, int yOffset) {
@@ -2885,6 +2868,43 @@ BBox bboxOf(const DecodedSymbol& s) {
 }
 double areaOf(const BBox& b) { return std::max(0.0, b.x1 - b.x0) * std::max(0.0, b.y1 - b.y0); }
 
+/*
+ * 프레임을 내보내기 직전 강등된 결과를 정리한다.
+ *
+ * **같은 자리를 덮는 믿을 만한 결과가 있을 때만 버린다.** 처음에는
+ * "프레임에 믿을 만한 결과가 하나라도 있으면 전부 버린다"로 짰는데,
+ * 그러면 코드가 여러 개인 프레임에서 **다른 코드를 맞게 읽은 약한 결과**
+ * 까지 같이 버린다. 난수 코퍼스는 한 장에 코드가 최대 12개라 그 손해가
+ * 그대로 나왔다(씨드 2개 3만 코드: 42.23% -> 41.89%).
+ *
+ * 겹침 판정은 느슨하게 잡는다 — 약한 결과는 저해상도 뷰에서 나와 상자가
+ * 어긋나 있을 수 있다. 한쪽 넓이의 30%만 겹쳐도 같은 코드로 본다.
+ * [[vscan-lite-low-confidence-1d]]
+ */
+std::vector<PipelineResult> finalizeConfidence(std::vector<PipelineResult>&& h) {
+    if (h.empty()) return std::move(h);
+    bool anyWeak = false, anyTrusted = false;
+    for (const auto& r : h) (r.lowConfidence ? anyWeak : anyTrusted) = true;
+    if (!anyWeak || !anyTrusted) return std::move(h);
+
+    std::vector<BBox> trustedBoxes;
+    for (const auto& r : h) if (!r.lowConfidence) trustedBoxes.push_back(bboxOf(r.symbol));
+
+    h.erase(std::remove_if(h.begin(), h.end(),
+        [&](const PipelineResult& r) {
+            if (!r.lowConfidence) return false;
+            const BBox wb = bboxOf(r.symbol);
+            const double wa = areaOf(wb);
+            for (const auto& tb : trustedBoxes) {
+                const double ov = std::max(0.0, std::min(wb.x1, tb.x1) - std::max(wb.x0, tb.x0)) *
+                                  std::max(0.0, std::min(wb.y1, tb.y1) - std::max(wb.y0, tb.y0));
+                if (ov > 0.30 * std::min(wa, areaOf(tb))) return true;   // 같은 코드다
+            }
+            return false;   // 다른 자리다 — 약해도 남긴다
+        }), h.end());
+    return std::move(h);
+}
+
 // 위치 정보가 쓸모없는(퇴화한) 결과인가.
 //
 // zxing이 같은 코드를 두 번 돌려주면서 한쪽 꼭짓점 두 개를 (0,0)으로
@@ -3455,6 +3475,10 @@ std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
     for (size_t i = 0; i < in.size(); ++i)
         if (!drop[i]) out.push_back(std::move(in[i]));
     return out;
+}
+
+std::vector<PipelineResult> Pipeline::finalize(std::vector<PipelineResult>&& h) {
+    return finalizeConfidence(std::move(h));
 }
 
 } // namespace vscan
