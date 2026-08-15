@@ -959,17 +959,25 @@ def frame_degrade(img, rng, sev, tags, n_degrade, w, h, boxes, phys=None):
         """코드 하나를 골라 그 중심 근처 좌표를 돌려준다(코드가 없으면 아무 곳)."""
         if not boxes:
             return float(rng.uniform(0, w)), float(rng.uniform(0, h))
-        bx, by, bw, bh = boxes[int(rng.integers(0, len(boxes)))]
+        bx, by, bw, bh = boxes[int(rng.integers(0, len(boxes)))][:4]
         return (bx + bw * float(rng.uniform(0.2, 0.8)), by + bh * float(rng.uniform(0.2, 0.8)))
 
     if "quietzone" in picks:      # 코드에 밀착한 테두리/텍스트 (드로잉이므로 먼저)
         d = ImageDraw.Draw(img)
-        for bx, by, bw, bh in (boxes or []):
+        for bx, by, bw, bh, bmod, b2d in (boxes or []):
             if rng.random() < 0.7:
-                pad = int(rng.integers(2, 10))
+                # [여백은 모듈 단위 — 픽셀 고정은 정지대 파괴가 된다]
+                # 스윕 경로의 같은 자리 주석 참고. 픽셀 2~10px는 모듈 8px
+                # 코드에서 0.25~1.25모듈이라, 규격 정지대(1D 10모듈 / 2D
+                # 2모듈)를 통째로 깨고 있었다. 그러면 이 태그가 재는 것이
+                # "잡동사니를 견디나"가 아니라 "정지대를 부수면 못 읽는다"라는
+                # 당연한 물리가 된다. [[vscan-lite-sweep-quietzone-modules]]
+                mods = float(rng.uniform(2.0, 6.0)) if b2d else float(rng.uniform(10.0, 14.0))
+                pad = max(2, int(round(float(bmod) * mods)))
                 d.rectangle([bx - pad, by - pad, bx + bw + pad, by + bh + pad],
-                            outline=20, width=int(rng.integers(4, 9)))
-                d.text((bx, max(0, by - 34)), f"LOT {int(rng.integers(10000, 99999))} / GTIN 008123456",
+                            outline=20, width=max(2, int(round(float(bmod) * 0.8))))
+                d.text((bx, max(0, by - pad - 40)),
+                       f"LOT {int(rng.integers(10000, 99999))} / GTIN 008123456",
                        font=_FNT, fill=15)
         tags.append("quietzone")
 
@@ -1107,7 +1115,10 @@ def build_one(index, cfg):
                       "tags": ctags, "module_px": round(mod_px, 2), "phys": cphys})
 
     nd = int(rng.integers(prof["n_degrade"][0], prof["n_degrade"][1] + 1))
-    boxes = [(c["x"], c["y"], c["w"], c["h"]) for c in codes]
+    # 정지대 침범을 모듈 단위로 걸려면 코드마다 모듈 크기가 필요하다
+    # ([[vscan-lite-sweep-quietzone-modules]]).
+    boxes = [(c["x"], c["y"], c["w"], c["h"], c.get("module_px", 8.0),
+              c["symbology"] in ("QR_CODE", "DATA_MATRIX", "PDF417")) for c in codes]
     fphys = {}
     a = frame_degrade(img, rng, sev, tags, nd, w, h, boxes, phys=fphys)
 
@@ -1147,7 +1158,7 @@ SWEEP_BASE = {
     "sym": "QR", "ec": "M", "count": 1, "module": 4.0, "angle": 0.0,
     "contrast": 1.0, "bright": 1.0, "blur": 0.6, "motion": 0.0, "noise": 3.0,
     "persp": 0.0, "curve": 0.0, "glare": 0.0, "shadow": 1.0, "invert": 0.0,
-    "dpm": 0.0,
+    "dpm": 0.0, "printdefect": 0.0, "damaged": 0.0, "quietzone": 0.0, "dirty": 0.0,
 }
 SWEEP_HELP = {
     "sym": "심볼로지 (QR/CODE128/EAN13/CODE39/ITF)", "ec": "QR 오류정정 (L/M/Q/H)",
@@ -1157,6 +1168,10 @@ SWEEP_HELP = {
     "noise": "가우시안 노이즈 시그마", "persp": "원근 왜곡 강도",
     "curve": "원통 곡면 강도", "glare": "반사광 세기(0=없음)",
     "shadow": "그림자 밝기 배율 (1.0=없음)",
+    "printdefect": "인쇄 불량(잉크 끊김) 세기 0~1. 가로 줄이 규칙적으로 빠진다",
+    "damaged": "물리 손상(긁힘) 세기 0~1. 2D는 모서리 결손도 같이 난다",
+    "quietzone": "정지대 침범 세기 0~1. 코드에 밀착한 테두리와 텍스트",
+    "dirty": "오염(얼룩) 세기 0~1. 코드 주변에 반점을 뿌린다",
     "dpm": "도트 각인 (0=없음, 1=적용). 모듈 하나에 점 하나를 찍는다 — "
             "격자는 코드 상자에 맞추고 피치는 실수로 유지한다(_to_dpm 주석)",
     "invert": "흑백 반전 (0=없음, 1=반전). 반전 전에 흰 여백을 덧대므로 "
@@ -1296,6 +1311,43 @@ def build_sweep(index, combo, cfg):
                 sym = sym.resize((max(24, int(sym.width * k)),
                                   max(24, int(sym.height * k))), Image.LANCZOS)
                 eff_mod *= k
+        if float(p["printdefect"]) > 0:
+            # 난수 경로(_degrade_symbol)와 같은 모양: 가로 줄이 규칙적으로
+            # 빠진다. 세기가 셀수록 줄 간격이 좁아진다.
+            v = float(p["printdefect"])
+            a2 = np.array(sym).astype(np.float32)
+            hh = a2.shape[0]
+            gap = max(6, int(hh * float(np.interp(v, [0, 1], [0.10, 0.035]))))
+            for yy2 in range(0, hh, gap):
+                a2[yy2:yy2 + max(1, int(hh * 0.006)), :] = 235
+            sym = Image.fromarray(np.clip(a2, 0, 255).astype(np.uint8), mode="L")
+        if float(p["damaged"]) > 0:
+            """[긁힘 굵기는 **모듈 단위**여야 한다]
+
+            처음에는 굵기를 픽셀 고정(3~10px)으로 뒀다. 그러면 같은 세기가
+            모듈 크기에 따라 전혀 다른 손상이 된다 — 모듈 3px에 10px 긁힘은
+            세 모듈을 통째로 지우고, 모듈 20px에는 흠집도 안 된다. 오류정정
+            용량은 **모듈 수** 기준이므로 축도 그 단위여야 A/B가 성립한다.
+
+            그래도 이 축은 판독 가능성 버킷이 **모델링하지 않는다**(아래
+            classify_code는 흐림/노이즈/대비/각도만 본다). 즉 `--bucket ok`가
+            이 축에서는 "읽혀야 정상"을 보증하지 않는다. 축은 A/B 비교용으로
+            쓰고, 절대 수준을 성능 주장에 쓰지 말 것.
+            [[vscan-lite-sweep-damage-uncalibrated]]
+            """
+            v = float(p["damaged"])
+            im2 = sym.copy()
+            d2 = ImageDraw.Draw(im2)
+            ww, hh = im2.size
+            n = int(np.interp(v, [0, 1], [1, 8]))
+            wdt = max(1, int(round(eff_mod * float(np.interp(v, [0, 1], [0.3, 1.2])))))
+            for k in range(n):
+                fx = (k + 1) / (n + 1)
+                d2.line([int(ww * fx), 0, int(ww * (1.0 - fx)), hh], fill=235, width=wdt)
+            if symname in ("QR_CODE", "DATA_MATRIX", "PDF417") and v >= 0.6:
+                cut = int(min(ww, hh) * float(np.interp(v, [0.6, 1], [0.05, 0.20])))
+                d2.polygon([(ww, hh), (ww - cut, hh), (ww, hh - cut)], fill=200)
+            sym = im2
         if float(p["dpm"]) >= 0.5:
             # 반전보다 **먼저** 찍는다 — 실제 공정도 각인한 뒤에 촬영 극성이
             # 정해지지, 반전된 이미지를 각인하지는 않는다.
@@ -1330,6 +1382,57 @@ def build_sweep(index, combo, cfg):
                       "tags": [], "module_px": round(eff_mod, 2),
                       "phys": {"contrast": float(p["contrast"])}})
 
+    if float(p["quietzone"]) > 0 or float(p["dirty"]) > 0:
+        # 프레임 단계 열화 둘. 난수 경로(_degrade_frame)와 같은 모양인데,
+        # 스윕은 재현 가능해야 하므로 위치를 난수가 아니라 격자에서 뽑는다.
+        d3 = ImageDraw.Draw(img)
+        for c in codes:
+            bx, by, bw, bh = c["x"], c["y"], c["w"], c["h"]
+            if float(p["quietzone"]) > 0:
+                """[여백은 **모듈 단위**여야 한다 — 안 그러면 정지대 파괴다]
+
+                처음에는 pad를 픽셀 고정(10 -> 2px)으로 뒀다. 모듈 8px짜리
+                ITF에서 10px는 **1.25모듈**이다. 그런데 ITF/Code39/Code128의
+                규격 정지대는 최소 폭 요소의 **10배**다. 즉 가장 약한 단계도
+                이미 규격을 깨고 있었고, 실측이 그대로 나왔다 — ITF가 0.1부터
+                1.0까지 **전 구간 0/1**로 계단 없이 죽었다. 계단이 없다는 것
+                자체가 "축이 아니라 벽"이라는 신호다.
+
+                §3.41에서 반전 축이 정확히 같은 이유로 하네스 결함이었다.
+                여기가 **다섯 번째**다.
+
+                고친 뒤: 1D는 14 -> 10모듈, 2D는 6 -> 2모듈 범위. 가장 센
+                단계가 규격 하한에 정확히 닿는다. 그러면 이 축이 재는 것이
+                "정지대를 부쉈나"가 아니라 **"정지대 바로 밖에 붙은 잡동사니를
+                견디나"** 가 된다 — ITF-14의 베어러 바가 실제로 그 모양이다.
+                [[vscan-lite-sweep-quietzone-modules]]
+                """
+                v = float(p["quietzone"])
+                mod = float(c.get("module_px", 8.0)) or 8.0
+                is2d_c = c["symbology"] in ("QR_CODE", "DATA_MATRIX", "PDF417")
+                mods = np.interp(v, [0, 1], (6.0, 2.0) if is2d_c else (14.0, 10.0))
+                pad = max(2, int(round(mod * float(mods))))
+                wdt = max(2, int(round(mod * float(np.interp(v, [0, 1], [0.5, 1.2])))))
+                d3.rectangle([bx - pad, by - pad, bx + bw + pad, by + bh + pad],
+                             outline=20, width=wdt)
+                # 텍스트도 정지대 밖에 둔다(라벨의 사람 읽는 문자열 위치).
+                d3.text((bx, max(0, by - pad - 40)),
+                        "LOT 42315 / GTIN 008123456", font=_FNT, fill=15)
+            if float(p["dirty"]) > 0:
+                # 얼룩 크기도 모듈 단위다(위 damaged 주석과 같은 이유).
+                # 이 축도 버킷이 모델링하지 않는다 — A/B 비교용이다.
+                v = float(p["dirty"])
+                mod = float(c.get("module_px", 8.0)) or 8.0
+                n = int(np.interp(v, [0, 1], [20, 160]))
+                rmax = max(1, int(round(mod * float(np.interp(v, [0, 1], [0.3, 1.5])))))
+                for k in range(n):
+                    # 코드 상자 안팎에 고르게 흩뿌린다(격자 + 황금비 오프셋).
+                    fx = ((k * 0.6180339887) % 1.0)
+                    fy = ((k * 0.7548776662) % 1.0)
+                    x2 = bx - bw * 0.15 + bw * 1.30 * fx
+                    y2 = by - bh * 0.15 + bh * 1.30 * fy
+                    r2 = 1 + (k % max(1, rmax))
+                    d3.ellipse([x2, y2, x2 + r2, y2 + r2], fill=50 + (k * 37) % 165)
     if p["blur"]:
         img = img.filter(ImageFilter.GaussianBlur(float(p["blur"])))
     arr = np.array(img).astype(np.float32)

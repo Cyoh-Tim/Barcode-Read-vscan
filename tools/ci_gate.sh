@@ -332,6 +332,32 @@ echo "  $DPM_LINE"
 if [ "$DPM_BAD" != "0" ]; then
   echo "!! DPM 축이 100% 아래로 내려갔다"; exit 1; fi
 
+echo ">> [3.771/5] 손상/오염/인쇄불량/정지대 침범 축"
+# 이 넷은 오래 **난수 경로에만** 있었다. §3.97에서 DPM이 정확히 그 이유로
+# 세 번 오진됐으므로 스윕 축으로 만들고 여기서 지킨다(§3.98).
+#
+# 수준의 근거: damaged 0.3부터는 2D가 물리적으로 무너진다(EC 스윕으로
+# 확인 — L/M/Q는 0.3에서 끊기고 H만 0.5까지 간다). 그러니 게이트는
+# **오류정정 용량 안**인 구간만 본다. dirty는 0.5까지 7종 전부 100%다.
+DEG_BAD=0
+DEG_LINE=""
+for AX in "damaged:0.1:0.2:0.1" "dirty:0.1:0.5:0.1" "printdefect:0.1:1.0:0.1" "quietzone:0.1:1.0:0.1"; do
+  A=${AX%%:*}
+  worst=100
+  for S in QR DATAMATRIX CODE128 EAN13 PDF417 ITF; do
+    r=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "$AX" \
+          --base "sym=$S,module=8,count=1" --stream --jobs "$(nproc)" 2>/dev/null \
+        | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet 2>/dev/null \
+        | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+    worst=$(awk -v a="${r:-0}" -v b="$worst" 'BEGIN{print (a<b)?a:b}')
+  done
+  DEG_LINE="$DEG_LINE $A=${worst}%"
+  if awk -v a="$worst" 'BEGIN{exit !(a < 100.0)}'; then DEG_BAD=1; fi
+done
+echo "  6종 최저:$DEG_LINE"
+if [ "$DEG_BAD" != "0" ]; then
+  echo "!! 손상/오염 축이 100% 아래로 내려갔다"; exit 1; fi
+
 echo ">> [3.79/5] 자동 기대 개수 (개수를 모를 때 남은 코드를 찾는가)"
 # auto_expected_codes는 기본 OFF라, 켜지 않으면 게이트가 통째로 못 본다.
 # 다중 코드 프레임에서 **켰을 때만** 더 찾는다는 것을 여기서 지킨다.
