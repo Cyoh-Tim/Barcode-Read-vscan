@@ -1973,7 +1973,16 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // 승격이 부르는 processView()는 이 플래그를 정상적으로 존중하므로
     // 없앨 이유가 없다. §3.69에서 배운 것과 정확히 같은 실수를 내가
     // 바로 다음 커밋에서 되풀이할 뻔했다.
-    if (cfg_.tryHarder) {
+    // [빠른 불판독에서는 이 단이 중복이다 — 2026-08-03 실측]
+    // 이 단은 프레임 전체를 TryHarder로 한 번 더 훑는다. §3.78에서 영역
+    // 구제의 **자르기**를 되살린 뒤로, 이 단이 잡던 것을 그쪽이 이미 잡는다.
+    // 빼도 **어느 축에서도 잃지 않는다**:
+    //   저조도 5시드  149/240 코드 동일, 판정 최대 보드 110 -> **53ms**
+    //   난수 200장    249코드 동일,      판정 평균 89.9 -> 73.1ms
+    //   40종          36/40 동일
+    //   0~90도 회전   QR/CODE128/PDF417/EAN13/DataMatrix 전부 100% 동일
+    // 오디코딩은 전부 0 그대로다. [[vscan-lite-fastnr-no-harder-tier]]
+    if (cfg_.tryHarder && !cfg_.fastNoRead) {
         PipelineConfig harderCfg = cfg_;
         // [단일 스레드가 맞다 — 2026-08-03 실측]
         // 이 단들을 타일 병렬로 돌려봤다. **1.7~2배 느려진다**
