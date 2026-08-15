@@ -170,7 +170,7 @@ vscan_result_t* vscan_process_gray(vscan_pipeline_t* pipeline,
     if (!pipeline || !pixels || width <= 0 || height <= 0) return nullptr;
 
     vscan::GrayView view(pixels, width, height, stride > 0 ? stride : width);
-    auto results = pipeline->impl.processView(view);
+    auto results = vscan::Pipeline::finalize(pipeline->impl.processView(view));
     return buildResult(std::move(results));
 }
 
@@ -181,7 +181,7 @@ vscan_result_t* vscan_process_gray_two_stage(vscan_pipeline_t* pipeline,
     if (!pipeline || !pixels || width <= 0 || height <= 0) return nullptr;
 
     vscan::GrayView view(pixels, width, height, stride > 0 ? stride : width);
-    auto results = pipeline->impl.processViewTwoStage(view, crop_pad_px);
+    auto results = vscan::Pipeline::finalize(pipeline->impl.processViewTwoStage(view, crop_pad_px));
     return buildResult(std::move(results));
 }
 
@@ -192,7 +192,8 @@ vscan_result_t* vscan_process_gray_tracked(vscan_pipeline_t* pipeline,
                                             int full_scan_interval) {
     if (!pipeline || !pixels || width <= 0 || height <= 0) return nullptr;
     vscan::GrayView view(pixels, width, height, stride > 0 ? stride : width);
-    auto results = pipeline->impl.processViewTracked(view, track_pad_px, full_scan_interval);
+    auto results = vscan::Pipeline::finalize(
+        pipeline->impl.processViewTracked(view, track_pad_px, full_scan_interval));
     return buildResult(std::move(results));
 }
 

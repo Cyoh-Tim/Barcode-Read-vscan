@@ -197,6 +197,207 @@ void overArm(std::chrono::steady_clock::time_point dl, bool on) {
 }
 void overDump() { over().dump(); over().active = false; }
 
+/*
+ * [부분 스캔 걸러내기 — 정지대(quiet zone)를 본다]
+ *
+ * 10만 장 풀테스트에서 오디코딩 88건을 한 건씩 뜯어보니, 37건이 **정답의
+ * 조각**이었다(docs/FULLTEST_REPORT.md §7.2):
+ *
+ *   ITF '681731'   <- 정답 '867935681731' 의 뒤 6자리
+ *   ITF '31803327' <- 정답 '7631803327'   의 뒤 8자리
+ *
+ * 바 열을 끝까지 못 훑고 중간부터 읽은 것이다. ITF·Codabar·2of5·Code39는
+ * 체크디짓이 규격상 선택이라 잘린 조각도 문법에 맞는 유효한 코드가 된다.
+ *
+ * 기존 방어는 dedup이다 — 진짜 코드와 조각이 **같이** 나왔을 때 지운다.
+ * 그런데 37건은 전부 **진짜 코드가 아예 안 나온** 프레임이라 대조할
+ * 상대가 없었다. 87건 중 dedup이 잡을 수 있었던 것은 1건뿐이다.
+ * 그래서 상대와 견주는 대신 **결과 하나만 보고 판단할 물리 신호**가 필요하다.
+ *
+ * 그 신호가 정지대다. 1D 규격은 예외 없이 코드 양 끝에 좁은 요소의 10배
+ * 이상 되는 빈 공간을 요구한다. 반대로 **부분 스캔은 잘린 자리 바로
+ * 바깥에 나머지 바가 그대로 있다.** 그러니 꼭짓점 바깥을 코드 축 방향으로
+ * 들여다보고, 정지대가 아니라 바 같은 변조가 있으면 조각이다.
+ *
+ * 규격에 있는 성질이라 이 코퍼스에 맞춘 문턱이 아니다. 다만 다음 두 가지는
+ * 일부러 느슨하게 뒀다:
+ *
+ *  - **어두운 것이 아니라 전이(transition) 개수**로 본다. ITF-14의 베어러
+ *    바처럼 코드 밖에 통짜 검정이 오는 규격이 있는데, 통짜는 전이가 없다.
+ *  - 히스테리시스를 준다. 정지대에 노이즈가 얹히면 중간값 근처에서 수십 번
+ *    떨리는데, 그걸 바로 세면 멀쩡한 코드를 지운다.
+ *
+ * 타일 경계에 잘린 코드는 바깥이 **뷰 밖**이라 표본이 안 잡히고, 그러면
+ * 판단을 보류한다(지우지 않는다). 타일 폴백이 그 코드를 온전히 읽을
+ * 기회를 뺏지 않으려는 것이다.
+ * [[vscan-lite-quietzone-partial-scan]]
+ */
+bool isLinearSym(Symbology s) {
+    switch (s) {
+        case Symbology::CODE39:      case Symbology::CODE39_FULL_ASCII:
+        case Symbology::TRIOPTIC_CODE39:
+        case Symbology::ITF:         case Symbology::INDUSTRIAL_2OF5:
+        case Symbology::COOP_2OF5:   case Symbology::CODABAR:
+        case Symbology::CODE128:     case Symbology::GS1_128:
+        case Symbology::GS1_DATABAR: case Symbology::CODE93:
+        case Symbology::EAN_UPC:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 이중선형 표본. 뷰 밖이면 -1 (호출자가 "모름"으로 다룬다).
+inline int sampleGray(const GrayView& v, double x, double y) {
+    const int xi = (int)std::lround(x), yi = (int)std::lround(y);
+    if (xi < 0 || yi < 0 || xi >= v.width || yi >= v.height) return -1;
+    return v.pixels[(size_t)yi * v.stride + xi];
+}
+
+// 히스테리시스로 이진화하면서 전이 횟수를 센다. lo/hi 사이는 상태 유지.
+int countTransitions(const std::vector<int>& s, int lo, int hi) {
+    int state = 0, n = 0;              // 0=모름 1=밝음 -1=어두움
+    for (int v : s) {
+        if (v < 0) continue;
+        int next = state;
+        if (v >= hi) next = 1;
+        else if (v <= lo) next = -1;
+        if (next != state) { if (state != 0) ++n; state = next; }
+    }
+    return n;
+}
+
+// 1D 결과를 믿을 수 있는 좁은 요소의 하한(px). 나이퀴스트에서 2.0이고
+// §3.61의 실측 벽도 2px이다. 실측으로 견주려고 환경변수로 열어 둔다.
+double minNarrowPx() {
+    const char* e = getenv("VSCAN_MIN_NARROW_PX");
+    return e ? atof(e) : 2.0;
+}
+
+bool looksPartialScan(const GrayView& v, const Quad& q) {
+    static const double kMinNarrowPx = minNarrowPx();
+    static const bool dbg = getenv("VSCAN_QZ_DEBUG") != nullptr;
+    if (v.empty()) return false;
+    auto len = [&](int a, int b) {
+        const double dx = q[b].first - q[a].first, dy = q[b].second - q[a].second;
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    const double l01 = len(0, 1), l03 = len(0, 3);
+    const int bi = (l01 >= l03) ? 1 : 3;
+    const double L = std::max(l01, l03);
+    // 너무 짧은 상자는 축 방향조차 못 믿는다. 판단을 보류한다.
+    if (L < 24.0) return false;
+    const double ux = (q[bi].first - q[0].first) / L;
+    const double uy = (q[bi].second - q[0].second) / L;
+    double cx = 0, cy = 0;
+    for (const auto& p : q) { cx += p.first; cy += p.second; }
+    cx /= 4; cy /= 4;
+
+    // [1] 코드 안쪽을 훑어 진폭과 **좁은 요소 폭**을 잡는다.
+    const double step = 0.5;
+    const int nIn = (int)(L / step);
+    std::vector<int> inside;
+    inside.reserve(nIn);
+    for (int i = 0; i < nIn; ++i) {
+        const double t = -L / 2 + i * step;
+        inside.push_back(sampleGray(v, cx + ux * t, cy + uy * t));
+    }
+    int lo = 255, hi = 0;
+    for (int s : inside) if (s >= 0) { lo = std::min(lo, s); hi = std::max(hi, s); }
+    if (hi - lo < 40) return false;             // 대비가 없으면 판단 보류
+    const int mid = (lo + hi) / 2, band = (hi - lo) / 5;
+    const int tLo = mid - band, tHi = mid + band;
+
+    // 좁은 요소 폭 = 런 길이의 하위 분위수. 최소값은 노이즈에 흔들린다.
+    std::vector<int> runs;
+    int state = 0, run = 0;
+    for (int s : inside) {
+        if (s < 0) continue;
+        int next = state;
+        if (s >= tHi) next = 1; else if (s <= tLo) next = -1;
+        if (next != state && state != 0) { runs.push_back(run); run = 0; }
+        if (next != state) state = next;
+        ++run;
+    }
+    if (runs.size() < 6) return false;          // 요소가 너무 적으면 1D가 아니다
+    std::sort(runs.begin(), runs.end());
+    const double narrowPx = std::max(0.5, runs[runs.size() / 10] * step);
+
+    /*
+     * [해상도 확인] 좁은 요소가 몇 픽셀인가.
+     *
+     * 풀테스트의 ITF 유령을 한 장 뜯어보고 알게 된 것이다. 정답
+     * '867935681731'(12자리)이 있는 자리에서 ITF '681731'(6자리)이 나왔는데,
+     * 처음에는 **공간적 부분 스캔**이라고 봤다. 아니었다:
+     *
+     *   - 결과 상자는 코드 **전체**를 덮고 있었다(양 끝 바깥은 정지대였다)
+     *   - 그 구간에서 관측된 요소가 36개였다. 6자리 ITF의 기대값이 37개다
+     *
+     * 즉 디코더는 자기가 본 것과 **일관된** 답을 냈다. 문제는 본 것 자체다.
+     * 이 결과는 3배 축소된 뷰에서 나왔고, 거기서 좁은 요소가 1.0px이었다.
+     * 12자리(요소 67개)가 94px에 들어가면 요소당 1.4px이라 이웃한 좁은
+     * 요소들이 뭉개진다. 뭉개진 무늬를 문법에 맞게 읽으면 원본의 부분
+     * 수열이 나온다 — 그래서 결과가 정답의 꼬리처럼 보였던 것이다.
+     *
+     * 요소 하나를 구분하려면 표본이 최소 둘은 있어야 한다(나이퀴스트).
+     * 이 저장소가 §3.61에서 따로 찾은 "모듈 2px 벽"과 같은 수다.
+     * 그 아래에서 나온 1D 결과는 맞아도 우연이다.
+     */
+    if (narrowPx < kMinNarrowPx) {
+        if (dbg) fprintf(stderr, "[qz] 해상도 미달: 좁은요소 %.2fpx < %.2fpx\n", narrowPx, kMinNarrowPx);
+        return true;
+    }
+
+    // [2] 양 끝 바깥 10모듈을 본다. 규격상 정지대가 있어야 하는 구간이다.
+    // 정지대 창의 크기. 좁은 요소 x10이 규격값인데, 좁은 요소를 런 통계로
+    // 재면 노이즈에 무너진다 — 실측(모듈 3px 프레임)에서 1.00px이 나와서
+    // 창이 3배 작아졌고 그래서 아무것도 안 걸렸다.
+    //
+    // 그래서 **기하로 바닥을 깐다.** 1D 코드는 가장 짧은 것도 30모듈이
+    // 넘으므로(ITF 6자리 = 33모듈), 정지대 10모듈은 코드 길이의 약 1/3이다.
+    // 길수록 비율이 줄어드니 0.15*L을 바닥으로 쓰면 어느 길이에서도 안전하다.
+    const double qz = std::max(10.0 * narrowPx, 0.15 * L);
+    for (int side = -1; side <= 1; side += 2) {
+        std::vector<int> outside;
+        const int nOut = (int)(qz / step);
+        int seen = 0;
+        for (int i = 1; i <= nOut; ++i) {
+            const double t = side * (L / 2 + i * step);
+            const int s = sampleGray(v, cx + ux * t, cy + uy * t);
+            outside.push_back(s);
+            if (s >= 0) ++seen;
+        }
+        // 표본의 절반도 뷰 안에 없으면(타일 경계·프레임 가장자리) 보류한다.
+        if (seen < nOut / 2) continue;
+        // 정지대라면 전이가 0~1이다. 3 이상이면 바가 이어지고 있다는 뜻이다.
+        const int tr = countTransitions(outside, tLo, tHi);
+        if (dbg) fprintf(stderr, "[qz] 정지대 위반: L=%.0f 좁은요소=%.2f 창=%.0f side%+d 전이=%d\n",
+                         L, narrowPx, qz, side, tr);
+        if (tr >= 3) return true;
+    }
+    return false;
+}
+
+// 강등되지 않은(=믿을 만한) 결과의 개수.
+int trusted(const std::vector<PipelineResult>& h) {
+    int n = 0;
+    for (const auto& r : h) if (!r.lowConfidence) ++n;
+    return n;
+}
+
+// 프레임을 내보내기 직전: 믿을 만한 결과가 하나라도 있으면 강등된 것은
+// 버린다. 하나도 없으면 강등된 것이라도 돌려준다(없는 것보다 낫다).
+std::vector<PipelineResult> finalizeConfidence(std::vector<PipelineResult>&& h) {
+    if (h.empty()) return std::move(h);
+    bool anyTrusted = false;
+    for (const auto& r : h) if (!r.lowConfidence) { anyTrusted = true; break; }
+    if (!anyTrusted) return std::move(h);
+    h.erase(std::remove_if(h.begin(), h.end(),
+                           [](const PipelineResult& r) { return r.lowConfidence; }),
+            h.end());
+    return std::move(h);
+}
+
 struct Stage {
     const char* key;
     std::chrono::steady_clock::time_point t0;
@@ -318,12 +519,16 @@ void Pipeline::addDecoder(std::unique_ptr<IDecoder> decoder) {
     decoders_.push_back(std::move(decoder));
 }
 
+std::vector<PipelineResult> Pipeline::finalize(std::vector<PipelineResult>&& h) {
+    return finalizeConfidence(std::move(h));
+}
+
 std::vector<PipelineResult> Pipeline::process(const Frame& frame) {
     if (frame.empty()) return {};
 
     GrayImage fallback; // YUYV/NV12 폴백일 때만 실제로 채워짐
     GrayView view = toGrayView(frame, fallback);
-    return processView(view);
+    return finalizeConfidence(processView(view));
 }
 
 std::vector<PipelineResult> Pipeline::decodeTile(const GrayView& tile, int yOffset) {
@@ -349,13 +554,47 @@ std::vector<PipelineResult> Pipeline::runDecoders(
         for (auto& f : futures) perDecoder.push_back(f.get());
     }
 
+    // [부분 스캔 걸러내기] 켜고 끄기를 실측으로 견주려고 손잡이를 둔다.
+    // 기본은 켬 — 미검출 < 오디코딩이라 걸러내는 쪽이 기본값이다.
+    // 모드: off=안 봄 / drop=버림 / demote=강등(기본).
+    // 강등이 기본인 이유는 [[vscan-lite-low-confidence-1d]] 주석 참고.
+    static const int qzMode = [] {
+        const char* e = getenv("VSCAN_QZ_MODE");
+        if (!e) return 2;
+        const std::string m(e);
+        return m == "off" ? 0 : (m == "drop" ? 1 : 2);
+    }();
+    const bool qzOff = (qzMode == 0);
+    // 범위: weak=체크디짓이 선택인 심볼로지만 / all=모든 1D
+    static const bool qzAll = [] {
+        const char* e = getenv("VSCAN_QZ_SCOPE"); return e && std::string(e) == "all";
+    }();
+    auto qzApplies = [](Symbology s) {
+        if (!isLinearSym(s)) return false;
+        if (qzAll) return true;
+        switch (s) {   // 체크디짓이 규격상 선택 = 유령이 그대로 유효해 보인다
+            case Symbology::ITF: case Symbology::INDUSTRIAL_2OF5:
+            case Symbology::COOP_2OF5: case Symbology::CODABAR:
+            case Symbology::CODE39: case Symbology::CODE39_FULL_ASCII:
+            case Symbology::TRIOPTIC_CODE39:
+                return true;
+            default:
+                return false;
+        }
+    };
+
     std::vector<PipelineResult> out;
     for (auto& symbols : perDecoder) {
         for (auto& sym : symbols) {
+            // **정지대 확인은 y 보정 전에** 한다 — 여기서 tile이 그 좌표계다.
+            const bool weak = !qzOff && qzApplies(sym.symbology) &&
+                              looksPartialScan(tile, sym.position);
+            if (weak && qzMode == 1) continue;          // drop 모드
             // 타일 좌표 -> 원본 프레임 좌표로 y 보정
             for (auto& pt : sym.position) pt.second += yOffset;
 
             PipelineResult r;
+            r.lowConfidence = weak;
             r.symbol = sym;
             if (sym.isGS1) r.gs1 = parseGS1(sym);
             out.push_back(std::move(r));
@@ -599,13 +838,17 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
      */
     bool needEstimated = false;
     auto enough = [&](const std::vector<PipelineResult>& h) -> bool {
-        if ((int)h.size() < need) return false;
+        // **강등된 결과는 안 센다.** 해상도가 모자란 1D 값 하나로 프레임을
+        // 끝내면, 그것이 유령일 때 진짜 코드를 찾을 기회까지 없어진다 —
+        // 풀테스트의 유령 ITF가 정확히 그렇게 나왔다(§3.106).
+        // 끝까지 이것뿐이면 finalizeConfidence()가 그대로 돌려준다.
+        if (trusted(h) < need) return false;
         if (cfg_.autoExpectedCodes && cfg_.minExpectedCodes <= 1 && !needEstimated) {
             needEstimated = true;
             Stage st("autoexp");
             need = std::max(need, estimateExpectedCodes(view, h));
         }
-        return (int)h.size() >= need;
+        return trusted(h) >= need;
     };
     if (enough(hits)) { adaptiveObserve(hits); prof().dump("성공:core"); return hits; }
 
@@ -2165,13 +2408,17 @@ std::vector<PipelineResult> Pipeline::processViewTwoStage(const GrayView& image,
     // "정말 하나뿐인가"를 프레임에 물어보는 자리가 여기다.
     bool needEstimated = false;
     auto enough = [&](const std::vector<PipelineResult>& h) -> bool {
-        if ((int)h.size() < need) return false;
+        // **강등된 결과는 안 센다.** 해상도가 모자란 1D 값 하나로 프레임을
+        // 끝내면, 그것이 유령일 때 진짜 코드를 찾을 기회까지 없어진다 —
+        // 풀테스트의 유령 ITF가 정확히 그렇게 나왔다(§3.106).
+        // 끝까지 이것뿐이면 finalizeConfidence()가 그대로 돌려준다.
+        if (trusted(h) < need) return false;
         if (cfg_.autoExpectedCodes && cfg_.minExpectedCodes <= 1 && !needEstimated) {
             needEstimated = true;
             Stage st("autoexp");
             need = std::max(need, estimateExpectedCodes(view, h));
         }
-        return (int)h.size() >= need;
+        return trusted(h) >= need;
     };
 
     // [S4 — 저대비 프레임은 순서를 뒤집는다]

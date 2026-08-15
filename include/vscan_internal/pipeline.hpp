@@ -33,6 +33,25 @@ struct PipelineResult {
      * 논리다). [[vscan-lite-approx-position]]
      */
     bool approxPosition = false;
+    /*
+     * [이 결과를 얼마나 믿는가]
+     *
+     * 1D 결과의 **좁은 요소가 2px 미만**이면 표본이 요소당 둘이 안 된다
+     * (나이퀴스트). 그 아래에서 나온 값은 맞아도 우연이다 — §3.61이 따로
+     * 찾은 "모듈 2px 벽"과 같은 수이고, 풀테스트의 유령 ITF가 전부
+     * 그 구간에서 나왔다(docs/FULLTEST_REPORT.md §7.2).
+     *
+     * 그렇다고 버리면 **그 해상도에서만 읽히는 진짜 코드**까지 잃는다.
+     * 실측으로 그게 확인됐다(난수 2000장: 41.9% -> 41.4%). 그래서 버리지
+     * 않고 **강등**한다:
+     *
+     *   - 종료 판정(enough)에서 안 센다 -> 파이프라인이 계속 찾는다
+     *   - 프레임에 믿을 만한 결과가 하나라도 있으면 그때 버린다
+     *   - 끝까지 이것뿐이면 그대로 돌려준다 (없는 것보다 낫다)
+     *
+     * [[vscan-lite-low-confidence-1d]]
+     */
+    bool lowConfidence = false;
 };
 
 struct PipelineConfig {
@@ -757,6 +776,10 @@ public:
     // 전에는 processView()(순수 풀옵션)를 기본으로 쓸 것.
     // [[vscan-lite-two-stage-decode]], [[vscan-lite-stress-validation]] 참고.
     std::vector<PipelineResult> processViewTwoStage(const GrayView& image, int cropPadPx = 50);
+    // 프레임을 호출자에게 내보내기 직전에 한 번 부른다. 믿을 만한 결과가
+    // 있으면 강등된 것을 버리고, 없으면 강등된 것이라도 남긴다.
+    // [[vscan-lite-low-confidence-1d]]
+    static std::vector<PipelineResult> finalize(std::vector<PipelineResult>&& h);
 
     // 외부에서 이미 알고 있는 ROI 좌표로 디코드한다(예: 상위 검출기가 준
     // 라벨 위치, 사람이 지정한 관심영역). processViewTwoStage()와 달리
