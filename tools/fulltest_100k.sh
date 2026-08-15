@@ -41,10 +41,21 @@ g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/verify_accuracy.cpp" \
 SYMS="$(python3 -c "import sys;sys.path.insert(0,'$ROOT/tools');import generate_corpus as g;print(' '.join(sorted(g._SWEEP_PAYLOAD)))")"
 
 SUMMARY="$OUT/summary.tsv"
+ROWS="$OUT/rows"; mkdir -p "$ROWS"
 # [단위] mean_ms / p95_ms는 **x86 실측**이다. 이 저장소 기준 보드(i.MX8MP)는
 # 약 8배 느리므로 보드 값은 x8이다(§3.60). 열 이름에 박아 둔다 — 라벨이
 # 없으면 다음 사람이 보드 값으로 읽는다(게이트에서 실제로 그렇게 틀렸다).
-[ -f "$SUMMARY" ] || printf 'grid\tsym\tmodule\tframes\tcodes_found\tcodes_total\trate\tmisdec\tdup\tmean_ms_x86\tp95_ms_x86\n' > "$SUMMARY"
+SUMMARY_HDR='grid\tsym\tmodule\tframes\tcodes_found\tcodes_total\trate\tmisdec\tdup\tmean_ms_x86\tp95_ms_x86\n'
+
+# 요약은 **rows/의 조각을 모아서 매번 새로 쓴다.** 이어붙이지 않는 이유:
+# 재개하면 건너뛴 격자는 요약 줄을 안 남기는데, 예전 방식은 이전 실행이
+# 남긴 줄에 기대고 있었다. 그 줄이 없으면(=요약 줄을 쓰기 직전에 죽었으면)
+# CSV는 있는데 요약에서 통째로 빠진다 — 실제로 A_contrast_bright/CODE128/m4가
+# 그렇게 빠져 있었다. 조각 파일로 두면 재개해도 결과가 같다(멱등).
+rebuild_summary() {
+  { printf "$SUMMARY_HDR"; cat "$ROWS"/*.row 2>/dev/null | sort; } > "$SUMMARY.tmp" \
+    && mv -f "$SUMMARY.tmp" "$SUMMARY"
+}
 
 # 한 격자를 돌리고 요약 한 줄을 남긴다. 축은 여러 개를 곱한다(데카르트 곱).
 # FT_WH="가로 세로"를 주면 그 해상도로 만든다(기본은 생성기 기본값).
@@ -59,15 +70,26 @@ run_grid() {  # $1=격자이름 $2=심볼로지 $3=모듈 $4.. = --sweep 인자�
   fi
   local tag="${name}_${sym}_m${mod}${whtag}"
   local csv="$OUT/${tag}.csv"
-  [ -s "$csv" ] && return 0                       # 이미 돈 격자는 건너뛴다(재개 가능)
+  local part="$OUT/.${tag}.part"
+  local row="$ROWS/${tag}.row"
+  # [재개] 완성된 격자는 건너뛴다. 완성의 정의가 **"$csv가 존재한다"**이고,
+  # $csv는 마지막에 rename으로만 생긴다(아래 참고). 그래서 중간에 죽은
+  # 격자는 .part로 남지 $csv가 되지 않는다.
+  #
+  # 예전에는 `[ -s "$csv" ]`로 봤다. 그러면 **쓰다 만 CSV를 완성으로 읽는다.**
+  # 실제로 그랬다 — 15:02에 죽은 실행이 남긴 A_contrast_bright/CODE128/m4가
+  # 320줄 중 294줄(블록 경계에서 잘림)이었는데 재개가 그냥 건너뛰었다.
+  # 조용히 표본이 8% 빠진 격자가 결과에 섞이는 것이라, 죽는 것보다 나쁘다.
+  [ -f "$csv" ] && [ -f "$row" ] && return 0
+  rm -f "$part"
   local sweeps=()
   for a in "$@"; do sweeps+=(--sweep "$a"); done
   local line
   line="$(python3 "$ROOT/tools/generate_corpus.py" "${sweeps[@]}" "${wh[@]}" \
             --base "sym=$sym,module=$mod,count=${FT_COUNT:-1}" --stream --jobs "$JOBS" 2>/dev/null \
-          | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --csv "$csv" 2>/dev/null \
+          | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --csv "$part" 2>/dev/null \
           | grep -E '^2stage ' | tr -s ' ')"
-  [ -z "$line" ] && { echo "  !! $tag 실패"; return 1; }
+  [ -z "$line" ] && { echo "  !! $tag 실패"; rm -f "$part"; return 1; }
   local codes rate mis dup mean p95 frames
   codes="$(echo "$line" | cut -d' ' -f3)"
   rate="$(echo "$line" | cut -d' ' -f4 | tr -d '%')"
@@ -75,11 +97,17 @@ run_grid() {  # $1=격자이름 $2=심볼로지 $3=모듈 $4.. = --sweep 인자�
   dup="$(echo "$line" | cut -d' ' -f6)"
   mean="$(echo "$line" | cut -d' ' -f7)"
   p95="$(echo "$line" | cut -d' ' -f9)"
-  frames="$(( $(wc -l < "$csv") - 1 ))"
+  frames="$(( $(wc -l < "$part") - 1 ))"
+  # 격자 이름에 해상도 꼬리표를 붙인다. S4는 같은 (격자,심볼로지,모듈)로
+  # 해상도만 바꾸므로, 안 붙이면 요약에서 네 줄이 서로 구분이 안 된다.
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$name" "$sym" "$mod" "$frames" "${codes%%/*}" "${codes##*/}" "$rate" "$mis" "$dup" "$mean" "$p95" \
-    >> "$SUMMARY"
-  printf '  %-26s %-12s m%-3s %6s장  %-11s %6s%%  오디%s\n' "$name" "$sym" "$mod" "$frames" "$codes" "$rate" "$mis"
+    "${name}${whtag}" "$sym" "$mod" "$frames" "${codes%%/*}" "${codes##*/}" "$rate" "$mis" "$dup" "$mean" "$p95" \
+    > "$row.tmp" && mv -f "$row.tmp" "$row"
+  # **CSV 확정은 맨 마지막이다.** 요약 조각이 먼저 자리를 잡은 뒤에만
+  # $csv가 생기므로, "CSV가 있다 = 요약도 있다 = 정말 다 돌았다"가 된다.
+  mv -f "$part" "$csv"
+  rebuild_summary
+  printf '  %-26s %-12s m%-3s %6s장  %-11s %6s%%  오디%s\n' "${name}${whtag}" "$sym" "$mod" "$frames" "$codes" "$rate" "$mis"
 }
 
 echo "== 10만 장 풀테스트 시작 =="
