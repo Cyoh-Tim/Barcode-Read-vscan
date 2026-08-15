@@ -63,10 +63,30 @@ def load(outdir):
                 r["_ax"], r["_flags"] = ax, flags
                 r["_modpx"] = next((float(t.split("-", 1)[1]) for t in flags
                                     if t.startswith("modpx-")), None)
-                r["_deg"] = sum(1 for k, v in ax.items()
-                                if k not in ("module", "angle") and _nonzero(k, v))
+                r["_deg"] = _degdepth(r)
                 rows.append(r)
     return rows
+
+
+# 난수 코퍼스는 축이 `k=v`가 아니라 **깃발**로 붙는다. 이 목록에 없는 깃발
+# (mixed / img-* / sym-* / mod-* / nN)은 열화가 아니라 분류표라 안 센다.
+# 이걸 안 나누면 난수 프레임이 전부 "겹수 0"으로 들어가서 겹수 표가
+# 망가진다 — 실제로 첫 보고서에서 겹수 0이 35,100장으로 찍혔다.
+_DEG_FLAGS = {
+    "lowcontrast", "inverted", "damaged", "printdefect", "dirty", "perspective",
+    "perspective-strong", "overexposed", "underexposed", "glare", "quietzone",
+    "curved", "shadow", "noise", "noise-strong", "dpm", "defocus", "defocus-strong",
+    "motion", "motion-strong", "clutter-label", "clutter-warehouse",
+    "clutter-falsepattern", "rot-small", "rot-free", "rot-ortho",
+}
+
+
+def _degdepth(r):
+    """이 프레임에 몇 겹의 열화가 걸렸나. 스윕은 축에서, 난수는 깃발에서 센다."""
+    if r["_ax"]:
+        return sum(1 for k, v in r["_ax"].items()
+                   if k not in ("module", "angle") and _nonzero(k, v))
+    return sum(1 for t in r["_flags"] if t in _DEG_FLAGS)
 
 
 def _nonzero(axis, val):
