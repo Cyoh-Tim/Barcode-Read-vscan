@@ -331,6 +331,28 @@ if awk -v a="${AE_ON:-0}" -v b="${AE_OFF:-0}" 'BEGIN{exit !(a < b + 15.0)}'; the
   exit 1
 fi
 
+echo ">> [3.795/5] 권장 조합(auto_expected + 마감) — 검출과 지연을 같이 지킨다"
+# examples/inbound_readall_bounded.cpp의 조합이다. 이 조합은 **지금 기본보다
+# 셋 다 낫다**(검출 +22.7%p, 평균 -24%, p95 -73%). 그 셋이 같이 유지되는지
+# 여기서 지킨다 — 하나만 재면 나머지가 조용히 무너질 수 있다.
+AER_OUT=$(python3 "$ROOT/tools/generate_corpus.py" -n 120 --difficulty mixed \
+            --bucket ok --seed 101 --stream --jobs "$(nproc)" 2>/dev/null \
+          | VSCAN_AUTOEXP=1 VSCAN_MAXFRAME=60 "$VERIFY" --stdin --paths 2stage \
+              --reps 1 --quiet --no-min-expected 2>/dev/null \
+          | grep -E "^2stage " | tr -s ' ')
+AER_RATE=$(echo "$AER_OUT" | cut -d' ' -f4 | tr -d '%')
+AER_MIS=$(echo "$AER_OUT"  | cut -d' ' -f5)
+AER_P95=$(echo "$AER_OUT"  | cut -d' ' -f9)
+# 마감 60ms는 벽시계라 기준 작업량으로 정규화하지 않는다. p95 상한은
+# 실측(86~107ms)의 두 배 남짓으로 둔다 — 마감이 실제로 무는지만 보면 된다.
+echo "   검출 ${AER_RATE}% / 오디코딩 ${AER_MIS} / p95 ${AER_P95}ms"
+if awk -v a="${AER_RATE:-0}" 'BEGIN{exit !(a < 55.0)}'; then
+  echo "!! 권장 조합의 검출이 55% 아래로 내려갔다"; exit 1; fi
+if [ "${AER_MIS:-99}" != "0" ]; then
+  echo "!! 권장 조합에서 오디코딩이 나왔다"; exit 1; fi
+if awk -v a="${AER_P95:-999}" 'BEGIN{exit !(a > 220.0)}'; then
+  echo "!! 마감 60ms를 걸었는데 p95가 220ms를 넘었다 — 마감이 안 문다"; exit 1; fi
+
 echo ">> [3.8/5] 공개 손잡이 생존 확인"
 AUDIT="$WORK/audit_config"
 g++ -O3 -std=c++17 -I"$ROOT/include" "$ROOT/tools/audit_config.cpp" \
