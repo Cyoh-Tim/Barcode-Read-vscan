@@ -364,6 +364,7 @@ int main(int argc, char** argv) {
             c.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             c.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
             c.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
+            if (const char* me = getenv("VSCAN_MINEXP")) c.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) c.decode_flags = strtoul(df, nullptr, 0);
             // 배치가 심볼로지를 아는 경우의 값을 재기 위한 손잡이.
             // 예: VSCAN_FMTMASK=1 이면 QR만.
@@ -378,6 +379,7 @@ int main(int argc, char** argv) {
             c.enable_qr_finder_rescue = qrFinder;
             c.enable_adaptive_profile = 1;
             c.min_expected_codes = 0;
+            if (const char* me = getenv("VSCAN_MINEXP")) c.min_expected_codes = atoi(me);
             shared[i] = vscan_create(&c);
         }
     }
@@ -410,6 +412,7 @@ int main(int argc, char** argv) {
             cfg.disable_auto_denoise = getenv("VSCAN_NOAUTODN") != nullptr;
             cfg.fast_no_read = getenv("VSCAN_FASTNR") != nullptr;
             cfg.accurate_locate = getenv("VSCAN_ACCLOC") != nullptr;
+            if (const char* me = getenv("VSCAN_MINEXP")) cfg.min_expected_codes = atoi(me);
             if (const char* df = getenv("VSCAN_FLAGS")) cfg.decode_flags = strtoul(df, nullptr, 0);
             if (const char* fm = getenv("VSCAN_FMTMASK")) cfg.symbology_mask = strtoul(fm, nullptr, 0);
             cfg.auto_denoise_strong_noise = getenv("VSCAN_STRONGDN") ? atof(getenv("VSCAN_STRONGDN")) : -1;
@@ -427,6 +430,9 @@ int main(int argc, char** argv) {
             // 못 채우면 자동으로 풀스캔 승격 -> 부분 검출 방지 (PROJECT_NOTES
             // §3.2.10). 개수를 모르는 배치가 현실이라면 --no-min-expected.
             cfg.min_expected_codes = useMinExp ? expected : 0;
+            // 개수를 모르는 현장 조건을 흉내내되 "많다고 가정"하는 판본을
+            // 재기 위한 손잡이. 위 줄 뒤에 와야 이긴다.
+            if (const char* me = getenv("VSCAN_MINEXP")) cfg.min_expected_codes = atoi(me);
             vscan_pipeline_t* p = adaptive ? shared[i] : vscan_create(&cfg);
 
             double best = 1e9;
