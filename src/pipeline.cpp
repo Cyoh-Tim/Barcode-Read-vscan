@@ -686,7 +686,50 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
         if ((int)regionHits.size() >= std::max(1, cfg_.minExpectedCodes)) { prof().dump("성공:region"); return regionHits; }
         if (regionHits.size() > hits.size()) hits = std::move(regionHits);
 
-
+        // [반전 + 회전] 영역 구제 안에도 반전 단(`rg:invert`)이 있지만,
+        // 그건 **자르기 패스 안에만** 있어서 뒤집은 뒤에 회전을 못 한다.
+        // 그래서 "반전이면서 기울어진" 1D/PDF417이 통째로 빠졌다 —
+        // 실측(module 8, 0~90도 10도 간격): CODE128 30%, EAN13 40%,
+        // PDF417 20%. 0도와 90도만 되고 그 사이가 전부 실패다.
+        //
+        // 뒤집은 판본으로 영역 구제를 **통째로 한 번 더** 부르면 자르기와
+        // 회전을 둘 다 재사용한다. 로케이터는 원본으로 돌린다 — 에너지
+        // 로케이터는 극성을 안 가리므로 뒤집을 이유가 없고, 뒤집은
+        // 판본으로 다시 찾으면 값만 두 배가 된다. 그래서 찾기/읽기를
+        // 나눠 받는 tryRegionRescueOn()이 여기 쓰인다.
+        //
+        // zxing 쪽으로는 원리적으로 못 여는 자리다(위 rg:invert 주석:
+        // TryInvert가 1D/PDF417에 아무 일도 안 한다).
+        // [[vscan-lite-region-invert-rotate]]
+        // [예산으로 자르지 않는다]
+        // 바로 위 뭉개기/평탄화 구제와 같은 이유다 — 여기까지 왔다는 것은
+        // 다른 모든 것이 실패했다는 뜻이고, 이 단은 뒤집기 한 번 + 영역
+        // 구제 한 벌로 비용이 정해져 있다. 예산에 맡기면 앞 단계들이 이미
+        // 다 써버려서 **한 번도 안 돈다**(실측: 프로파일에 `rg:inv-full`이
+        // 아예 안 찍혔다). 실제 코퍼스에서 값은 0이었다 — 243장에서
+        // 코드 479개·평균 124.7 -> 124.2ms로 차이가 없고, 40종도 40/40 그대로다.
+        if (hits.empty() && cfg_.tryInvert && !cfg_.fastNoRead) {
+            const auto ivT0 = std::chrono::steady_clock::now();
+            GrayImage inv;
+            inv.width = view.width;
+            inv.height = view.height;
+            inv.pixels.resize(static_cast<size_t>(view.width) * view.height);
+            const int st = view.stride > 0 ? view.stride : view.width;
+            for (int y = 0; y < view.height; ++y) {
+                const uint8_t* __restrict in = view.pixels + static_cast<size_t>(y) * st;
+                uint8_t* __restrict o = inv.pixels.data() + static_cast<size_t>(y) * view.width;
+                for (int x = 0; x < view.width; ++x) o[x] = static_cast<uint8_t>(255 - in[x]);
+            }
+            auto ivHits = tryRegionRescueOn(view, GrayView(inv),
+                                            std::max(1, cfg_.minExpectedCodes), RegionPass::Both);
+            prof().add("rg:inv-full", std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - ivT0).count());
+            if ((int)ivHits.size() >= std::max(1, cfg_.minExpectedCodes)) {
+                prof().dump("성공:region-invert");
+                return ivHits;
+            }
+            if (ivHits.size() > hits.size()) hits = std::move(ivHits);
+        }
     }
 
 
