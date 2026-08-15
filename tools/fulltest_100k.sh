@@ -21,7 +21,7 @@
 #
 # 환경변수:
 #   FT_JOBS     생성 병렬도 (기본 nproc)
-#   FT_MODULES  격자를 돌릴 기준 모듈 크기 (기본 "4 8")
+#   FT_MODULES  격자를 돌릴 기준 모듈 크기 (기본 "4" — 아래 주석 참고)
 #   FT_RANDOM_N 난수 혼합 코퍼스 장수 (기본 40000)
 set -u
 
@@ -29,7 +29,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/fulltest-out}"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 JOBS="${FT_JOBS:-$(nproc)}"
-MODULES="${FT_MODULES:-4 8}"
+# [기준 모듈은 하나다 — 2026-08-15에 바꿨다]
+# 예전에는 "4 8"로 A/C/E/F/G 격자를 두 번 돌렸다. 그런데 생성기가 셀에
+# 안 들어가는 코드의 모듈을 말없이 깎고 있어서, 폭이 넓은 1D(CODE39,
+# CODABAR, CODE93)는 4와 8이 **같은 그림**이었다(§3.105). 격자 절반이
+# 중복이었던 것이다.
+#
+# 생성기를 고쳤으니 이제 4와 8이 정말 다른 그림이 된다. 그래도 하나로
+# 줄이는 이유는 두 가지다:
+#   - 크기 축은 **S 격자가 이미 갖고 있다**(모듈 1~3, 1.5~6, 해상도 4종).
+#     A/C/E/F/G를 두 모듈로 도는 것은 그 위에 얹는 중복이다.
+#   - 모든 심볼로지가 **똑같이 4.00px**을 받으므로 심볼로지 사이 비교가
+#     크기 교란 없이 성립한다. 예전 표는 EAN13이 8.00px, CODE39가 3.66px을
+#     받은 채 나란히 놓여 있었다.
+MODULES="${FT_MODULES:-4}"
 RANDOM_N="${FT_RANDOM_N:-46000}"
 
 export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/third_party/zxing-cpp/core:$BUILD_DIR/zbar_install/lib:${LD_LIBRARY_PATH:-}"
@@ -66,7 +79,10 @@ run_grid() {  # $1=격자이름 $2=심볼로지 $3=모듈 $4.. = --sweep 인자�
   if [ -n "${FT_WH:-}" ]; then
     local ww hh
     ww="${FT_WH%% *}"; hh="${FT_WH##* }"
-    wh=(--width "$ww" --height "$hh"); whtag="_${ww}x${hh}"
+    # **해상도를 지정하면 캔버스 확장을 끈다.** 생성기는 요청 모듈이 안
+    # 들어가면 프레임을 키워서라도 맞춰 주는데(§3.105), 그러면 여기서 정한
+    # 해상도가 무의미해진다 — 해상도 자체가 축인 격자에서는 반대로 작용한다.
+    wh=(--width "$ww" --height "$hh" --fixed-canvas); whtag="_${ww}x${hh}"
   fi
   local tag="${name}_${sym}_m${mod}${whtag}"
   local csv="$OUT/${tag}.csv"
@@ -136,14 +152,18 @@ for SYM in $SYMS; do
     run_grid G_zone_print      "$SYM" "$M" "quietzone:0:1:0.25" "printdefect:0:1:0.25" "invert:0:1:1" "dpm:0:1:1"
   done
   # B 모듈 x 각도 — 모듈 자체가 축이라 기준 모듈을 안 나눈다
-  run_grid B_module_angle "$SYM" 8 "module:2:10:0.25" "angle:0:90:5"
+  # 모듈 상한을 10에서 8로 내렸다. 이제 모듈이 진짜로 반영되므로 10은
+  # 폭 넓은 1D에서 프레임을 12MP 상한까지 밀어 올린다 — 그 구간은 어차피
+  # 상한에 걸려 깎이고(태그의 modpx가 알려 준다), 값은 못 하면서 면적에
+  # 비례해 시간만 쓴다. 벽은 큰 쪽이 아니라 **작은 쪽**에 있다(S 격자).
+  run_grid B_module_angle "$SYM" 8 "module:2:8:0.25" "angle:0:90:5"
   # D 원근 x 곡면
   run_grid D_persp_curve  "$SYM" 8 "persp:0:0.9:0.05" "curve:0:0.9:0.05"
 done
 
 # --- S 격자: **크기** -----------------------------------------------------
-# 위 격자들은 전부 기준 모듈 4/8px에 코드 1개, 프레임 2048x1536 고정이다.
-# 즉 **크기 축이 사실상 빠져 있었다.** 그런데 이 저장소가 실제로 막힌
+# 위 격자들은 전부 기준 모듈 4px에 코드 1개다. 즉 **크기 축이 사실상
+# 빠져 있었다.** 그런데 이 저장소가 실제로 막힌
 # 자리는 대부분 크기였다 — §3.17(회전이 아니라 탐색 면적), §3.20/§3.103
 # (실물 차트의 모듈 2.1px), §3.61(모듈 2px의 SNR 벽).
 #

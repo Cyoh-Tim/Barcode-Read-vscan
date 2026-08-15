@@ -1271,6 +1271,88 @@ def sweep_fit_box(sym, cell_w, cell_h):
     return max(60, int(min(limit, cell_w * 0.95)))
 
 
+# 캔버스를 넓혀서라도 맞춰 줄 상한. 4096x3072 = 12MP로, 이 저장소가 다루는
+# 산업용 카메라(3.1MP 차트, 5MP 급)보다 위다. 더 키우면 프레임 하나가
+# 12MB를 넘고 디코딩 시간이 면적에 비례해 늘어 격자가 안 끝난다.
+_SWEEP_CANVAS_MAX = (4096, 3072)
+
+
+def _sweep_canvas_for_module(p, w, h):
+    """요청한 module px가 실제로 나오도록 캔버스를 넓힌다.
+
+    [왜 필요한가 — 2026-08-15에 찾은 하네스 결함]
+
+    sweep_symbol()은 코드가 셀에 안 들어가면 **말없이 모듈을 줄인다**
+    (`if span * mod > box: mod = box / span`). 그래서 폭이 넓은 1D는
+    요청값과 무관하게 같은 그림이 나왔다. 풀테스트에서 CODE39와 CODABAR은
+    기준 모듈 4와 8의 CSV가 **바이트 단위로 같았다** — 3.66px에서 둘 다
+    포화한 것이다.
+
+    결과가 두 가지로 나빴다:
+
+      (1) 격자의 절반이 중복이다. 두 줄이 서로 다른 크기의 측정인 것처럼
+          요약에 실린다.
+      (2) **심볼로지 사이의 비교가 크기 교란을 받는다.** 같은 "모듈 8"에서
+          EAN13은 8.00px을 받고 CODE39는 3.66px을 받는다. 그 상태로
+          검출률을 나란히 놓으면 심볼로지가 아니라 크기를 비교하는 것이다.
+          실제로 "CODE128 56% vs CODABAR 100%"를 심볼로지 특성으로 읽을
+          뻔했다.
+
+    고치는 방향은 **모듈을 깎지 말고 캔버스를 넓히는 것**이다. 코드와
+    프레임의 비율이 그대로라 "모듈당 표본 수"라는 축이 혼자 움직인다.
+    센서를 키운 것이 아니라 **같은 라벨을 더 크게 찍은 것**에 해당한다.
+
+    상한(_SWEEP_CANVAS_MAX)에 걸리면 예전처럼 모듈이 깎인다. 그때는
+    태그의 modpx가 실제값을 들고 있으므로 분석에서 걸러낼 수 있다 —
+    조용히 틀리는 것과 다른 점이 그것이다.
+    """
+    try:
+        mod = float(p["module"])
+        span = _sweep_span(p["sym"])
+    except Exception:
+        return w, h
+    if span <= 0 or mod <= 0:
+        return w, h
+    k = max(1, int(p["count"]))
+    cols = int(min(4, max(1, math.ceil(math.sqrt(k * w / h)))))
+    rows = int(max(1, math.ceil(k / cols)))
+    need_box = span * mod                      # 코드가 차지해야 할 폭(px)
+    have_box = sweep_fit_box(p["sym"], w // cols, h // rows)
+    if need_box <= have_box:
+        return w, h
+    grow = need_box / have_box
+    mw, mh = _SWEEP_CANVAS_MAX
+    grow = min(grow, mw / w, mh / h)
+    if grow <= 1.0:
+        return w, h
+    # 짝수로 맞춘다 — 홀수 폭은 일부 경로에서 반올림이 갈린다.
+    return (int(w * grow) // 2) * 2, (int(h * grow) // 2) * 2
+
+
+def _sweep_span(kind):
+    """페이로드가 고정이므로 모듈 수도 고정이다. 캐시해 둔다(인코딩이 비싸다)."""
+    if kind in _SWEEP_SPAN_CACHE:
+        return _SWEEP_SPAN_CACHE[kind]
+    payload = _SWEEP_PAYLOAD.get(kind)
+    if payload is None:
+        _SWEEP_SPAN_CACHE[kind] = 0
+        return 0
+    if kind == "QR":
+        q = qrcode.QRCode(border=0, box_size=1, error_correction=_EC["M"])
+        q.add_data(payload); q.make(fit=True)
+        grid, is2d = np.array(q.get_matrix(), dtype=bool), True
+    else:
+        grid, _, _, is2d = _grid_for(kind, payload)
+    quiet = 2 if is2d else 10
+    gh, gw = grid.shape
+    span = max((gw + 2 * quiet), (gh + 2 * quiet) if is2d else 0)
+    _SWEEP_SPAN_CACHE[kind] = span
+    return span
+
+
+_SWEEP_SPAN_CACHE = {}
+
+
 def sweep_symbol(p, box):
     """스윕용 결정적 심볼 렌더. 페이로드가 고정이라 모듈 수도 고정이고,
     따라서 크기는 module 값에만 비례한다(축 하나만 움직인다는 보장).
@@ -1313,6 +1395,8 @@ def build_sweep(index, combo, cfg):
     p.update(cfg["base"])
     p.update(combo)
     w, h = cfg["width"], cfg["height"]
+    if not cfg.get("fixed_canvas"):
+        w, h = _sweep_canvas_for_module(p, w, h)
     rng = np.random.default_rng([cfg["seed"], 0xC0FFEE, index])
 
     xs = np.arange(w, dtype=np.float32)[None, :] / w
@@ -1534,6 +1618,11 @@ def build_sweep(index, combo, cfg):
 
     tags = [f"{ax}={_fmt_val(v)}" for ax, v in sorted(combo.items())]
     tags.append("sym-" + codes[0]["symbology"])
+    # **실제로 렌더된 모듈 px를 남긴다.** 요청값(`module=`)은 셀에 안 들어가면
+    # 조용히 깎이므로 요청값만 보면 크기를 모른다 — 그래서 심볼로지끼리
+    # 검출률을 나란히 놓을 때 크기 교란을 못 본다(§3.105). 캔버스를 넓혀
+    # 대부분 요청대로 나오지만, 상한에 걸린 경우는 여기에 드러난다.
+    tags.append(f"modpx-{eff_mod:.2f}")
     tags.append("img-" + bucket)
     name = "sw" + "".join(f"_{ax}-{_fmt_val(v)}" for ax, v in sorted(combo.items())) \
            + f"_{len(codes)}"
@@ -1702,6 +1791,10 @@ def main():
     ap.add_argument("--bucket", default="", metavar="ok|borderline|mixed|impossible",
                     help="이 버킷만 내보낸다(쉼표로 여러 개). 스트리밍에서 "
                          "'읽을 수 있어야 하는 것'만 채점할 때 --bucket ok")
+    ap.add_argument("--fixed-canvas", action="store_true",
+                    help="요청 모듈이 안 들어가도 캔버스를 넓히지 않는다(예전 동작). "
+                         "**해상도 자체가 축일 때** 쓴다 — 안 쓰면 생성기가 "
+                         "모듈을 맞추려고 프레임을 키워서 해상도 축이 무너진다.")
     ap.add_argument("--jobs", type=int, default=0, help="0=CPU 수")
     ap.add_argument("--est", action="store_true", help="생성 없이 개수/용량/시간만 추정")
     a = ap.parse_args()
@@ -1773,6 +1866,7 @@ def main():
                              f"80%를 넘습니다 — 중단합니다. --stream 을 쓰세요.")
 
     cfg = {"seed": a.seed, "width": a.width, "height": a.height, "outdir": a.outdir,
+           "fixed_canvas": bool(a.fixed_canvas),
            "difficulty": a.difficulty, "max_codes": a.max_codes, "format": a.format,
            "base": base,
            "buckets": {b.strip() for b in a.bucket.split(",") if b.strip()},

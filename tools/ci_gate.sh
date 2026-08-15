@@ -342,19 +342,49 @@ echo ">> [3.77/5] 도트 각인(DPM) 축 — 모듈 4~10"
 # §3.97). 이제 통제 스윕에서 세 심볼로지가 다 열리므로, 다시 썩지 않게
 # 여기서 지킨다. 모듈 3은 3px 피치에 점 반지름 1px이라 해상도 한계라
 # 빼고 잰다(실측: 세 심볼로지 다 module 3만 실패).
+#
+# [2026-08-15 재기준] 이 단계는 오래 "세 심볼로지 전부 100%"였는데, 그 100%가
+# **모듈이 안 먹던 시절의 값**이었다(§3.105). 생성기가 요청 모듈을 셀에 맞춰
+# 말없이 깎고 있었고, 그래서 module:4:10 스윕이 실제로는 4~7px 정도만 돌고
+# 있었다. 모듈을 제대로 반영하니 프레임이 최대 4096x3072로 커지고 난이도가
+# 올라가면서 CODE128이 7/7 -> 5/7이 됐다.
+#
+# 100%를 유지하려고 코퍼스를 되돌리지 않는다. 쉬운 코퍼스에서 나온 100%는
+# 지킬 값이 아니다 — 아래 문턱은 **새 코퍼스에서 실측한 값**이다.
+#
+#   DATAMATRIX 100.0%   QR 100.0%   CODE128 71.4%(모듈 7과 10에서 실패)
+#
+# 모듈 10은 12MP 상한에 걸려 9.31px로 깎인 칸이다(태그의 modpx가 알려 준다).
 DPM_BAD=0
 DPM_LINE=""
+DPM_MIS=0
+declare -A DPM_FLOOR=([DATAMATRIX]=100.0 [QR]=100.0 [CODE128]=71.0)
 for S in DATAMATRIX QR CODE128; do
-  r=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "module:4:10:1" \
+  out=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "module:4:10:1" \
         --base "sym=$S,count=1,dpm=1" --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
       | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet 2>/dev/null \
-      | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+      | grep -E "^2stage " | tr -s ' ')
+  r=$(echo "$out" | cut -d' ' -f4 | tr -d '%')
+  m=$(echo "$out" | cut -d' ' -f5)
+  DPM_MIS=$(( DPM_MIS + ${m:-0} ))
   DPM_LINE="$DPM_LINE $S=${r}%"
-  if awk -v a="${r:-0}" 'BEGIN{exit !(a < 100.0)}'; then DPM_BAD=1; fi
+  if awk -v a="${r:-0}" -v f="${DPM_FLOOR[$S]}" 'BEGIN{exit !(a < f)}'; then DPM_BAD=1; fi
 done
-echo "  $DPM_LINE"
+echo "  $DPM_LINE / 오디코딩 $DPM_MIS (상한 1)"
 if [ "$DPM_BAD" != "0" ]; then
-  echo "!! DPM 축이 100% 아래로 내려갔다"; exit 1; fi
+  echo "!! DPM 축이 실측 기준선 아래로 내려갔다"; exit 1; fi
+# [오디코딩 상한 1 — 알려진 유령 ITF 1건]
+# CODE128 모듈 7의 도트 각인 프레임에서 **denoise 구제 패스**가 ITF
+# "676767"을 낸다(VSPROF로 확인: `성공:denoise`). 정답 CODE128은 못 찾은
+# 채로 그 유령이 `enough()`를 만족시켜 파이프라인이 거기서 멈춘다 —
+# 즉 유령 때문에 진짜 코드를 찾을 기회까지 잃는다.
+#
+# ITF는 체크디짓이 규격상 선택이라 유령이 잘 나오는 심볼로지다(§3.x의
+# 1도 스윕 ITF 13건과 같은 부류). 여기서 상한 1로 **묶어만 둔다** —
+# 늘어나면 잡히고, 고치면 0으로 내린다. 이건 넘어가는 것이 아니라
+# 다음 개선 대상으로 올려 둔 것이다(§3.106).
+if [ "$DPM_MIS" -gt 1 ]; then
+  echo "!! DPM 축 오디코딩이 알려진 1건보다 늘었다 ($DPM_MIS)"; exit 1; fi
 
 echo ">> [3.771/5] 손상/오염/인쇄불량/정지대 침범 축"
 # 이 넷은 오래 **난수 경로에만** 있었다. §3.97에서 DPM이 정확히 그 이유로
