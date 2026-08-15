@@ -44,3 +44,6 @@ third_party/zbar/config.h
 third_party/zbar/configure~
 third_party/zbar/test/check_dbus.sh
 third_party/zbar/test/test_examples.sh
+
+# 풀테스트 중간 산출물 (tools/fulltest_100k.sh). 결과는 요약만 노트에 적는다.
+fulltest-out/
