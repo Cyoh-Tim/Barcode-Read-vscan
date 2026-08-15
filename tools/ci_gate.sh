@@ -257,6 +257,26 @@ if [ "${FNR_BAD:-9}" != "0" ]; then
   exit 1
 fi
 
+echo ">> [3.74/5] 실물 FOV 차트 (이 저장소의 유일한 실사 프레임)"
+# examples/sample_images/fov_chart_3p1mp.pgm — Autonics 3.1MP FOV 차트.
+# QR 26개가 전부 같은 내용("VC QR Test")이고 모듈이 0.8~3.2px로 흩어져 있다.
+# §3.20에서 **0개**로 기록됐다가 §3.103에서 7개가 됐다. 합성 코퍼스가
+# 두 번이나 우리를 속인 적이 있으므로(§3.101/§3.102) 실사 한 장은 값이 크다.
+#
+# 하한 5는 실측 7에 §8의 벽시계 흔들림 여유를 뺀 값이다. 정답 문자열이
+# 하나뿐이라 **오디코딩 판정이 쉽다** — 다른 문자열이 나오면 전부 유령이다.
+CHART="$ROOT/examples/sample_images/fov_chart_3p1mp.pgm"
+if [ -f "$CHART" ]; then
+  g++ -O2 -std=c++17 -I"$ROOT/include" "$ROOT/tools/chart_probe.cpp" \
+      -L"$BUILD_DIR" -lvscan -o "$WORK/chart_probe" 2>/dev/null
+  CH_N=$("$WORK/chart_probe" "$CHART" 2>/dev/null | head -1)
+  echo "   차트에서 읽은 코드: ${CH_N:-?}개 (하한 5, 전부 'VC QR Test'여야 한다)"
+  if [ -z "${CH_N:-}" ] || [ "${CH_N:-0}" -lt 5 ]; then
+    echo "!! 실물 차트 검출이 5개 아래로 내려갔다"; exit 1; fi
+else
+  echo "   (차트 파일이 없다 — 건너뛴다)"
+fi
+
 echo ">> [3.75/5] 빈 프레임 유령 확인"
 EMPTY_DIR="$WORK/empty"
 python3 "$ROOT/tools/generate_empty.py" "$EMPTY_DIR" >/dev/null 2>&1

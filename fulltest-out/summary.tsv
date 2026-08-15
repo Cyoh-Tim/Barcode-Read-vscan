@@ -1,0 +1,6 @@
+grid	sym	module	frames	codes_found	codes_total	rate	misdec	dup	mean_ms	p95_ms
+A_contrast_bright	CODABAR	4	320	313	320	97.8	0	0	23.58	125.97
+C_noise_blur	CODABAR	4	221	221	221	100.0	0	0	11.75	23.49
+E_glare_shadow	CODABAR	4	357	341	357	95.5	0	0	143.92	471.55
+F_dirty_damaged	CODABAR	4	441	441	441	100.0	0	0	7.11	36.29
+G_zone_print	CODABAR	4	100	100	100	100.0	0	0	48.85	114.59
