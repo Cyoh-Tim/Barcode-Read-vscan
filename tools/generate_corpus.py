@@ -703,6 +703,46 @@ def classify_code(mod_px, cphys, fphys):
     motion = float(fphys.get("motion", 0.0))
     glare = float(fphys.get("glare", 0.0))
 
+    # [손상/오염 — 오류정정 용량과 견준다]
+    #
+    # 이 축은 오래 버킷이 **아예 안 봤다**. 90%가 지워진 QR도 img-ok였고,
+    # 그래서 `--bucket ok`가 이 축에서는 "읽혀야 정상"을 보증하지 않았다
+    # (생성기 주석 [[vscan-lite-sweep-damage-uncalibrated]]에 그렇게
+    # 적혀 있었는데, 보고서를 쓰면서 그 경고를 어기고 F격자 절대값을
+    # 성능처럼 실었다 — QR 14.7%가 그것이다).
+    #
+    # 파괴 비율은 모델링하지 않고 **생성기가 그리기 전후를 빼서 잰 값**을
+    # 받는다(cphys["dmg_frac"]). 남은 것은 용량과 견주는 일뿐이다.
+    #
+    # 용량 근거(규격): QR은 L 7% / M 15% / Q 25% / H 30%,
+    # DataMatrix ECC200은 크기에 따라 25~30%라 0.28로 둔다.
+    # PDF417은 보안수준에 따라 다르고 생성기가 기본값을 쓰므로 0.18로 둔다.
+    #
+    # 실측이 이 값을 뒷받침한다 — 같은 손상 프레임에서 QR의 오류정정만
+    # 바꾸면 EC L 4/11, EC H 6/11이고, 오염 축은 L 4/11 -> H 10/11이다.
+    # 라벨이 EC를 모르면 이 차이가 통째로 "검출 실패"로 잡힌다.
+    dmg_frac = float(cphys.get("dmg_frac", 0.0))
+    if dmg_frac > 0:
+        if bool(cphys.get("ecc2d", False)):
+            cap = {"L": 0.07, "M": 0.15, "Q": 0.25, "H": 0.30}.get(
+                str(cphys.get("ec", "M")), 0.15)
+            if str(cphys.get("sym", "")) == "DATA_MATRIX":
+                cap = 0.28
+            elif str(cphys.get("sym", "")) == "PDF417":
+                cap = 0.18
+            if dmg_frac > cap:
+                mark(2, "x-damage")
+            elif dmg_frac > 0.7 * cap:
+                mark(1, "b-damage")
+        else:
+            # 1D는 오류정정이 없는 대신 세로 여유가 있다 — 스캔 라인 한 줄만
+            # 성하면 읽힌다. 그래서 면적이 아니라 **깨끗한 행의 비율**로 본다.
+            clean = float(cphys.get("clean_rows", 1.0))
+            if clean < 0.02:
+                mark(2, "x-damage")
+            elif clean < 0.15:
+                mark(1, "b-damage")
+
     # 1) 모듈 크기 — 샘플링 한계. 모듈당 1픽셀 미만이면 정보가 사라진다.
     #    2D 코드는 실무적으로 모듈당 2px는 있어야 안정적으로 읽힌다.
     if m < 1.3:
@@ -1161,6 +1201,10 @@ def build_one(index, cfg):
     for c in codes:
         c["phys"]["rot"] = float(c.get("rot", 0.0))
         c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
+        # 손상 판정은 **오류정정이 있느냐**로 갈리므로 PDF417도 2D 쪽이다
+        # (is2d는 다른 물리 판정에 쓰이는 값이라 그대로 둔다).
+        c["phys"]["sym"] = c["symbology"]
+        c["phys"]["ecc2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX", "PDF417")
         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
         c["bucket"] = b
         c["tags"] = c["tags"] + ["dec-" + b] + reasons
@@ -1422,6 +1466,7 @@ def build_sweep(index, combo, cfg):
         cell = (c * cw, r * ch, cw, ch)
         box = sweep_fit_box(p["sym"], cw, ch)
         sym, symname, text, eff_mod = sweep_symbol(p, box)
+        dmg = {"frac": 0.0, "clean_rows": 1.0}
         s = np.array(sym).astype(np.float32)
         if p["contrast"] != 1.0:
             s = 128 + (s - 128) * float(p["contrast"])
@@ -1476,6 +1521,21 @@ def build_sweep(index, combo, cfg):
             if symname in ("QR_CODE", "DATA_MATRIX", "PDF417") and v >= 0.6:
                 cut = int(min(ww, hh) * float(np.interp(v, [0.6, 1], [0.05, 0.20])))
                 d2.polygon([(ww, hh), (ww - cut, hh), (ww, hh - cut)], fill=200)
+            # [파괴량을 모델링하지 말고 **잰다**]
+            # 예전에는 이 축을 버킷이 아예 안 봤다 — 90%가 지워진 QR도
+            # img-ok였다. 세기 v에서 파괴 비율을 역산하려면 선 개수·굵기·
+            # 모서리 결손을 다시 모델링해야 하는데, 그럴 필요가 없다.
+            # **그리기 전후를 빼면 정확한 값이 나온다.**
+            before = np.array(sym, dtype=np.int16)
+            after = np.array(im2, dtype=np.int16)
+            code_px = before < 128                     # 원래 검정이던 모듈
+            killed = code_px & (np.abs(after - before) > 64)
+            dmg["frac"] = float(killed.sum()) / max(1, int(code_px.sum()))
+            # 1D는 오류정정이 없는 대신 **세로 여유**가 있다. 스캔 라인 한
+            # 줄만 성하면 읽힌다. 그래서 "깨끗한 행이 하나라도 있는가"가
+            # 판정이고, 2D의 면적 비율과는 다른 물리다.
+            rows_dirty = (np.abs(after - before) > 64).any(axis=1)
+            dmg["clean_rows"] = float((~rows_dirty).sum()) / max(1, rows_dirty.size)
             sym = im2
         if float(p["dpm"]) >= 0.5:
             # 반전보다 **먼저** 찍는다 — 실제 공정도 각인한 뒤에 촬영 극성이
@@ -1509,7 +1569,10 @@ def build_sweep(index, combo, cfg):
         codes.append({"symbology": symname, "text": text, "x": max(0, px), "y": max(0, py),
                       "w": sym.width, "h": sym.height, "rot": float(p["angle"]),
                       "tags": [], "module_px": round(eff_mod, 2),
-                      "phys": {"contrast": float(p["contrast"])}})
+                      "phys": {"contrast": float(p["contrast"]),
+                               "ec": str(p.get("ec", "M")),
+                               "dmg_frac": round(dmg["frac"], 4),
+                               "clean_rows": round(dmg["clean_rows"], 4)}})
 
     if float(p["quietzone"]) > 0 or float(p["dirty"]) > 0:
         # 프레임 단계 열화 둘. 난수 경로(_degrade_frame)와 같은 모양인데,
@@ -1611,6 +1674,8 @@ def build_sweep(index, combo, cfg):
     for c in codes:
         c["phys"]["rot"] = float(c.get("rot", 0.0))
         c["phys"]["is2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX")
+        c["phys"]["sym"] = c["symbology"]
+        c["phys"]["ecc2d"] = c["symbology"] in ("QR_CODE", "DATA_MATRIX", "PDF417")
         b, reasons = classify_code(c["module_px"], c["phys"], fphys)
         c["bucket"] = b
         c["tags"] = c["tags"] + ["dec-" + b] + reasons
