@@ -1295,13 +1295,24 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
         auto degenerate = [&](const CodeRegion& r) {
             return (double)(r.bbox.x1 - r.bbox.x0) * (r.bbox.y1 - r.bbox.y0) > 0.55 * frameArea;
         };
-        if (std::any_of(regions.begin(), regions.end(), degenerate)) {
-            auto tight = findCodeRegions(locateView, maxRegions, 32, 4, 0.65f);
+        // [비용 묶기] escalation은 **되살리기**지 넓히기가 아니다. 상한 없이
+        // 붙이면 프레임 하나가 최대 16개 크롭으로 늘어 p95가 그대로 실린다
+        // (게이트 실측: 기준 대비 p95 139 -> 190으로 회귀해서 떨어졌다).
+        static const int escMax = [] {
+            const char* e = getenv("VSCAN_LOC_ESC_MAX"); return e ? atoi(e) : 4;
+        }();
+        static const bool escSolo = getenv("VSCAN_LOC_ESC_ANY") == nullptr;
+        const bool trigger = escSolo
+            ? (regions.size() == 1 && degenerate(regions[0]))
+            : std::any_of(regions.begin(), regions.end(), degenerate);
+        if (trigger && !budgetExceeded()) {
+            const int want = std::min(maxRegions, escMax);
+            auto tight = findCodeRegions(locateView, want, 32, 4, 0.65f);
             if (!tight.empty() && !std::any_of(tight.begin(), tight.end(), degenerate)) {
                 regions.erase(std::remove_if(regions.begin(), regions.end(), degenerate),
                               regions.end());
                 for (auto& t : tight) {
-                    if ((int)regions.size() >= maxRegions) break;
+                    if ((int)regions.size() >= want) break;
                     regions.push_back(t);
                 }
             }
