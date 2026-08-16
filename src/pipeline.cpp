@@ -1310,7 +1310,21 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
             : std::any_of(regions.begin(), regions.end(), degenerate);
         if (trigger && !budgetExceeded()) {
             const int want = std::min(maxRegions, escMax);
-            auto tight = findCodeRegions(locateView, want, 32, 4, 0.65f);
+            // [타일 16 / 축소 2로 찾는다] 임계만 올리면 상자가 타일 격자만큼
+            // 헐렁하다(32px 타일 x 4배 축소 = 128px 단위). 60x60 코드가
+            // 256x256 상자로 나오면 **그 크롭이 다시 실패한다** — 실측에서
+            // 같은 코드가 192x192 크롭에서는 읽히고 256x256에서는 안 읽혔다.
+            // 노이즈 프레임에서는 코드 밖 면적이 곧 오검출 기회다.
+            //
+            // 실측(모듈 3px, 정답 60x60 / 525x39):
+            //   타일32 축소4   DataMatrix 256x256   PDF417 512x256
+            //   타일16 축소2   DataMatrix  64x64    PDF417 512x64   <- 이것
+            //   타일 8 축소2   PDF417이 3조각으로 갈린다(과분할)
+            //
+            // 노이즈 45에서는 타일32/축소4가 아예 프레임 전체를 주는데
+            // 타일16/축소2는 64x64를 준다. 축소를 2로 낮춘 값(로케이트
+            // 픽셀 4배)은 이 단이 **되살리기 전용**이라 감당한다.
+            auto tight = findCodeRegions(locateView, want, 16, 2, 0.65f);
             if (!tight.empty() && !std::any_of(tight.begin(), tight.end(), degenerate)) {
                 regions.erase(std::remove_if(regions.begin(), regions.end(), degenerate),
                               regions.end());
