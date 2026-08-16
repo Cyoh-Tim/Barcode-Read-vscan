@@ -337,6 +337,31 @@ if [ "$STK_FP" != "$STK_EXPECT" ]; then
   exit 1
 fi
 
+echo ">> [3.781/5] 로케이터 되살리기 옵션 (기본 꺼짐이 맞는지 + 켜면 실제로 버는지)"
+# enable_locate_escalation은 **기본 꺼짐**이다. 켜면 표적 축에서 크게 버는데
+# 꼬리 지연이 회귀 게이트를 넘겨서 그렇게 정했다(vscan.h 주석에 표가 있다).
+#
+# 여기서 두 방향을 같이 지킨다. 한쪽만 재면 나머지가 조용히 무너진다:
+#   - 켰을 때 실제로 버는가 (구제가 죽으면 잡힌다)
+#   - 껐을 때 예전 그대로인가 (기본값이 슬그머니 바뀌면 잡힌다)
+ESC_LINE=""
+ESC_BAD=0
+for ST in "0|끔" "1|켬"; do
+  V=${ST%%|*}; N=${ST##*|}
+  r=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "noise:0:45:5" \
+        --base "sym=PDF417,module=3,count=1" --stream --jobs "$(nproc)" 2>/dev/null \
+      | VSCAN_LOC_ESCALATE="$V" "$VERIFY" --stdin --paths 2stage --reps 1 --quiet 2>/dev/null \
+      | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f3 | cut -d/ -f1)
+  ESC_LINE="$ESC_LINE $N=${r}/10"
+  if [ "$V" = "0" ] && [ "${r:-0}" -gt 6 ]; then ESC_BAD=1; fi   # 기본이 이미 좋아졌다면 표를 다시 써야 한다
+  if [ "$V" = "1" ] && [ "${r:-0}" -lt 8 ]; then ESC_BAD=2; fi   # 켜도 안 벌면 구제가 죽은 것이다
+done
+echo "   PDF417 모듈3 노이즈 스윕:$ESC_LINE  (기준: 끔 <=6, 켬 >=8)"
+if [ "$ESC_BAD" = "2" ]; then
+  echo "!! 로케이터 되살리기를 켜도 안 번다 — 구제가 죽었다"; exit 1; fi
+if [ "$ESC_BAD" = "1" ]; then
+  echo "!! 껐는데도 좋아졌다 — 기본 동작이 바뀌었으니 vscan.h의 표를 다시 잴 것"; exit 1; fi
+
 echo ">> [3.77/5] 도트 각인(DPM) 축 — 모듈 4~10"
 # DPM은 오래 "안 되는 축"이었는데 원인이 세 번 다 **생성기**였다(§3.83,
 # §3.97). 이제 통제 스윕에서 세 심볼로지가 다 열리므로, 다시 썩지 않게

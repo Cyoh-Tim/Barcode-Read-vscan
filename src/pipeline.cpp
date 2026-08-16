@@ -1289,8 +1289,11 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
      * 노이즈 0인 프레임은 어느 임계에서도 256x256이라 대가가 없다.
      * [[vscan-lite-locate-degenerate-escalate]]
      */
-    static const bool escOff = getenv("VSCAN_NO_LOC_ESCALATE") != nullptr;
-    if (!regions.empty() && !escOff) {
+    // 실측으로 기본값을 꺼짐으로 정했다 — pipeline.hpp의 enableLocateEscalation
+    // 주석에 표와 근거가 있다. 환경변수는 그 위에서 강제로 켜고 끄는 용도다.
+    static const char* escEnv = getenv("VSCAN_LOC_ESCALATE");
+    const bool escOn = escEnv ? (escEnv[0] != '0') : cfg_.enableLocateEscalation;
+    if (!regions.empty() && escOn) {
         const double frameArea = (double)locateView.width * locateView.height;
         auto degenerate = [&](const CodeRegion& r) {
             return (double)(r.bbox.x1 - r.bbox.x0) * (r.bbox.y1 - r.bbox.y0) > 0.55 * frameArea;
