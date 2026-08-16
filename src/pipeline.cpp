@@ -2010,6 +2010,9 @@ std::vector<PipelineResult> Pipeline::tryRegionRescueOn(const GrayView& locateVi
                     // 0.6 이하 1.40~2.33. 1.25로 가른다.
                     // 0을 돌려주면 못 잰 것이므로 거르지 않는다.
                     const float pv = pitchVariation(GrayView(crop));
+                    // 문턱 1.25를 의심해서 1.10/1.00으로 낮춰 재봤다 — PDF417
+                    // 원근x곡면 격자가 26/42로 **셋 다 같았다**. 이 단계는
+                    // 그 구간의 지렛대가 아니다(§3.109).
                     const bool curved = !(pv > 0.0f && pv < 1.25f);
                     struct PitchTry { int rows, win, pct; bool rowbin; };
                     static constexpr PitchTry kTries[] = {
