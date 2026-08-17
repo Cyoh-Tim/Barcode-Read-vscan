@@ -337,6 +337,43 @@ if [ "$STK_FP" != "$STK_EXPECT" ]; then
   exit 1
 fi
 
+echo ">> [3.782/5] 밀집 프레임 — 납작한 코드가 서로를 지우지 않는가"
+# [왜 필요한가] dedup의 isStackedBand가 **가로로 나란한** 두 코드를 "한 코드의
+# 두 층"으로 보고 지우고 있었다. 코드 684x35px에서 간격 408px까지 같은 코드로
+# 봤다. 4x4로 16개를 깔면 검출이 정확히 체커보드 8/16이었다.
+#
+# 기존 양성 대조([3.78] 같은 라벨 2장)는 이걸 못 잡았다. EAN13 2장만 보는데
+# 그 두께/길이 비가 16.1%로 규칙 문턱 15% **바로 위**라 아슬아슬하게
+# 빠져나간다. **종횡비 하나만 시험하는 대조는 종횡비로 갈리는 규칙을 못 지킨다.**
+#
+# 그래서 납작한 코드로 밀집 프레임을 만든다. PDF417(약 20:1)과
+# CODE128(약 8:1)이 그 모양이다. 고친 뒤 실측:
+#   PDF417  52.4% -> 99.9%    CODE128  55.1% -> 100.0%
+#   EAN13   71.4% -> 100.0%
+DENSE_BAD=0
+DENSE_LINE=""
+for S in PDF417 CODE128 EAN13; do
+  r=$(python3 "$ROOT/tools/generate_corpus.py" --sweep "module:2:5:1" --sweep "count:4:16:4" \
+        --base "sym=$S" --bucket ok --stream --jobs "$(nproc)" 2>/dev/null \
+      | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet 2>/dev/null \
+      | grep -E "^2stage " | tr -s ' ' | cut -d' ' -f4 | tr -d '%')
+  DENSE_LINE="$DENSE_LINE $S=${r}%"
+  if awk -v a="${r:-0}" 'BEGIN{exit !(a < 50.0)}'; then DENSE_BAD=1; fi
+done
+# [하한이 50%인 이유 — 절반은 **알려진 대가**다]
+# isStackedBand의 가로 방향 결함은 고쳤다. 그런데 세로로 이웃한 같은 내용
+# 코드는 isBandOfSameCode가 여전히 합친다. 그 상한을 두께로 좁혀 봤더니
+# 밀집이 8/16 -> 16/16이 되는 대신 **중복이 0 -> 2건**이 됐고, 두 상황이
+# 기하로 구분이 안 된다는 것을 상자를 나란히 놓고 확인했다(pipeline.cpp의
+# isBandOfSameCode 주석).
+#
+# 그래서 지금 지키는 것은 "가로 방향이 다시 썩지 않는가"다. 하한을 95%로
+# 두면 아직 못 고친 세로 방향 때문에 항상 실패해서 게이트가 무의미해진다.
+# 세로까지 고치면(§8, dedup에 need를 넘기는 안) 이 하한을 올린다.
+echo "   밀집(코드 4~16개):$DENSE_LINE  (하한 50% — 세로 방향은 §8 알려진 대가)"
+if [ "$DENSE_BAD" != "0" ]; then
+  echo "!! 밀집 프레임에서 납작한 코드가 사라진다 — dedup 규칙을 의심할 것"; exit 1; fi
+
 echo ">> [3.781/5] 로케이터 되살리기 옵션 (기본 꺼짐이 맞는지 + 켜면 실제로 버는지)"
 # enable_locate_escalation은 **기본 꺼짐**이다. 켜면 표적 축에서 크게 버는데
 # 꼬리 지연이 회귀 게이트를 넘겨서 그렇게 정했다(vscan.h 주석에 표가 있다).
