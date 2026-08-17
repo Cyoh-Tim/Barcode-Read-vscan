@@ -3113,7 +3113,28 @@ bool isBandOfSameCode(const BBox& a, const BBox& b) {
         const double ov = std::min(aHi, bHi) - std::max(aLo, bLo);
         if (ov < 0.90 * std::min(la, lb)) return false;              // 긴 축이 안 맞는다
         const double gap = std::max(cLo, dLo) - std::min(cHi, dHi);
-        return gap <= std::min(la, lb);      // 한 코드 안의 두 밴드는 코드 길이보다 멀 수 없다
+        /*
+         * [간격은 **두께**와 견줘야 한다 — 길이와 견주면 남의 코드를 먹는다]
+         *
+         * 예전에는 `gap <= min(la, lb)`, 즉 **코드 길이**와 비교했다. 납작한
+         * 코드에서 그 상한이 터무니없이 커진다 — PDF417 700x52px이면 세로로
+         * 700px 떨어진 것까지 "같은 코드의 두 밴드"로 본다. 자기 두께의
+         * 13배다.
+         *
+         * 실측으로 잡혔다. 4x4로 PDF417 16개를 깔면(같은 텍스트, 셀 간격
+         * 711px) 검출이 **정확히 체커보드 8/16**이 나온다. 물리 현상이
+         * 이런 모양일 수 없다 — 세로로 이웃한 코드끼리 서로를 지운 것이다.
+         * QR은 같은 조건에서 16/16이다(정사각이라 두께 조건에 안 걸린다).
+         *
+         * 한 코드 안의 두 밴드는 **그 코드의 두께 안**에 있다. 그래서 두께로
+         * 견준다. 두꺼운 쪽(온전한 코드)의 두께를 상한으로 쓰면
+         * 밴드/온전한코드 짝(twin-band)은 그대로 잡히고, 남의 코드는
+         * 안 먹는다.
+         *
+         * 대가: 두 밴드가 **둘 다** 얇으면 상한이 작아져서 못 지우는 경우가
+         * 생긴다. 그건 중복(dup)으로 나오고, 진짜 코드를 잃는 것보다 낫다.
+         */
+        return gap <= std::max(ta, tb);
     };
     return band(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
            band(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
@@ -3168,6 +3189,26 @@ bool isStackedBand(const BBox& a, const BBox& b) {
         const double ov = std::min(cHi, dHi) - std::max(cLo, dLo);
         const double minAlign = std::min(cHi - cLo, dHi - dLo);
         if (minAlign <= 0) return false;
+        /*
+         * [층은 **두께 방향**으로만 진다]
+         *
+         * 이 함수는 축 순서를 바꿔 두 번 불린다. 그런데 층이 지는 축이 코드의
+         * **길이** 방향이면 판정이 무너진다 — `combined`가 두 코드의 길이를
+         * 합친 값이 되어 허용 간격이 터무니없이 커진다.
+         *
+         * 실측으로 잡혔다. PDF417 16개를 4x4로 깔면(같은 텍스트, 코드
+         * 684x35px, 가로 간격 264px) 검출이 **정확히 체커보드 8/16**이 된다.
+         * 가로로 나란한 두 코드가 이 규칙에 걸린 것이다:
+         *   간격 264 / 결합 1632 = 16.2%  -> 25% 분기 통과
+         *   세로 정렬 100%                 -> 90% 조건 통과
+         * QR은 정사각이라 안 걸려서 같은 조건에서 16/16이었다. 그 대비가
+         * "PDF417이 밀집에 약하다"로 읽히고 있었다.
+         *
+         * 한 코드 안의 두 스캔 밴드는 코드의 **두께 방향**으로 나뉜다. 길이
+         * 방향으로 나란히 놓인 것은 층이 아니라 **다른 코드**다. 그래서 층이
+         * 지는 축의 크기가 정렬 축보다 크면 거절한다.
+         */
+        if ((aHi - aLo) > (cHi - cLo) || (bHi - bLo) > (dHi - dLo)) return false;
         // 간격이 아주 작으면(결합 길이의 10% 미만) 정렬 조건을 느슨하게,
         // 간격이 그보다 벌어지면 정렬을 더 엄격히 요구한다.
         //
@@ -3345,6 +3386,24 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                 (sameText && isThinSlice(candBox, keptBox)) ||
                 (sameText && isTwinBand(candBox, keptBox)) ||
                 (sameText && isBandOfSameCode(candBox, keptBox))) {
+                // [어느 규칙이 지웠는지 찍는다] VSCAN_DEDUP_DEBUG=1.
+                // 규칙이 여섯 개라 "왜 사라졌나"를 눈으로 못 쫓는다. 밀집
+                // 프레임의 체커보드 결함을 이 한 줄로 한 번에 특정했다 —
+                // 중복 분기 안이라 평소 비용이 0이다.
+                if (getenv("VSCAN_DEDUP_DEBUG"))
+                    fprintf(stderr, "[dedup] (%.0f,%.0f)-(%.0f,%.0f) vs (%.0f,%.0f)-(%.0f,%.0f)"
+                            " near=%d contain=%d approx=%d degen=%d part=%d"
+                            " stacked=%d thin=%d twin=%d band=%d\n",
+                            candBox.x0, candBox.y0, candBox.x1, candBox.y1,
+                            keptBox.x0, keptBox.y0, keptBox.x1, keptBox.y1,
+                            (int)near, (int)(containRatio(candBox, keptBox) >= kOverlapDup),
+                            (int)approxPair,
+                            (int)(hasDegenerateQuad(cand.symbol) || hasDegenerateQuad(kept.symbol)),
+                            (int)(partial && onSameBarcodeBand(candBox, keptBox)),
+                            (int)(sameText && isStackedBand(candBox, keptBox)),
+                            (int)(sameText && isThinSlice(candBox, keptBox)),
+                            (int)(sameText && isTwinBand(candBox, keptBox)),
+                            (int)(sameText && isBandOfSameCode(candBox, keptBox)));
                 isDup = true;
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
