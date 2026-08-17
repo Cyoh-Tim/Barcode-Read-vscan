@@ -196,22 +196,34 @@ done
 # 격자는 코드 1개짜리다. 현장은 여러 개가 섞이고 열화가 겹친다(§3.100).
 if [ "$RANDOM_N" -gt 0 ]; then
   echo "  -- 난수 혼합 ${RANDOM_N}장 --"
+  # [재개는 원자적으로] 이 자리는 오래 `[ -s "$csv" ]`로 판정했다. §3.104에서
+  # 격자 쪽은 고쳤는데 **이 분기만 남아 있었다.** 컨테이너가 두 번 죽은 뒤
+  # 이어 돌렸더니 H_random_s11이 2,171줄로 잘린 채 "완성"으로 건너뛰어졌다
+  # (5,453줄이 정상이다). 같은 결함이 같은 파일 안에 두 벌 있으면 한 벌만
+  # 고치고 끝내기 쉽다 — 그래서 여기도 rows/ 조각 + rename으로 맞춘다.
   for SEED in 101 11 7 23 41; do
     N=$((RANDOM_N / 5))
     csv="$OUT/H_random_s${SEED}.csv"
-    [ -s "$csv" ] && continue
+    part="$OUT/.H_random_s${SEED}.part"
+    row="$ROWS/H_random_s${SEED}.row"
+    [ -f "$csv" ] && [ -f "$row" ] && continue
+    rm -f "$part"
     line="$(python3 "$ROOT/tools/generate_corpus.py" -n "$N" --difficulty mixed --bucket ok \
               --seed "$SEED" --stream --jobs "$JOBS" 2>/dev/null \
             | "$VERIFY" --stdin --paths 2stage --reps 1 --quiet --no-min-expected \
-              --csv "$csv" 2>/dev/null | grep -E '^2stage ' | tr -s ' ')"
-    [ -z "$line" ] && continue
-    printf 'H_random\tMIXED\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$(( $(wc -l < "$csv") - 1 ))" \
+              --csv "$part" 2>/dev/null | grep -E '^2stage ' | tr -s ' ')"
+    [ -z "$line" ] && { rm -f "$part"; continue; }
+    printf 'H_random_s%s\tMIXED\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$SEED" \
+      "$(( $(wc -l < "$part") - 1 ))" \
       "$(echo "$line" | cut -d' ' -f3 | cut -d/ -f1)" \
       "$(echo "$line" | cut -d' ' -f3 | cut -d/ -f2)" \
       "$(echo "$line" | cut -d' ' -f4 | tr -d '%')" \
       "$(echo "$line" | cut -d' ' -f5)" "$(echo "$line" | cut -d' ' -f6)" \
-      "$(echo "$line" | cut -d' ' -f7)" "$(echo "$line" | cut -d' ' -f9)" >> "$SUMMARY"
+      "$(echo "$line" | cut -d' ' -f7)" "$(echo "$line" | cut -d' ' -f9)" \
+      > "$row.tmp" && mv -f "$row.tmp" "$row"
+    mv -f "$part" "$csv"          # **확정은 맨 마지막이다**
+    rebuild_summary
     printf '  %-26s seed %-5s %s\n' "H_random" "$SEED" "$(echo "$line" | cut -d' ' -f3,4,5)"
   done
 fi
