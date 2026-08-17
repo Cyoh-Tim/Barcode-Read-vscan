@@ -51,7 +51,11 @@ def load(outdir):
                     r["found"] = int(r["found"]); r["expected"] = int(r["expected"])
                     r["text_ok"] = int(r["text_ok"]); r["misdecode"] = int(r["misdecode"])
                     r["ms"] = float(r["ms"])
-                except (ValueError, KeyError):
+                except (ValueError, KeyError, TypeError):
+                    # TypeError는 **줄이 잘려서** 열이 비었을 때 난다(csv가
+                    # None을 준다). 컨테이너가 죽은 뒤 이어 돌린 결과를 읽다
+                    # 실제로 걸렸다. 그 줄만 버리고 계속 간다 — 보고서가
+                    # 한 줄 때문에 통째로 안 나오는 것이 더 나쁘다.
                     continue
                 ax, flags = {}, []
                 for t in (r.get("tags") or "").split(";"):

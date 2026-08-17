@@ -1612,7 +1612,12 @@ def build_sweep(index, combo, cfg):
                         "LOT 42315 / GTIN 008123456", font=_FNT, fill=15)
             if float(p["dirty"]) > 0:
                 # 얼룩 크기도 모듈 단위다(위 damaged 주석과 같은 이유).
-                # 이 축도 버킷이 모델링하지 않는다 — A/B 비교용이다.
+                # [파괴량은 손상 축과 같은 방식으로 **잰다**] 얼룩을 뿌리기
+                # 전에 코드 영역을 떠 두고, 뿌린 뒤 빼서 몇 %가 덮였는지
+                # 센다. 세기 v에서 역산하려면 개수·반지름·배치를 다시
+                # 모델링해야 하는데 그럴 필요가 없다.
+                _pre = np.array(img.crop((max(0, bx), max(0, by),
+                                          bx + bw, by + bh)), dtype=np.int16)
                 v = float(p["dirty"])
                 mod = float(c.get("module_px", 8.0)) or 8.0
                 n = int(np.interp(v, [0, 1], [20, 160]))
@@ -1643,6 +1648,21 @@ def build_sweep(index, combo, cfg):
                         y2 = by - bh * 0.15 + bh * 1.30 * fy
                     r2 = 1 + (k % max(1, rmax))
                     d3.ellipse([x2, y2, x2 + r2, y2 + r2], fill=50 + (k * 37) % 165)
+                _post = np.array(img.crop((max(0, bx), max(0, by),
+                                           bx + bw, by + bh)), dtype=np.int16)
+                if _pre.shape == _post.shape and _pre.size:
+                    _codepx = _pre < 128                     # 원래 검정이던 모듈
+                    _hit = _codepx & (np.abs(_post - _pre) > 64)
+                    _frac = float(_hit.sum()) / max(1, int(_codepx.sum()))
+                    # 손상과 오염은 **같은 예산(오류정정)을 갉아먹는다.**
+                    # 한 프레임에 둘이 같이 걸리면 합쳐서 봐야 한다 —
+                    # F격자가 정확히 그 곱이다(dirty x damaged).
+                    c["phys"]["dmg_frac"] = round(
+                        min(1.0, float(c["phys"].get("dmg_frac", 0.0)) + _frac), 4)
+                    _rows_hit = (np.abs(_post - _pre) > 64).any(axis=1)
+                    _clean = float((~_rows_hit).sum()) / max(1, _rows_hit.size)
+                    c["phys"]["clean_rows"] = round(
+                        min(float(c["phys"].get("clean_rows", 1.0)), _clean), 4)
     if p["blur"]:
         img = img.filter(ImageFilter.GaussianBlur(float(p["blur"])))
     arr = np.array(img).astype(np.float32)
