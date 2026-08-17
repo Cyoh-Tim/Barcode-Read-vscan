@@ -724,6 +724,31 @@ def classify_code(mod_px, cphys, fphys):
     dmg_frac = float(cphys.get("dmg_frac", 0.0))
     if dmg_frac > 0:
         if bool(cphys.get("ecc2d", False)):
+            # [규격 용량을 ok 문턱으로 쓰면 안 된다 — 실측으로 확인]
+            #
+            # 처음에는 규격 오류정정 용량을 그대로 문턱으로 썼다. 재보니
+            # 전부 그보다 훨씬 먼저 끊긴다(모듈 6px, 긁힘 축):
+            #
+            #   심볼로지      마지막으로 읽힌 파괴율   규격 용량
+            #   DataMatrix          5.8%               28%
+            #   QR                  7.1%               15%
+            #   PDF417              8.9%               18%
+            #
+            # 이유는 이 축의 긁힘이 **코드 전체를 가로지르는 대각선**이라
+            # 데이터가 아니라 구조 패턴(타이밍·정렬·파인더)을 부수기
+            # 때문이다. 오류정정은 데이터 오류를 살리는 것이고 구조가
+            # 깨지면 애초에 격자를 못 세운다. 즉 규격 용량은 **이 열화에
+            # 대한 척도가 아니다.**
+            #
+            # 그래서 세 구간으로 나눈다:
+            #   - 0.05 이하        ok        (셋 다 실측으로 읽힌 구간)
+            #   - 0.05 ~ 규격용량  borderline (읽힐 수도 있다)
+            #   - 규격용량 초과    impossible (어떤 리더도 못 읽는다)
+            #
+            # borderline을 넓게 두는 것이 핵심이다. 실측 절단점에 딱 맞추면
+            # `ok`가 정의상 100%가 되어 이 축이 아무것도 못 재게 된다 —
+            # 우리 디코더로 라벨을 만들고 그 라벨로 우리 디코더를 채점하는
+            # 순환이다. 불확실한 구간은 **불확실하다고 적는 것**이 맞다.
             cap = {"L": 0.07, "M": 0.15, "Q": 0.25, "H": 0.30}.get(
                 str(cphys.get("ec", "M")), 0.15)
             if str(cphys.get("sym", "")) == "DATA_MATRIX":
@@ -732,7 +757,7 @@ def classify_code(mod_px, cphys, fphys):
                 cap = 0.18
             if dmg_frac > cap:
                 mark(2, "x-damage")
-            elif dmg_frac > 0.7 * cap:
+            elif dmg_frac > 0.05:
                 mark(1, "b-damage")
         else:
             # 1D는 오류정정이 없는 대신 세로 여유가 있다 — 스캔 라인 한 줄만
