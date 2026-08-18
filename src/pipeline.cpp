@@ -2960,47 +2960,30 @@ double areaOf(const BBox& b) { return std::max(0.0, b.x1 - b.x0) * std::max(0.0,
  * 어긋나 있을 수 있다. 한쪽 넓이의 30%만 겹쳐도 같은 코드로 본다.
  * [[vscan-lite-low-confidence-1d]]
  */
-// 체크디짓이 규격상 **선택**인 심볼로지인가. 이런 코드는 해상도가 모자란
-// 판본에서 문법에 맞는 값이 우연히 만들어져도 걸러낼 장치가 없다.
-bool weakGrammar(Symbology s) {
-    switch (s) {
-        case Symbology::ITF: case Symbology::INDUSTRIAL_2OF5:
-        case Symbology::COOP_2OF5: case Symbology::CODABAR:
-        case Symbology::CODE39: case Symbology::CODE39_FULL_ASCII:
-        case Symbology::TRIOPTIC_CODE39: case Symbology::PHARMACODE:
-            return true;
-        default:
-            return false;
-    }
-}
-
 std::vector<PipelineResult> finalizeConfidence(std::vector<PipelineResult>&& h) {
     if (h.empty()) return std::move(h);
     /*
-     * [문법이 약한 심볼로지는 **단독일 때도** 버린다]
+     * [문법이 약한 심볼로지를 **단독일 때도** 버려 봤다 — 되돌렸다]
      *
-     * 강등 규칙은 "끝까지 이것뿐이면 그대로 돌려준다"였다. 없는 것보다
-     * 낫다고 봤기 때문이다. 풀테스트 세 번을 돌려 보니 그 판단이 ITF에서는
-     * 틀렸다 — 오디코딩 86건 중 **54건이 ITF**이고, 그 대부분이 "진짜 코드는
-     * 못 찾고 유령만 단독으로 나온" 경우다:
+     * 강등 규칙은 "끝까지 이것뿐이면 그대로 돌려준다"이다. 풀테스트에서
+     * 오디코딩 86건 중 54건이 ITF이고 대부분이 "진짜 코드는 못 찾고 유령만
+     * 단독으로 나온" 경우라, 체크디짓이 선택인 심볼로지는 단독이어도
+     * 버리는 쪽을 재봤다.
      *
-     *   ITF '681731'   <- 정답 '867935681731'
-     *   ITF '31803327' <- 정답 '7631803327'
+     * 실측(씨드 101/11, 각 9000장, 코드 29,892개):
      *
-     * 해상도가 모자란 판본에서는 좁은 요소들이 뭉개져 원본의 부분 수열이
-     * 문법에 맞는 값으로 나온다(§3.107). 체크디짓이 필수인 심볼로지는
-     * 그 값이 검산에서 걸리지만 ITF·Codabar·Code39·2of5는 걸러낼 장치가
-     * 없다. 그런 코드를 확신 없이 단독으로 돌려주는 것은 동전 던지기이고,
-     * 이 저장소의 우선순위(미검출 < 오디코딩)에서는 침묵이 맞다.
+     *   지금(단독이면 남김)   12,766코드   오디코딩 23
+     *   단독이어도 버림       12,452코드   오디코딩 21
      *
-     * 자체 검증이 되는 심볼로지(2D·Code128·EAN/UPC·Code93·DataBar)는
-     * 예전대로 남긴다 — 그쪽은 검산이 한 겹 더 있다.
+     * **검출을 314코드 내주고 오디코딩은 2건 줄었다**(n=23의 잡음 안).
+     * 값을 못 한다.
+     *
+     * 왜 안 줄었는지가 이 실측의 소득이다 — 그 ITF 유령들이 대부분
+     * lowConfidence로 **표시되지도 않는다**. 즉 좁은 요소가 2px 이상인
+     * 판본에서 나온다. §3.107에서 계측한 1.0px 사례는 한 장이었고, 그것을
+     * 전체의 기전으로 일반화한 것이 틀렸다. 유령의 기전은 나이퀴스트 미달
+     * 하나가 아니다.
      */
-    h.erase(std::remove_if(h.begin(), h.end(),
-        [](const PipelineResult& r) {
-            return r.lowConfidence && weakGrammar(r.symbol.symbology);
-        }), h.end());
-    if (h.empty()) return std::move(h);
     bool anyWeak = false, anyTrusted = false;
     for (const auto& r : h) (r.lowConfidence ? anyWeak : anyTrusted) = true;
     if (!anyWeak || !anyTrusted) return std::move(h);
