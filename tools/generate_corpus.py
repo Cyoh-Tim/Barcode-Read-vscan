@@ -1175,12 +1175,21 @@ def build_one(index, cfg):
     sev = float(rng.uniform(*prof["sev"]))
     tags = [cfg["difficulty"]]
 
-    # 코드 개수: 1개가 가장 흔하고, 다중도 충분히 섞는다
-    r = rng.random()
-    k = 1 if r < 0.40 else (int(rng.integers(2, 4)) if r < 0.70
-                            else (int(rng.integers(4, 7)) if r < 0.90
-                                  else int(rng.integers(7, cfg["max_codes"] + 1))))
-    k = max(1, min(k, cfg["max_codes"]))
+    # 코드 개수: 1개가 가장 흔하고, 다중도 충분히 섞는다.
+    #
+    # **--max-codes 0은 코드가 없는 프레임을 뜻한다**(유령 바닥 측정용).
+    # 난수 코퍼스와 **똑같은 배경/열화**를 거치되 코드만 없는 프레임이라,
+    # 여기서 나오는 것은 전부 유령이다. 기존 generate_clutter_empty.py는
+    # 열화 없는 배경 9장뿐이라 0.5%/장짜리 유령률을 볼 힘이 없다
+    # ([[vscan-lite-ghost-floor]]).
+    if cfg["max_codes"] <= 0:
+        k = 0
+    else:
+        r = rng.random()
+        k = 1 if r < 0.40 else (int(rng.integers(2, 4)) if r < 0.70
+                                else (int(rng.integers(4, 7)) if r < 0.90
+                                      else int(rng.integers(7, cfg["max_codes"] + 1))))
+        k = max(1, min(k, cfg["max_codes"]))
 
     style = str(rng.choice(["plain", "label", "warehouse", "falsepattern"],
                            p=[0.55, 0.15, 0.15, 0.15]))
@@ -1883,7 +1892,10 @@ def main():
     ap.add_argument("--difficulty", choices=sorted(DIFFICULTY), default="mixed")
     ap.add_argument("--width", type=int, default=2048)
     ap.add_argument("--height", type=int, default=1536)
-    ap.add_argument("--max-codes", type=int, default=12)
+    ap.add_argument("--max-codes", type=int, default=12,
+                    help="난수 모드 프레임당 최대 코드 수. **0이면 코드가 없는 "
+                         "프레임**을 만든다(배경/열화는 그대로) — 유령 바닥 측정용. "
+                         "그때는 --bucket empty 로 받는다")
     ap.add_argument("--symbologies", default="QR,QR,QR,CODE128,CODE128,EAN13,CODE39,ITF",
                     help="난수 모드 심볼로지. 중복해서 쓰면 그만큼 가중치가 올라간다")
     ap.add_argument("--sweep", action="append", default=[], metavar="AXIS:START:STOP:STEP",
@@ -1898,9 +1910,11 @@ def main():
                          "받는 쪽: ./verify_accuracy --stdin")
     ap.add_argument("--max-disk-gb", type=float, default=20.0,
                     help="파일 모드 용량 상한(GB). 예상치가 넘으면 시작하지 않는다")
-    ap.add_argument("--bucket", default="", metavar="ok|borderline|mixed|impossible",
+    ap.add_argument("--bucket", default="",
+                    metavar="ok|borderline|mixed|impossible|empty",
                     help="이 버킷만 내보낸다(쉼표로 여러 개). 스트리밍에서 "
-                         "'읽을 수 있어야 하는 것'만 채점할 때 --bucket ok")
+                         "'읽을 수 있어야 하는 것'만 채점할 때 --bucket ok. "
+                         "empty는 코드가 없는 프레임(--max-codes 0)이다")
     ap.add_argument("--fixed-canvas", action="store_true",
                     help="요청 모듈이 안 들어가도 캔버스를 넓히지 않는다(예전 동작). "
                          "**해상도 자체가 축일 때** 쓴다 — 안 쓰면 생성기가 "
