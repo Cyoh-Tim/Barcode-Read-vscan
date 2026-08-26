@@ -972,7 +972,11 @@ private:
     // fullFrameDecoders_를 따로 돌릴 때도 같은 것을 쓴다.
     static std::vector<PipelineResult> runDecoders(
         const std::vector<std::unique_ptr<IDecoder>>& ds, const GrayView& view, int yOffset);
-    static std::vector<PipelineResult> dedup(std::vector<PipelineResult> in);
+    // need: 호출자가 아는 코드 개수(min_expected_codes). 기하만으로는
+    // "한 코드의 두 밴드"와 "세로로 이웃한 같은 내용 라벨"을 못 가르는
+    // 자리가 있어서, 개수를 알려준 프레임에서만 좁은 판정으로 재시도한다.
+    // 기본값 1 = 예전 동작 그대로. [[vscan-lite-dedup-band-need]]
+    static std::vector<PipelineResult> dedup(std::vector<PipelineResult> in, int need = 1);
 
     // processView()의 실제 작업(타일링/병합). 공개 processView()는 이걸
     // 호출한 뒤 빈손이면 tryDeskewRescue1D()를 마저 시도하는 얇은

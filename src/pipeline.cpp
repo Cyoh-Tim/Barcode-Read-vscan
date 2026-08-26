@@ -24,6 +24,8 @@
 #include <cstring>
 #include <future>
 #include <thread>
+#include <map>
+#include <set>
 
 namespace vscan {
 
@@ -598,7 +600,7 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image, boo
         auto r = decodeTile(image, 0);
         auto ff = runDecoders(fullFrameDecoders_, image, 0);
         r.insert(r.end(), std::make_move_iterator(ff.begin()), std::make_move_iterator(ff.end()));
-        return dedup(std::move(r));
+        return dedup(std::move(r), std::max(1, cfg_.minExpectedCodes));
     }
 
     // 프레임을 수평 스트립으로 분할. 겹침(overlap)을 둬서 타일 경계에
@@ -656,10 +658,10 @@ std::vector<PipelineResult> Pipeline::processViewCore(const GrayView& image, boo
         // 부풀면 예산도 같이 부푼다. 그래서 processView()는 이 폴백을
         // 끄고 **구제 사다리의 한 칸으로** 따로 돌린다(예산 안에서).
         // [[vscan-lite-tile-large-code]]
-        return dedup(decodeTile(image, 0));
+        return dedup(decodeTile(image, 0), std::max(1, cfg_.minExpectedCodes));
     }
 
-    return dedup(std::move(merged));
+    return dedup(std::move(merged), std::max(1, cfg_.minExpectedCodes));
 }
 
 GrayView Pipeline::preprocessFrame(const GrayView& image) {
@@ -917,7 +919,7 @@ std::vector<PipelineResult> Pipeline::processView(const GrayView& image) {
                 hits.reserve(hits.size() + more.size());
                 for (auto& m : more)
                     if (selfChecking(m.symbol.symbology)) hits.push_back(std::move(m));
-                hits = dedup(std::move(hits));
+                hits = dedup(std::move(hits), std::max(1, cfg_.minExpectedCodes));
             }
         }
         return enough(hits);
@@ -2924,7 +2926,7 @@ std::vector<PipelineResult> Pipeline::decodeRegionsParallel(const GrayView& imag
         merged.insert(merged.end(), parts[i].begin(), parts[i].end());
     }
 
-    return dedup(std::move(merged));
+    return dedup(std::move(merged), std::max(1, cfg_.minExpectedCodes));
 }
 
 namespace {
@@ -3124,9 +3126,17 @@ bool isTwinBand(const BBox& a, const BBox& b) {
 // 한쪽이 밴드로만 읽혀야 하는데, 그 경우엔 애초에 그 한 장을 온전히
 // 본 것이 아니므로 합치는 쪽이 덜 틀린다.
 // [[vscan-lite-dedup-single-band]]
-bool isBandOfSameCode(const BBox& a, const BBox& b) {
-    auto band = [](double aLo, double aHi, double bLo, double bHi,   // 긴 축
-                   double cLo, double cHi, double dLo, double dHi) { // 두께 축
+//
+// [간격 상한이 두 단계인 이유 — 호출자가 알려주면 좁힌다]
+// `tight=false`(기본): 간격 상한이 **코드 길이**다. 아래 주석에 적힌 대로
+// 기하만으로는 "한 코드의 두 밴드"와 "세로로 이웃한 별개 코드"를 못 가르고,
+// 둘 중에서는 합치는 쪽(중복 0)을 택했다.
+// `tight=true`: 간격 상한을 **두께**로 좁힌다. 호출자가 min_expected_codes로
+// "이 프레임에 코드가 몇 개 있다"를 알려줬고 기본 상한으로는 그 개수에
+// 모자랄 때만 쓴다 — dedup()의 재시도 참고.
+bool isBandOfSameCode(const BBox& a, const BBox& b, bool tight = false) {
+    auto band = [tight](double aLo, double aHi, double bLo, double bHi,   // 긴 축
+                        double cLo, double cHi, double dLo, double dHi) { // 두께 축
         const double la = aHi - aLo, lb = bHi - bLo;
         const double ta = cHi - cLo, tb = dHi - dLo;
         if (la <= 0 || lb <= 0) return false;
@@ -3174,16 +3184,21 @@ bool isBandOfSameCode(const BBox& a, const BBox& b) {
          * 0.7/0.9)도 훑었는데 두 상황이 같은 구간에 들어가 분리가 안 된다.
          * 즉 **그림만으로는 판단할 수 없는 자리**다.
          *
-         * 그래서 예전 상한(길이)을 유지한다. 잃는 것은 "같은 내용 라벨이
-         * 세로로 촘촘히 여러 장" 붙은 프레임이고, 얻는 것은 중복 0이다.
-         * 이 저장소가 처음부터 택한 쪽이기도 하다(위 isTwinBand 주석).
+         * 그래서 기본 상한은 예전(길이) 그대로다. 잃는 것은 "같은 내용
+         * 라벨이 세로로 촘촘히 여러 장" 붙은 프레임이고, 얻는 것은 중복
+         * 0이다. 이 저장소가 처음부터 택한 쪽이기도 하다(위 isTwinBand 주석).
          *
-         * 제대로 고치는 길은 기하가 아니라 **호출자가 아는 것**이다 —
-         * min_expected_codes를 알려준 프레임에서 같은 텍스트가 서로 다른
-         * 자리에 그 개수만큼 있으면 합치지 말아야 한다. dedup에 need를
-         * 넘겨야 해서 서명이 바뀌므로 다음 작업으로 뺀다(§8).
+         * [그 다음 작업을 했다 — 조건이 맞을 때만 두께 상한으로 좁힌다]
+         * 위 표가 말하는 것은 "기하만 보면 못 가른다"이지 "못 가른다"가
+         * 아니다. (1) 호출자가 min_expected_codes로 개수를 알려줬고,
+         * (2) 기본 상한으로 그 개수에 못 미치며, (3) 느슨한 판정으로도
+         * 같은 텍스트가 2개 이상 살아남은 — 즉 "이 프레임에 같은 내용
+         * 라벨이 여럿 있다"가 이미 증명된 텍스트라면, 그때만 두께 상한을
+         * 쓴다. 셋 중 하나라도 아니면 예전과 **완전히 같은 경로**다.
+         * 자세한 실측은 dedup()의 재시도 주석에 있다.
+         * [[vscan-lite-dedup-band-need]]
          */
-        return gap <= std::min(la, lb);
+        return gap <= (tight ? std::max(ta, tb) : std::min(la, lb));
     };
     return band(a.x0, a.x1, b.x0, b.x1, a.y0, a.y1, b.y0, b.y1) ||
            band(a.y0, a.y1, b.y0, b.y1, a.x0, a.x1, b.x0, b.x1);
@@ -3324,7 +3339,10 @@ bool onSameBarcodeBand(const BBox& a, const BBox& b) {
 }
 
 namespace {
-std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
+// tightTexts: 이 텍스트들에 한해 isBandOfSameCode의 간격 상한을 두께로
+// 좁힌다(널이면 전부 예전 상한). 왜 텍스트별인지는 dedup() 주석 참고.
+std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in,
+                                      const std::set<std::string>* tightTexts) {
     // 겹치는 타일 경계에서 같은 코드가 두 번 검출될 수 있다.
     // 같은 심볼로지 + 같은 텍스트 + (겹침이 크거나 중심점이 가까우면) 하나만 남긴다.
     //
@@ -3447,7 +3465,8 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                 (sameText && isStackedBand(candBox, keptBox)) ||
                 (sameText && isThinSlice(candBox, keptBox)) ||
                 (sameText && isTwinBand(candBox, keptBox)) ||
-                (sameText && isBandOfSameCode(candBox, keptBox))) {
+                (sameText && isBandOfSameCode(candBox, keptBox,
+                                              tightTexts && tightTexts->count(cand.symbol.text)))) {
                 // [어느 규칙이 지웠는지 찍는다] VSCAN_DEDUP_DEBUG=1.
                 // 규칙이 여섯 개라 "왜 사라졌나"를 눈으로 못 쫓는다. 밀집
                 // 프레임의 체커보드 결함을 이 한 줄로 한 번에 특정했다 —
@@ -3465,7 +3484,8 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
                             (int)(sameText && isStackedBand(candBox, keptBox)),
                             (int)(sameText && isThinSlice(candBox, keptBox)),
                             (int)(sameText && isTwinBand(candBox, keptBox)),
-                            (int)(sameText && isBandOfSameCode(candBox, keptBox)));
+                            (int)(sameText && isBandOfSameCode(candBox, keptBox,
+                                      tightTexts && tightTexts->count(cand.symbol.text))));
                 isDup = true;
                 // 부분 스캔 관계면 **긴 쪽**을 남긴다(짧은 쪽이 잘린
                 // 결과다). 같은 텍스트면 기존대로 bbox가 넓은 쪽 —
@@ -3499,12 +3519,94 @@ std::vector<PipelineResult> dedupOnce(std::vector<PipelineResult> in) {
  * 한 번 더 돌리면 그때는 앵커가 긴 쪽이라 잡힌다. out이 몇 개짜리 벡터라
  * 반복 비용은 무시할 수 있다. 4회는 안전장치일 뿐 실제로는 2회에서 멈춘다.
  */
-std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in) {
-    for (int iter = 0; iter < 4; ++iter) {
-        const size_t before = in.size();
-        in = dedupOnce(std::move(in));
-        if (in.size() == before) break;
+std::vector<PipelineResult> Pipeline::dedup(std::vector<PipelineResult> in, int need) {
+    auto toFixedPoint = [](std::vector<PipelineResult> v, const std::set<std::string>* tight) {
+        for (int iter = 0; iter < 4; ++iter) {
+            const size_t before = v.size();
+            v = dedupOnce(std::move(v), tight);
+            if (v.size() == before) break;
+        }
+        return v;
+    };
+
+    /*
+     * [기하로 못 가르는 자리는 **호출자가 아는 개수**로 가른다]
+     *
+     * isBandOfSameCode의 간격 상한이 코드 길이라서, 같은 내용 라벨이
+     * 세로로 촘촘히 여러 장 붙은 프레임에서 이웃끼리 서로를 지운다.
+     * 실측: 같은 텍스트 PDF417을 4x4로 깔면 **4/16**만 남는다(맨 윗줄만
+     * 살아남는다 — dedup 84회 중 84회가 전부 이 규칙이었다).
+     * 두께 상한으로 좁히면 16/16이 되지만, 그러면 한 코드를 두 줄로 스쳐
+     * 지나간 밴드 쌍이 중복으로 나간다(§ 위 주석의 실측표: 두 상황의
+     * 상자 모양이 사실상 같아서 그림만으로는 판단할 수 없다).
+     *
+     * 그림으로 못 가르니 **개수**로 가른다. 호출자가 min_expected_codes로
+     * "이 프레임에 코드가 몇 개다"를 알려줬고, 기본(넉넉한) 상한을 쓴
+     * 결과가 그 개수에 못 미치면 — 못 미친 만큼은 이 규칙이 먹었을
+     * 가능성이 있다. 그때만 두께 상한으로 다시 돌린다.
+     *
+     * 다시 돌린 결과를 받아들이는 조건이 둘이다:
+     *   (1) 개수가 늘어야 한다 — 안 늘면 원인이 dedup이 아니다.
+     *   (2) need를 **넘지 않아야** 한다. 넘었다는 것은 두께 상한이
+     *       진짜 중복까지 살려냈다는 뜻이므로 그 결과는 못 믿는다.
+     * (2)가 이 프로젝트의 1번 규칙(미검출 < 오디코딩)을 지키는 자리다 —
+     * 중복은 호출자에게 "없는 물건이 하나 더 있다"고 말하는 것과 같다.
+     *
+     * need를 안 준 프레임(기본 min_expected_codes=0 -> need<=1)은 이
+     * 분기 자체를 안 탄다. 즉 예전 경로가 그대로다.
+     * [[vscan-lite-dedup-band-need]]
+     */
+    // 재시도는 **원본**에서 다시 돌려야 한다 — 한 번 합쳐진 결과를 다시
+    // 풀 수는 없기 때문이다. 그래서 need를 받은 프레임에서만 원본을
+    // 복사해 둔다(need<=1이면 복사도 안 한다).
+    std::vector<PipelineResult> raw;
+    if (need > 1) raw = in;
+    auto merged = toFixedPoint(std::move(in), nullptr);
+    if (need > 1 && static_cast<int>(merged.size()) < need) {
+        /*
+         * [어떤 텍스트에 좁은 상한을 쓸지는 **프레임이 이미 증명한 것**으로 고른다]
+         *
+         * 개수가 모자란다는 것만으로 전부 풀면 진짜 중복이 나간다. 실측
+         * (씨드 101 고정 코퍼스 300장)에서 두 건이 그렇게 새어나왔다:
+         *
+         *   c000167_4  CODE128 'ID-6Y.SO'
+         *       (877,964)-(1115,988)  238x24 / (876,1176)-(1115,1197) 239x21
+         *   c000299_10 EAN13 '3122459843278'
+         *       (1108,1084)-(1451,1122) 343x38 / (1108,1381)-(1451,1470) 343x89
+         *
+         * 둘 다 한 코드를 두 줄로 스쳐 지나간 밴드 쌍이다. 그런데 상자만
+         * 보면 밀집 격자의 이웃과 구분이 안 된다 — 같은 프레임의 **정상**
+         * EAN13 하나가 343x90으로, 위 밴드(343x89)와 사실상 같은 크기다.
+         * 개수 상한(strict.size() <= need)으로도 안 걸린다: c000299는
+         * 정확히 10개(=need)를 내면서 그 중 하나가 중복이었다.
+         *
+         * 가르는 것은 기하가 아니라 **그 프레임이 이미 보여준 사실**이다.
+         * 밀집 격자에서는 느슨한 판정으로도 같은 텍스트가 **여러 개**
+         * 살아남는다(4x4 PDF417은 가로 이웃 4개가 그대로 남는다 — 긴 축
+         * 정렬 조건에 안 걸리기 때문이다). 즉 "이 프레임에는 같은 내용
+         * 라벨이 실제로 여러 장 있다"가 이미 증명돼 있다. 위 두 오검출
+         * 프레임에서는 그 텍스트가 딱 하나뿐이다 — 반복 라벨이라는 증거가
+         * 없다.
+         *
+         * 그래서 **느슨한 결과에 이미 2개 이상 있는 텍스트**에만 좁은
+         * 상한을 적용한다. 증거가 없으면 예전대로 합친다(미검출 < 오디코딩).
+         * [[vscan-lite-dedup-band-need]]
+         */
+        std::map<std::string, int> seen;
+        for (const auto& r : merged) ++seen[r.symbol.text];
+        std::set<std::string> repeated;
+        for (const auto& kv : seen)
+            if (kv.second >= 2) repeated.insert(kv.first);
+
+        if (!repeated.empty()) {
+            auto strict = toFixedPoint(std::move(raw), &repeated);
+            // 개수 상한은 그대로 둔다 — 위 증거만으로는 부족했던 자리가
+            // 또 나오면 여기서 막힌다.
+            if (strict.size() > merged.size() && static_cast<int>(strict.size()) <= need)
+                merged = std::move(strict);
+        }
     }
+    in = std::move(merged);
 
     /*
      * [서로 어긋나는 쌍둥이 밴드는 **둘 다** 버린다]
